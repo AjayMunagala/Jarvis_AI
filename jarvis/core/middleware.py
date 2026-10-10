@@ -26,47 +26,57 @@ class RequestBodyLimitMiddleware:
         if content_length is not None:
             try:
                 if int(content_length) > self.max_body_bytes:
-                    await self._reject(send)
+                    await self._reject(scope, send)
                     return
             except ValueError:
                 # Let the ASGI server/framework handle malformed lengths.
                 pass
 
         bytes_received = 0
+        body_too_large = False
+        rejection_sent = False
 
         async def limited_receive() -> Message:
-            nonlocal bytes_received
+            nonlocal bytes_received, body_too_large
+            if body_too_large:
+                return {"type": "http.request", "body": b"", "more_body": False}
             message = await receive()
             if message["type"] == "http.request":
                 bytes_received += len(message.get("body", b""))
                 if bytes_received > self.max_body_bytes:
-                    raise RequestBodyTooLarge
+                    body_too_large = True
+                    return {"type": "http.request", "body": b"", "more_body": False}
             return message
 
-        try:
-            await self.app(scope, limited_receive, send)
-        except RequestBodyTooLarge:
-            await self._reject(send)
+        async def limited_send(message: Message) -> None:
+            nonlocal rejection_sent
+            if body_too_large:
+                if message["type"] == "http.response.start" and not rejection_sent:
+                    rejection_sent = True
+                    await self._reject(scope, send)
+                return
+            await send(message)
 
-    async def _reject(self, send: Send) -> None:
+        try:
+            await self.app(scope, limited_receive, limited_send)
+        except Exception:
+            if not body_too_large:
+                raise
+        if body_too_large and not rejection_sent:
+            await self._reject(scope, send)
+
+    async def _reject(self, scope: Scope, send: Send) -> None:
         body = json.dumps(
             {
                 "error": "request_too_large",
                 "detail": "Request body exceeds the configured size limit.",
             }
         ).encode("utf-8")
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 413,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"content-length", str(len(body)).encode("ascii")),
-                ],
-            }
-        )
+        headers = [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode("ascii")),
+        ]
+        if scope.get("http_version") in {"1.0", "1.1"}:
+            headers.append((b"connection", b"close"))
+        await send({"type": "http.response.start", "status": 413, "headers": headers})
         await send({"type": "http.response.body", "body": body})
-
-
-class RequestBodyTooLarge(Exception):
-    """Raised when streamed request data exceeds the configured limit."""

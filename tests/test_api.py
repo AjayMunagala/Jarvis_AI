@@ -1,3 +1,6 @@
+import io
+import logging
+
 from fastapi.testclient import TestClient
 
 from jarvis.core.config import Settings
@@ -16,14 +19,45 @@ def test_health_and_readiness_include_version():
 
 
 def test_demo_chat_returns_clear_structured_response():
+    marker = "private-message-marker"
     with client() as test_client:
-        response = test_client.post("/chat", json={"message": "Hello"})
+        response = test_client.post("/chat", json={"message": marker})
     assert response.status_code == 200
     assert response.json() == {
-        "reply": "This is a JARVIS demo response, not an AI-generated answer. I received: Hello",
+        "reply": f"This is a JARVIS demo response, not an AI-generated answer. I received: {marker}",
         "provider": "mock",
         "demo": True,
     }
+
+
+def test_chat_message_is_not_written_to_logs(caplog):
+    marker = "do-not-log-this-message"
+    with caplog.at_level("INFO", logger="jarvis"):
+        with client() as test_client:
+            response = test_client.post("/chat", json={"message": marker})
+    assert response.status_code == 200
+    assert any(
+        record.name == "jarvis.main" and record.getMessage() == "JARVIS starting"
+        for record in caplog.records
+    )
+    assert marker not in caplog.text
+
+
+def test_configure_logging_preserves_host_root_handlers():
+    from jarvis.core.logging_config import configure_logging
+
+    root = logging.getLogger()
+    original_handlers = tuple(root.handlers)
+    original_level = root.level
+    host_handler = logging.StreamHandler(io.StringIO())
+    root.addHandler(host_handler)
+    try:
+        configure_logging("INFO")
+        assert host_handler in root.handlers
+        assert tuple(handler for handler in root.handlers if handler is not host_handler) == original_handlers
+        assert root.level == original_level
+    finally:
+        root.removeHandler(host_handler)
 
 
 def test_invalid_chat_request_has_clear_error():
@@ -49,6 +83,12 @@ def test_provider_failure_is_sanitized(caplog):
         "detail": "The configured provider failed.",
     }
     assert "secret provider detail" not in response.text
+    assert "Chat provider failed" in caplog.text
+    assert any(
+        record.getMessage() == "Chat provider failed"
+        and getattr(record, "error_type", None) == "RuntimeError"
+        for record in caplog.records
+    )
     assert "secret provider detail" not in caplog.text
 
 
@@ -79,6 +119,19 @@ def test_message_limit_uses_validated_configuration():
     assert response.json()["error"] == "request_too_large"
 
 
+def test_message_limit_accepts_exact_boundary():
+    with client(max_message_length=5) as test_client:
+        response = test_client.post("/chat", json={"message": "hello"})
+    assert response.status_code == 200
+
+
+def test_schema_maximum_message_length_uses_413():
+    with client(max_message_length=20000) as test_client:
+        response = test_client.post("/chat", json={"message": "x" * 20001})
+    assert response.status_code == 413
+    assert response.json()["error"] == "request_too_large"
+
+
 def test_request_body_byte_limit_is_enforced():
     with client(max_request_body_bytes=1024) as test_client:
         response = test_client.post(
@@ -91,41 +144,61 @@ def test_request_body_byte_limit_is_enforced():
         "error": "request_too_large",
         "detail": "Request body exceeds the configured size limit.",
     }
+    assert response.headers["connection"] == "close"
 
 
 def test_request_body_byte_limit_applies_to_streamed_body_without_content_length():
-    import asyncio
+    def chunks():
+        yield b'{"message":"'
+        yield b"x" * 1100
+        yield b'"}'
 
-    from jarvis.core.middleware import RequestBodyLimitMiddleware
-
-    async def exercise_middleware():
-        sent = []
-        chunks = [
-            {"type": "http.request", "body": b"x" * 600, "more_body": True},
-            {"type": "http.request", "body": b"y" * 500, "more_body": False},
-        ]
-
-        async def app(scope, receive, send):
-            while (await receive())["more_body"]:
-                pass
-
-        async def receive():
-            return chunks.pop(0)
-
-        async def send(message):
-            sent.append(message)
-
-        middleware = RequestBodyLimitMiddleware(app, max_body_bytes=1024)
-        await middleware(
-            {"type": "http", "headers": []},
-            receive,
-            send,
+    with client(max_request_body_bytes=1024) as test_client:
+        response = test_client.post(
+            "/chat",
+            content=chunks(),
+            headers={"content-type": "application/json"},
         )
-        return sent
+    assert response.status_code == 413
+    assert response.json()["error"] == "request_too_large"
+    assert response.headers["connection"] == "close"
 
-    sent = asyncio.run(exercise_middleware())
-    assert sent[0]["status"] == 413
-    assert b"request_too_large" in sent[1]["body"]
+
+def test_extra_chat_fields_are_rejected():
+    with client() as test_client:
+        response = test_client.post("/chat", json={"message": "hi", "extra": 123})
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_request"
+
+
+def test_unexpected_error_has_sanitized_500_response(caplog):
+    from fastapi.testclient import TestClient
+
+    app = create_app(settings=Settings(environment="test"))
+
+    @app.get("/test-error")
+    async def trigger_error():
+        raise RuntimeError("private failure detail")
+
+    with caplog.at_level("ERROR", logger="jarvis"):
+        with TestClient(app, raise_server_exceptions=False) as test_client:
+            response = test_client.get("/test-error")
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": "internal_error",
+        "detail": "An unexpected server error occurred.",
+    }
+    assert "Unhandled application error" in caplog.text
+    assert "private failure detail" not in caplog.text
+
+
+def test_provider_router_rejects_unsupported_provider():
+    import pytest
+
+    from jarvis.intelligence.router import build_provider
+
+    with pytest.raises(ValueError, match="Unsupported provider"):
+        build_provider("unknown")
 
 
 def test_invalid_configuration_is_rejected():

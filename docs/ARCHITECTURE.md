@@ -6,7 +6,7 @@ This is a modular monolith. A single FastAPI process owns HTTP routing, configur
 
 - `jarvis/main.py`: application factory, validated startup settings, dependency construction, lifespan, and sanitized exception handling.
 - `jarvis/core/config.py`: Pydantic settings, environment loading, and validation.
-- `jarvis/core/logging_config.py`: structured JSON logs. Chat message contents and configuration secrets are not logged.
+- `jarvis/core/logging_config.py`: structured JSON logs on the application logger. It preserves root/host handlers and excludes chat contents and exception messages/tracebacks; exception type is retained for diagnosis without logging potentially sensitive details.
 - `jarvis/core/middleware.py`: caps HTTP request body bytes while receiving the request and returns a sanitized 413 response when exceeded.
 - `jarvis/api/routes/`: health/readiness and chat HTTP endpoints.
 - `jarvis/models/schemas.py`: public request and response contracts.
@@ -15,7 +15,7 @@ This is a modular monolith. A single FastAPI process owns HTTP routing, configur
 
 ## Request flow
 
-`POST /chat` is subject to the global request body byte ceiling, validates the message, enforces the configured character ceiling, delegates to the provider with a bounded timeout, and returns provider metadata. API errors use a common `error` and `detail` JSON envelope. Provider exceptions are logged by type only and exposed as generic errors. No arbitrary tools or external operations are available.
+`POST /chat` is subject to the global request body byte ceiling, validates the message, enforces the configured character ceiling, delegates to the provider with a bounded timeout, and returns provider metadata. API errors use a common `error` and `detail` JSON envelope. Oversized streamed request bodies are stopped and returned as 413; HTTP/1.x rejection responses request connection close so unread bytes cannot be reused as another request. Provider exceptions are logged by type only and exposed as generic errors. No arbitrary tools or external operations are available.
 
 ## Adding capabilities and providers
 

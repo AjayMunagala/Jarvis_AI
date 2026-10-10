@@ -2,7 +2,7 @@
 
 ## Current milestone
 
-JARVIS Core v0.1: offline FastAPI demo core. This repository began empty; the starter was created without replacing existing user files. Python 3.12.10 was available at implementation time. The workspace was not a Git repository.
+JARVIS Core v0.1: offline FastAPI demo core. This repository began empty; the starter was created without replacing existing user files. The project is now in Git on `main`; Python 3.12.10 is the verified Windows interpreter.
 
 ## Implemented
 
@@ -11,7 +11,8 @@ JARVIS Core v0.1: offline FastAPI demo core. This repository began empty; the st
 - Typed provider protocol and deterministic mock provider, clearly marked as demo output.
 - Configurable request body byte ceiling, message character length, and provider timeout; consistent sanitized API error envelopes.
 - JSON structured logging without chat text or credentials.
-- Tests for health/readiness, demo chat, invalid requests, provider failure, limits, and configuration validation.
+- Tests for health/readiness, demo chat, invalid requests, provider failure/timeouts, request/message limits, configuration validation, message log redaction/capture, root-handler preservation, unexpected errors, and provider selection.
+- Verified baseline: `python -m pytest -v` passes 17 tests. The installed test client emits a Starlette deprecation warning recommending `httpx2`.
 - Windows install/run/test instructions and architecture/roadmap docs.
 
 ## Project structure
@@ -24,6 +25,8 @@ See `jarvis/` for source, `tests/test_api.py` for tests, and `docs/` for archite
 - The `mock` provider is the only supported provider, intentionally requiring no network, key, or GPU.
 - Provider errors are generic in HTTP responses; message contents are not logged.
 - `Settings` validates `JARVIS_*` environment variables using Pydantic Settings. Message length has a 20,000-character hard schema ceiling; body bytes have a configurable 65,536-byte default and 1,024-to-1,048,576 range.
+- Logging intentionally omits exception messages and tracebacks to avoid leaking sensitive provider details; it records exception types. Debugging unexpected failures is therefore less detailed.
+- Uvicorn's base dependency supports reload through stat polling; `uvicorn[standard]` is optional for WatchFiles-based reload.
 
 ## Commands
 
@@ -32,15 +35,15 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
 python -m uvicorn jarvis.main:app --reload
-python -m pytest
+python -m pytest -v
 ```
 
 ## Known issues and limitations
 
 - Dependencies were not preinstalled in the initial environment; install from `pyproject.toml` before running.
 - No real LLM, persistence, auth, rate limiting, memory, tool execution, UI, or external integrations exist.
-- No Git metadata was present when the project was inspected.
 - Readiness currently indicates successful app construction, not dependency checks.
+- Provider timeouts use `asyncio.wait_for`, which cancels the provider coroutine; future async adapters must handle cancellation and release any held resources.
 
 ## Exact next milestone
 

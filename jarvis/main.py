@@ -49,6 +49,19 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        message_too_long = any(
+            error.get("type") == "string_too_long"
+            and error.get("loc") == ("body", "message")
+            for error in exc.errors()
+        )
+        if message_too_long:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": "request_too_large",
+                    "detail": "Message exceeds the maximum supported length.",
+                },
+            )
         return JSONResponse(
             status_code=422,
             content={"error": "invalid_request", "detail": "The request body is invalid."},

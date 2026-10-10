@@ -11,6 +11,10 @@ JARVIS is a modular foundation for a personal AI operating system. This first mi
 - Settings are validated at startup and JSON logs avoid request contents and secrets.
 - API errors use a JSON `{ "error": ..., "detail": ... }` envelope. Validation errors return 422, oversized requests return 413, provider failures return 502, provider timeouts return 504, and unexpected application errors return a generic 500.
 
+## Verification baseline
+
+The current Windows baseline uses Python 3.12.10. `python -m pytest -v` passes all 17 tests. The installed FastAPI/Starlette test client currently emits a deprecation warning recommending `httpx2`; it does not affect the test results.
+
 ## Not implemented yet
 
 There is no real LLM adapter, database, memory, planner, tool execution, approval system, frontend, account system, or external integration. The API never runs shell commands or external actions.
@@ -48,7 +52,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/chat -ContentType "app
 ## Run the tests
 
 ```powershell
-python -m pytest
+python -m pytest -v
 ```
 
 ## Select demo mode
@@ -67,8 +71,8 @@ HTTP contracts live in `jarvis/api/routes/`; request and response types live in 
 - `/ready` confirms that settings and the configured provider were constructed; it does not probe external dependencies. Setting `JARVIS_ENVIRONMENT=production` only changes the validated environment label and does not add authentication, rate limiting, or production hardening.
 - If `python` is not found, install Python 3.11+ and ensure the Python launcher/PATH is configured. If imports fail, activate `.venv` and run `python -m pip install -e ".[dev]"` again.
 - If port 8000 is occupied, pass `--port 8001` to uvicorn.
+- `--reload` works with Uvicorn's stat-based fallback when `watchfiles` is absent. Installing the optional `uvicorn[standard]` extra enables WatchFiles-based reload; the base dependency is sufficient to run the application.
 - The default message limit is 4,000 characters (configurable from 1 to 20,000 with `JARVIS_MAX_MESSAGE_LENGTH`). The whole HTTP body is limited to 65,536 bytes by default (configurable from 1,024 bytes to 1,048,576 bytes with `JARVIS_MAX_REQUEST_BODY_BYTES`). The message character limit is checked after JSON parsing; the body byte limit is applied while the body is received.
+- Messages longer than the configured limit, including messages beyond the 20,000-character schema ceiling, return 413. Other schema-invalid requests, including whitespace-only messages and extra fields, return 422.
 - Provider timeout defaults to 5 seconds and is configurable from greater than 0 up to 60 seconds with `JARVIS_REQUEST_TIMEOUT_SECONDS`.
 - `JARVIS_ENVIRONMENT` accepts `development`, `test`, or `production`; `JARVIS_LOG_LEVEL` accepts `DEBUG`, `INFO`, `WARNING`, or `ERROR`. `JARVIS_APP_NAME` sets the API title. Only `JARVIS_PROVIDER=mock` is currently supported.
-# Jarvis_AI
-"# Jarvis_AI" 

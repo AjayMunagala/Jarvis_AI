@@ -21,10 +21,15 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
+class JsonStreamHandler(logging.StreamHandler):
+    """Application-owned JSON handler that leaves host/root handlers intact."""
+
+
 def configure_logging(level: str) -> None:
-    handler = logging.StreamHandler()
-    handler.setFormatter(JsonFormatter())
-    root = logging.getLogger()
-    root.handlers.clear()
-    root.addHandler(handler)
-    root.setLevel(level)
+    app_logger = logging.getLogger("jarvis")
+    app_logger.setLevel(level)
+    app_logger.propagate = True
+    if not any(isinstance(handler, JsonStreamHandler) for handler in app_logger.handlers):
+        handler = JsonStreamHandler()
+        handler.setFormatter(JsonFormatter())
+        app_logger.addHandler(handler)
