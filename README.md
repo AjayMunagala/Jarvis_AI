@@ -29,7 +29,7 @@ There is no real LLM adapter, database, persistent memory, planner, tool executi
 ## Install on Windows (PowerShell)
 
 ```powershell
-py -3.12 -m venv .venv
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
