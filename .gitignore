@@ -11,6 +11,9 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+node_modules/
+coverage/
+*.tsbuildinfo
 dist/
 build/
 *.egg-info/

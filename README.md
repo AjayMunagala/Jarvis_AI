@@ -17,12 +17,13 @@ The current Windows baseline uses Python 3.12.10. `python -m pytest -v` passes a
 
 ## Not implemented yet
 
-There is no real LLM adapter, database, memory, planner, tool execution, approval system, frontend, account system, or external integration. The API never runs shell commands or external actions.
+There is no real LLM adapter, database, persistent memory, planner, tool execution, approval system, account system, or external integration. The frontend is a local React interface only; it does not persist conversations. The API never runs shell commands or external actions.
 
 ## Prerequisites
 
 - Windows 10/11 and Python 3.11 or newer (developed with Python 3.12.10).
 - PowerShell.
+- Node.js 22.12 or newer for the frontend (tested with Node 24.14.1).
 - No GPU or API credentials are needed for demo mode.
 
 ## Install on Windows (PowerShell)
@@ -53,6 +54,36 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/chat -ContentType "app
 
 ```powershell
 python -m pytest -v
+```
+
+## Run the web interface (Windows PowerShell)
+
+The React interface lives in `frontend/` and talks to the existing FastAPI `/chat` endpoint. The Vite development server proxies `/api/*` to `http://127.0.0.1:8000`; no backend CORS change is needed for local development.
+
+The page, icons, styles and fonts are bundled or use local system fonts; the interface does not fetch remote assets. npm needs access to the package registry only during dependency installation.
+
+In one PowerShell window, start the backend:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m uvicorn jarvis.main:app --reload
+```
+
+In a second PowerShell window, install and start the frontend:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open the URL printed by Vite (normally `http://localhost:5173`). To use a different backend origin with Vite, set `VITE_API_PROXY_TARGET` before starting the frontend, for example `$env:VITE_API_PROXY_TARGET = 'http://127.0.0.1:8001'`. `VITE_API_BASE_URL` can be set to an absolute API base URL for a direct browser connection; that requires the backend to allow the frontend origin through CORS. Neither variable is a secret. The UI sends each message to the mock provider and displays its actual demo reply; conversation history is only kept in memory for the open page.
+
+Run the frontend checks from `frontend/`:
+
+```powershell
+npm test -- --run
+npm run build
 ```
 
 ## Select demo mode
