@@ -10,7 +10,9 @@ from pydantic import SecretStr, ValidationError
 from jarvis.core.config import Settings
 from jarvis.main import create_app
 from jarvis.memory.base import MemoryPersistenceError
-from jarvis.memory.models import MemoryCreate, MemoryPage, MemoryRecord, MemoryUpdate
+from jarvis.memory.models import (
+    MemoryCreate, MemoryPage, MemoryRecord, MemoryRetrievalResult, MemoryUpdate, RetrievedMemory,
+)
 from jarvis.memory.retrieval import retrieve_context
 from jarvis.persistence.memory_postgres import PostgresMemoryRepository
 
@@ -38,8 +40,10 @@ class FakeMemoryRepository:
         self.records[record.id] = record
         return record
 
-    def list(self, *, limit=50, offset=0):
+    def list(self, *, limit=50, offset=0, category=None):
         items = tuple(sorted(self.records.values(), key=lambda item: (item.created_at, str(item.id)), reverse=True))
+        if category is not None:
+            items = tuple(item for item in items if item.category == category)
         page = items[offset:offset + limit]
         return MemoryPage(items=page, total=len(items), limit=limit, offset=offset, has_more=offset + len(page) < len(items))
 
@@ -84,6 +88,10 @@ def test_memory_schemas_enforce_content_and_patch_limits():
     with pytest.raises(ValidationError):
         MemoryUpdate(content=None)
     assert MemoryUpdate(category=None).model_fields_set == {"category"}
+    with pytest.raises(ValidationError):
+        MemoryRetrievalResult(records=(), outcome="success")
+    with pytest.raises(ValidationError):
+        MemoryRetrievalResult(records=(RetrievedMemory(id=uuid4(), content="context"),), outcome="fallback")
 
 
 def test_memory_api_crud_search_paging_and_missing_ids():
@@ -104,6 +112,13 @@ def test_memory_api_crud_search_paging_and_missing_ids():
         assert listed.status_code == 200
         assert listed.json()["total"] == 2
         assert listed.json()["has_more"] is True
+        filtered = client.get("/memories?category=notes&limit=1")
+        assert filtered.status_code == 200
+        assert filtered.json()["total"] == 1
+        assert filtered.json()["has_more"] is False
+        assert [item["category"] for item in filtered.json()["items"]] == ["notes"]
+        assert client.get("/memories?category=Notes").json()["total"] == 0
+        assert client.get("/memories?category=%20%20").status_code == 422
 
         searched = client.post("/memories/search", json={"query": "project memory", "limit": 1})
         assert searched.status_code == 200
@@ -171,6 +186,29 @@ def test_memory_api_duplicate_patch_and_delete_lifecycle():
         assert repeated_delete.status_code == 404
         assert repeated_delete.json()["error"] == "memory_not_found"
         assert client.get(f"/memories/{second_id}").status_code == 200
+
+
+def test_memory_category_filter_uses_exact_filtered_totals_and_pagination():
+    repository = FakeMemoryRepository([
+        memory_record(content="one", category="notes"),
+        memory_record(content="two", category="notes"),
+        memory_record(content="other case", category="Notes"),
+    ])
+    app = create_app(settings=Settings(environment="test"))
+    app.state.memory_repository = repository
+    with TestClient(app) as client:
+        first = client.get("/memories?category=notes&limit=1&offset=0")
+        second = client.get("/memories?category=notes&limit=1&offset=1")
+        exact = client.get("/memories?category=Notes&limit=10")
+        unfiltered = client.get("/memories?limit=10")
+        blank = client.get("/memories?category=%09%20")
+    assert first.status_code == second.status_code == exact.status_code == unfiltered.status_code == 200
+    assert first.json()["total"] == second.json()["total"] == 2
+    assert first.json()["has_more"] is True
+    assert second.json()["has_more"] is False
+    assert exact.json()["total"] == 1
+    assert unfiltered.json()["total"] == 3
+    assert blank.status_code == 422
 
 
 def test_memory_api_is_clear_when_persistence_is_disabled():
@@ -247,7 +285,8 @@ def test_retrieval_diagnostics_are_allowlisted_and_privacy_safe(caplog):
     records = retrieve_context(
         repository, query_sentinel, limit=3, execution_id="exec-success"
     )
-    assert len(records) == 1
+    assert records.outcome == "success"
+    assert len(records.records) == 1
     assert repository.calls == [(query_sentinel, 3, 0)]
     success = next(record for record in caplog.records if record.execution_id == "exec-success")
     assert success.outcome == "success"
@@ -255,7 +294,8 @@ def test_retrieval_diagnostics_are_allowlisted_and_privacy_safe(caplog):
     assert isinstance(success.duration_ms, float)
 
     empty = retrieve_context(FakeMemoryRepository(), "empty-query", limit=2, execution_id="exec-empty")
-    assert empty == ()
+    assert empty.outcome == "empty"
+    assert empty.records == ()
     empty_log = next(record for record in caplog.records if record.execution_id == "exec-empty")
     assert empty_log.outcome == "empty"
     assert empty_log.record_count == 0
@@ -267,7 +307,8 @@ def test_retrieval_diagnostics_are_allowlisted_and_privacy_safe(caplog):
     fallback = retrieve_context(
         BrokenRepository(), "error-query-sentinel", limit=3, execution_id="exec-fallback"
     )
-    assert fallback == ()
+    assert fallback.outcome == "fallback"
+    assert fallback.records == ()
     fallback_log = next(record for record in caplog.records if record.execution_id == "exec-fallback")
     assert fallback_log.outcome == "fallback"
     assert fallback_log.record_count == 0
@@ -303,8 +344,9 @@ def test_retrieval_enforces_five_record_maximum_even_for_untrusted_repository():
     repository = OversizedRepository()
     result = retrieve_context(repository, "memory", limit=20, execution_id="exec-bounded")
     assert repository.requested_limit == 5
-    assert len(result) == 5
-    assert len(result) <= 5
+    assert result.outcome == "success"
+    assert len(result.records) == 5
+    assert len(result.records) <= 5
 
 
 def test_retrieval_context_is_delimited_as_untrusted_provider_data():
@@ -388,6 +430,8 @@ def test_chat_does_not_automatically_create_memory_and_retrieves_only_when_enabl
         response = client.post("/chat", json={"message": "local preference"})
 
     assert response.status_code == 200
+    assert response.json()["memory_context"]["outcome"] == "success"
+    assert response.json()["memory_context"]["memory_ids"] == [str(memory.id)]
     assert memory_repository.calls == [("local preference", 3, 0)]
     assert memory_repository.create_calls == 0
     assert chat_repository.saved[0] == "local preference"
@@ -416,8 +460,27 @@ def test_chat_does_not_search_memories_when_retrieval_is_disabled():
         response = client.post("/chat", json={"message": "local preference"})
 
     assert response.status_code == 200
+    assert response.json()["memory_context"] is None
     assert memory_repository.calls == []
     assert provider.messages == ["local preference"]
+
+
+def test_chat_reports_successful_empty_memory_retrieval_separately_from_fallback():
+    settings = Settings(
+        _env_file=None, environment="test", persistence_enabled=True,
+        persistence_database_url=SecretStr("postgresql://user@localhost/jarvis"),
+        memory_retrieval_enabled=True,
+    )
+    app = create_app(settings=settings)
+    app.state.memory_repository = FakeMemoryRepository()
+    app.state.conversation_repository = type(
+        "ConversationRepository", (),
+        {"save_exchange": lambda self, user, assistant, conversation_id=None: conversation_id},
+    )()
+    with TestClient(app) as client:
+        response = client.post("/chat", json={"message": "no matching saved memory"})
+    assert response.status_code == 200
+    assert response.json()["memory_context"] == {"outcome": "empty", "memory_ids": []}
 
 
 def test_chat_falls_back_without_memory_when_retrieval_fails():
@@ -455,6 +518,7 @@ def test_chat_falls_back_without_memory_when_retrieval_fails():
 
     assert response.status_code == 200
     assert response.json()["reply"].startswith("stateless fallback answer")
+    assert response.json()["memory_context"] == {"outcome": "fallback", "memory_ids": []}
     assert provider.messages == ["ordinary request"]
 
 
@@ -516,6 +580,13 @@ def test_postgres_memory_create_and_list_are_parameterized_and_bounded():
     assert page.total == 2 and page.has_more is False
     assert connection.calls[-1][1] == (1, 1)
     assert "ORDER BY created_at DESC, id ASC" in connection.calls[-1][0]
+
+    filtered = repository.list(limit=1, offset=0, category="notes")
+    assert filtered.total == 2 and filtered.has_more is True
+    count_query, count_parameters = connection.calls[-2]
+    page_query, page_parameters = connection.calls[-1]
+    assert "WHERE category = %s" in count_query and count_parameters == ("notes",)
+    assert "WHERE category = %s" in page_query and page_parameters == ("notes", 1, 0)
 
 
 def test_postgres_memory_search_binds_query_and_uses_deterministic_ranking():

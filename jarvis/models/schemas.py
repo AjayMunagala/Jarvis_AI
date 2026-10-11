@@ -14,12 +14,18 @@ class ChatRequest(BaseModel):
     conversation_id: UUID | None = None
 
 
+class ChatMemoryContext(BaseModel):
+    outcome: Literal["success", "empty", "fallback"]
+    memory_ids: list[UUID]
+
+
 class ChatResponse(BaseModel):
     reply: str
     provider: str
     demo: bool
     partial: bool = False
     conversation_id: UUID | None = None
+    memory_context: ChatMemoryContext | None = None
 
 
 class ConversationHistoryResponse(BaseModel):

@@ -47,14 +47,14 @@ npm run build
 ## Current limits
 
 - Intent classification and planning are deterministic, not model-driven. The configured personas share one provider; AnalysisExpert and ValidationExpert have distinct model instructions and structured contracts. In mock mode the instructions are ignored and responses are deterministic demo text with `not_evaluated` structured placeholders, not model reasoning.
-- The only configured tool list is empty. Tool execution, permission/approval gateway, persistent audit storage, authentication, and external integrations are not implemented. Conversation persistence is opt-in; v0.7 can link exchanges by conversation ID and read bounded history pages, but has no user ownership or frontend history UI. Core v0.9 adds explicit memory CRUD and lexical search, but no semantic retrieval, embeddings, pgvector, automatic extraction, retention scheduler, memory audit history, or per-user ownership.
+- The only configured tool list is empty. Tool execution, permission/approval gateway, persistent audit storage, authentication, and external integrations are not implemented. Conversation persistence is opt-in; v0.7 can link exchanges by conversation ID and read bounded history pages, but has no user ownership or frontend history UI. Core v0.9 adds explicit memory CRUD and lexical search, but no semantic retrieval, embeddings, pgvector, automatic extraction, retention scheduler, memory audit history, or per-user ownership. Core v1.1 adds a local memory-management interface.
 - `/ready` confirms successful settings/provider/orchestrator construction; it does not probe external systems.
 - The default provider runs without a GPU, API key, or internet. Frontend conversation state is in-memory only.
 - OpenAI selection requires `JARVIS_OPENAI_API_KEY`; setting it does not fall back to mock if calls fail. Requests send user message content to the configured endpoint and may incur charges. No live provider call was performed during tests.
 - Analysis and validation require an endpoint/model that supports strict Chat Completions JSON Schema output. Unsupported-schema behavior is verified using mocked HTTP responses; live compatibility, model quality, and network connectivity remain unverified.
 - Provider cancellation is performed by `asyncio.wait_for`; future asynchronous adapters must release resources when cancelled.
 - The PostgreSQL foundation and its restore drill are documented in `database/README.md`; operational use still requires confirming the user's local server configuration and restore target.
-- Persistence can link multiple exchanges with a client-supplied conversation ID and expose bounded history pages. Core v0.9 adds explicit global memory CRUD and lexical search. Multi-user ownership, authentication, and frontend history/memory UI are not implemented.
+- Persistence can link multiple exchanges with a client-supplied conversation ID and expose bounded history pages. Core v0.9 adds explicit global memory CRUD and lexical search. Multi-user ownership, authentication, and frontend conversation-history UI are not implemented. Core v1.1 adds a frontend memory manager.
 
 ## Verification on this working tree
 
@@ -87,4 +87,13 @@ Verification on Windows/Python 3.12.10: the full Python suite passed 143 tests; 
 
 ## Next work
 
-Core v1.0 should measure lexical ranking against a small explicit PostgreSQL regression corpus, lock down duplicate/PATCH/delete behavior, and add privacy-safe retrieval outcome diagnostics. No schema change is expected. Keep memory local/trusted: authentication and per-user ownership are still absent. Live OpenAI connectivity, strict-schema compatibility against a live endpoint, and semantic model quality remain unverified. Preserve the roadmap's longer-term goals and do not infer that future tools, embeddings, model-driven planning, or actions exist from current configuration interfaces.
+Core v1.0 completed lexical ranking regression coverage, duplicate/PATCH/delete semantics, and privacy-safe retrieval outcome diagnostics. Keep memory local/trusted: authentication and per-user ownership are still absent. Live OpenAI connectivity, strict-schema compatibility against a live endpoint, and semantic model quality remain unverified. Preserve the roadmap's longer-term goals and do not infer that future tools, embeddings, model-driven planning, or actions exist from current configuration interfaces.
+
+## Core v1.1 — Memory management and chat transparency
+
+The local React UI now includes a memory manager backed by the existing explicit CRUD and lexical search API. It supports paginated listing, exact category filtering, search, manual creation, editing (including clearing optional category/source fields), and confirmed permanent deletion. The screen explains that the API is unauthenticated and has no per-user ownership; keep it restricted to a trusted local environment. Persistence-disabled responses are surfaced as a clear setup message.
+
+When chat retrieval is enabled, `/chat` adds `memory_context` with an outcome (`success`, `empty`, or `fallback`) and IDs of records actually supplied to the provider. With retrieval disabled the field is `null`. The UI can inspect those IDs in the manager and handles records that have since been deleted; it does not claim to show a historical snapshot. Memory content, IDs, query text, and metadata remain excluded from retrieval diagnostic logs. No migration or new dependency was added. Live PostgreSQL integration and live model behavior require the existing opt-in setup and were not inferred from offline tests.
+
+
+Core v1.1 verification on this working tree: full offline Python suite 147 passed; focused memory suite 17 passed; compileall passed; frontend suite 25 passed; production build and git diff --check passed. Live PostgreSQL integration tests were not run because opt-in environment variables were unset, and no live OpenAI request was made. The Starlette TestClient deprecation warning recommending httpx2 remains.

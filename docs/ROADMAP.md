@@ -69,14 +69,21 @@ API and repository behavior is covered with controlled repository/connection dou
 
 The local PostgreSQL 18 integration suite passed 11/11 tests (5 URL guard cases and 6 live database cases). The generated database was removed. See the verification note in `docs/HANDOFF.md` for the environment and remaining deployment limitations.
 
-## Core v1.0 — Memory Retrieval Quality and Lifecycle (in progress)
+## Core v1.0 — Memory Retrieval Quality and Lifecycle (implemented)
 
 - Define a small deterministic PostgreSQL corpus for lexical search regression tests. Assert explicitly relevant IDs, ranking/tie behavior, pagination, and no-match results; this is a regression fixture, not a general relevance benchmark.
 - Specify duplicate, PATCH/null, timestamp, and permanent-delete semantics with API, repository, and opt-in PostgreSQL integration coverage.
 - Emit metadata-only retrieval diagnostics for success, empty results, and fallback with execution ID, duration, and returned count. Never log queries, memory fields/IDs, credentials, or exception details.
 - Preserve explicit API-only memory creation, retrieval-off-by-default, the five-record maximum, untrusted-context framing, and the existing public API contract.
 
-No migration or dependency is planned. Authentication, per-user ownership, embeddings, pgvector, automatic extraction, schedulers, and frontend controls remain excluded; the memory API remains unsuitable for shared/untrusted deployments.
+No migration or dependency is planned. Authentication, per-user ownership, embeddings, pgvector, automatic extraction, and schedulers remain excluded; the memory API remains unsuitable for shared/untrusted deployments.
+
+## Core v1.1 — Memory Management and User Control (implemented)
+
+- Add exact category filtering to memory listing with filtered count and pagination semantics; reject blank categories.
+- Add an accessible local memory manager for paginated inspection, lexical search, explicit create/edit, optional metadata clearing, and confirmed permanent deletion.
+- Add IDs-only chat retrieval metadata for success, empty, fallback, and disabled outcomes; allow navigation to current records and gracefully report stale IDs without claiming a snapshot.
+- Preserve unauthenticated/local-only warnings, opt-in retrieval, explicit-only memory creation, the five-record bound, untrusted context framing, and offline mock operation. No schema migration or dependency was required.
 
 ## Core v0.9 — Persistent Memory and Retrieval Foundation (implemented; verified locally)
 
@@ -86,7 +93,7 @@ No migration or dependency is planned. Authentication, per-user ownership, embed
 - Preserve offline mock startup and ordinary chat when persistence is disabled. Memory API operations return sanitized 503 when storage is unavailable.
 - Document that the memory API is global and unauthenticated and must not be exposed to untrusted/shared deployments; UUIDs do not grant ownership or authorization.
 
-Verification on Windows/Python 3.12.10: 143 default Python tests and 13 focused memory tests passed; the opt-in PostgreSQL integration suite passed 12/12 (5 URL checks and 7 live PostgreSQL cases); compileall, 16 frontend tests, the production build, and `git diff --check` passed. Live OpenAI behavior and semantic quality remain unverified. The milestone adds no account/ownership model, embedding generation, pgvector, automatic memory extraction, retention scheduler, memory audit history, or frontend memory controls.
+Verification on Windows/Python 3.12.10: 143 default Python tests and 13 focused memory tests passed; the opt-in PostgreSQL integration suite passed 12/12 (5 URL checks and 7 live PostgreSQL cases); compileall, 16 frontend tests, the production build, and `git diff --check` passed. Live OpenAI behavior and semantic quality remain unverified. The milestone adds no account/ownership model, embedding generation, pgvector, automatic memory extraction, retention scheduler, memory audit history, or authentication/ownership controls.
 
 ## Later milestones
 

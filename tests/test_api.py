@@ -32,11 +32,12 @@ def test_demo_chat_returns_clear_structured_response():
         "demo": True,
         "partial": False,
         "conversation_id": None,
+        "memory_context": None,
     }
     assert len(response.headers["x-jarvis-execution-id"]) == 32
 
 
-def test_optional_persistence_saves_user_and_assistant_without_changing_response():
+def test_optional_persistence_saves_exchange_with_additive_chat_metadata():
     class Repository:
         def __init__(self):
             self.saved = None
@@ -279,6 +280,7 @@ def test_chat_returns_partial_status_with_useful_expert_output():
         "demo": True,
         "partial": True,
         "conversation_id": None,
+        "memory_context": None,
     }
 
 

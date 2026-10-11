@@ -4,7 +4,8 @@ import {
   Clock3, Command, Cpu, FileText, Folder, Menu, MessageSquare, Plus, Search,
   Settings2, ShieldCheck, Sparkles, X,
 } from 'lucide-react'
-import { sendChatMessage } from './services/api'
+import { sendChatMessage, type ChatMemoryContext } from './services/api'
+import MemoryManager from './components/MemoryManager'
 
 const MAX_MESSAGE_LENGTH = 4000
 
@@ -17,6 +18,7 @@ type Message = {
   provider?: string
   demo?: boolean
   partial?: boolean
+  memoryContext?: ChatMemoryContext | null
 }
 
 type Conversation = {
@@ -60,6 +62,8 @@ export default function App() {
   const [pending, setPending] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [notice, setNotice] = useState('')
+  const [activeView, setActiveView] = useState<'Chat' | 'Memory'>('Chat')
+  const [inspectMemoryIds, setInspectMemoryIds] = useState<string[]>([])
   const [providerInfo, setProviderInfo] = useState<{ provider: string; demo: boolean } | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -81,6 +85,7 @@ export default function App() {
     setDraft('')
     setMobileMenuOpen(false)
     setNotice('')
+    setActiveView('Chat')
     inputRef.current?.focus()
   }, [])
 
@@ -134,7 +139,7 @@ export default function App() {
       const result = await sendChatMessage(text)
       setProviderInfo({ provider: result.provider, demo: result.demo })
       setConversations((current) => current.map((conversation) => conversation.id === conversationId
-        ? { ...conversation, updatedAt: Date.now(), messages: [...conversation.messages.filter((message) => !(retryMessageId && message.id === retryMessageId)), { id: createId(), role: 'assistant', content: result.reply, provider: result.provider, demo: result.demo, partial: result.partial }] }
+        ? { ...conversation, updatedAt: Date.now(), messages: [...conversation.messages.filter((message) => !(retryMessageId && message.id === retryMessageId)), { id: createId(), role: 'assistant', content: result.reply, provider: result.provider, demo: result.demo, partial: result.partial, memoryContext: result.memory_context }] }
         : conversation))
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'Something went wrong. Please try again.'
@@ -164,8 +169,10 @@ export default function App() {
   }
 
   function selectNav(label: string) {
-    if (label === 'Chat') {
+    if (label === 'Chat' || label === 'Memory') {
+      setActiveView(label)
       setNotice('')
+      setMobileMenuOpen(false)
       return
     }
     setNotice(`${label} is coming soon. This section is not available in this version.`)
@@ -190,17 +197,19 @@ export default function App() {
 
         <div className="sidebar-section-label">WORKSPACE</div>
         <nav className="primary-nav">
-          {navItems.map(({ label, icon: Icon, active }) => (
-            <button key={label} className={`nav-item ${active ? 'nav-active' : ''}`} onClick={() => selectNav(label)} aria-current={active ? 'page' : undefined}>
-              <Icon size={17} strokeWidth={1.8} /><span>{label}</span>{!active && <span className="nav-soon">SOON</span>}
+          {navItems.map(({ label, icon: Icon }) => {
+            const active = label === activeView
+            const available = label === 'Chat' || label === 'Memory'
+            return <button key={label} className={`nav-item ${active ? 'nav-active' : ''}`} onClick={() => selectNav(label)} aria-current={active ? 'page' : undefined}>
+              <Icon size={17} strokeWidth={1.8} /><span>{label}</span>{!available && <span className="nav-soon">SOON</span>}
             </button>
-          ))}
+          })}
         </nav>
 
         <div className="history-heading"><span className="sidebar-section-label">RECENT</span><ChevronDown size={14} /></div>
         <div className="history-list">
           {sortedConversations.length ? sortedConversations.map((conversation) => (
-            <button key={conversation.id} className={`history-item ${activeId === conversation.id ? 'history-active' : ''}`} onClick={() => { setActiveId(conversation.id); setMobileMenuOpen(false); setNotice('') }}>
+            <button key={conversation.id} className={`history-item ${activeId === conversation.id ? 'history-active' : ''}`} onClick={() => { setActiveId(conversation.id); setActiveView('Chat'); setMobileMenuOpen(false); setNotice('') }}>
               <MessageSquare size={15} /><span className="history-title">{conversation.title}</span><span className="history-date">{formatTime(conversation.updatedAt)}</span>
             </button>
           )) : <p className="history-empty">Your conversations will appear here.</p>}
@@ -216,11 +225,11 @@ export default function App() {
 
       <main className="main-panel">
         <header className="topbar">
-          <div className="topbar-left"><button className="icon-button mobile-menu-button" aria-label="Open navigation" onClick={() => setMobileMenuOpen(true)}><Menu size={20} /></button><div className="breadcrumb"><span>Workspace</span><span className="breadcrumb-sep">/</span><strong>Chat</strong></div></div>
+          <div className="topbar-left"><button className="icon-button mobile-menu-button" aria-label="Open navigation" onClick={() => setMobileMenuOpen(true)}><Menu size={20} /></button><div className="breadcrumb"><span>Workspace</span><span className="breadcrumb-sep">/</span><strong>{activeView}</strong></div></div>
           <div className="topbar-right"><div className="provider-pill"><span className="provider-dot" /><span>{providerInfo ? `${providerInfo.demo ? 'DEMO' : 'MODEL'} · ${providerInfo.provider.toUpperCase()}` : 'PROVIDER MODE'}</span></div><span className="topbar-divider" /><div className="system-status"><span className="status-ring"><Check size={11} /></span><span>System ready</span></div></div>
         </header>
 
-        <div className={`content-area ${messages.length ? 'has-messages' : ''}`}>
+        {activeView === 'Memory' ? <div className="content-area"><MemoryManager inspectIds={inspectMemoryIds} /></div> : <><div className={`content-area ${messages.length ? 'has-messages' : ''}`}>
           {notice && <div className="notice-banner" role="status"><CircleHelp size={16} /><span>{notice}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => setNotice('')}><X size={15} /></button></div>}
           {!messages.length ? (
             <section className="welcome-view" aria-label="Welcome to JARVIS">
@@ -239,7 +248,7 @@ export default function App() {
               <div className="message-list">
                 {messages.map((message) => <article key={message.id} className={`message-row ${message.role === 'user' ? 'message-user' : 'message-assistant'}`}>
                   {message.role === 'assistant' && <div className="message-avatar"><span>J</span></div>}
-                  <div className="message-content-wrap"><div className="message-label">{message.role === 'user' ? 'YOU' : 'JARVIS'}{message.role === 'assistant' && message.provider && <span className="message-demo-tag">{message.demo ? 'DEMO' : 'MODEL'} · {message.provider.toUpperCase()}</span>}{message.partial && <span className="message-partial-tag">PARTIAL RESULT</span>}</div><div className={`message-bubble ${message.error ? 'message-error' : ''}`}>{message.content}</div>{message.error && <button className="retry-button" onClick={() => void submitMessage(message.retryText ?? '', message.id)}><Activity size={13} /> Try again</button>}</div>
+                  <div className="message-content-wrap"><div className="message-label">{message.role === 'user' ? 'YOU' : 'JARVIS'}{message.role === 'assistant' && message.provider && <span className="message-demo-tag">{message.demo ? 'DEMO' : 'MODEL'} · {message.provider.toUpperCase()}</span>}{message.partial && <span className="message-partial-tag">PARTIAL RESULT</span>}</div><div className={`message-bubble ${message.error ? 'message-error' : ''}`}>{message.content}</div>{message.memoryContext && <button className="memory-context-link" type="button" onClick={() => { setInspectMemoryIds(message.memoryContext?.memory_ids ?? []); setActiveView('Memory') }}>Memory context · {message.memoryContext.outcome} · {message.memoryContext.memory_ids.length} record(s){message.memoryContext.memory_ids.length > 0 ? ` · ${message.memoryContext.memory_ids.join(', ')}` : ''}</button>}{message.error && <button className="retry-button" onClick={() => void submitMessage(message.retryText ?? '', message.id)}><Activity size={13} /> Try again</button>}</div>
                   {message.role === 'user' && <div className="user-avatar">A</div>}
                 </article>)}
                 {pending && <div className="message-row message-assistant" role="status" aria-label="JARVIS is responding"><div className="message-avatar"><span>J</span></div><div className="message-content-wrap"><div className="message-label">JARVIS</div><div className="typing-bubble"><span /><span /><span /><small>Thinking</small></div></div></div>}
@@ -255,7 +264,7 @@ export default function App() {
             <div className="composer-bottom"><div className="composer-hint"><span className="hint-key">↵</span> to send <span className="hint-separator">·</span> <span className="hint-key">⇧ ↵</span> for new line <span className="hint-separator">·</span> Provider mode is shown on each reply</div><div className="composer-actions"><span className="char-count">{draft.length > 0 ? `${draft.length}/${MAX_MESSAGE_LENGTH}` : ''}</span><button type="submit" className="send-button" aria-label="Send message" disabled={!draft.trim() || pending || draft.trim().length > MAX_MESSAGE_LENGTH}><ArrowUp size={18} strokeWidth={2.3} /></button></div></div>
           </form>
           <div className="composer-footer"><span><ShieldCheck size={12} /> Private to this session</span><span><Clock3 size={12} /> No history is saved after closing</span></div>
-        </div>
+        </div></>}
       </main>
     </div>
   )

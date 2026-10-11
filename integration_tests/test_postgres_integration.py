@@ -19,6 +19,7 @@ from jarvis.core.config import Settings
 from jarvis.main import create_app
 from jarvis.persistence.base import ConversationNotFound, PersistenceError
 from jarvis.persistence.postgres import PostgresConversationRepository
+from jarvis.persistence.memory_postgres import PostgresMemoryRepository
 
 
 RUN_INTEGRATION = "JARVIS_RUN_POSTGRES_INTEGRATION"
@@ -75,6 +76,9 @@ class IsolatedPostgres:
 
     def repository(self) -> PostgresConversationRepository:
         return PostgresConversationRepository(self.database_url, connect_timeout_seconds=3)
+
+    def memory_repository(self) -> PostgresMemoryRepository:
+        return PostgresMemoryRepository(self.database_url, connect_timeout_seconds=3)
 
     def client(self) -> TestClient:
         settings = Settings(
@@ -336,6 +340,27 @@ def test_chat_creates_continues_and_reads_history_across_pages(isolated_postgres
             for page in all_pages
             for message in page["messages"]
         )
+
+
+def test_memory_category_filter_is_exact_and_paginates_filtered_results(isolated_postgres):
+    repository = isolated_postgres.memory_repository()
+    first = repository.create("first filtered category record", category="v1.1-notes")
+    second = repository.create("second filtered category record", category="v1.1-notes")
+    repository.create("unrelated category record", category="V1.1-notes")
+    with isolated_postgres.client() as client:
+        page_one = client.get("/memories?category=v1.1-notes&limit=1&offset=0")
+        page_two = client.get("/memories?category=v1.1-notes&limit=1&offset=1")
+        wrong_case = client.get("/memories?category=V1.1-notes&limit=10")
+        blank = client.get("/memories?category=%20%20")
+    assert page_one.status_code == page_two.status_code == wrong_case.status_code == 200
+    assert page_one.json()["total"] == page_two.json()["total"] == 2
+    assert page_one.json()["has_more"] is True
+    assert page_two.json()["has_more"] is False
+    page_ids = [page_one.json()["items"][0]["id"], page_two.json()["items"][0]["id"]]
+    assert set(page_ids) == {str(first.id), str(second.id)}
+    assert len(set(page_ids)) == 2
+    assert wrong_case.json()["total"] == 1
+    assert blank.status_code == 422
 
 
 def test_unknown_conversation_is_not_created(isolated_postgres):

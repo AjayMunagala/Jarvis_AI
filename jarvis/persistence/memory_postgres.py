@@ -58,17 +58,24 @@ class PostgresMemoryRepository:
         except Exception as exc:
             raise MemoryPersistenceError() from exc
 
-    def list(self, *, limit: int = 50, offset: int = 0) -> MemoryPage:
+    def list(self, *, limit: int = 50, offset: int = 0, category: str | None = None) -> MemoryPage:
         try:
             with self._open_connection() as connection:
-                total = connection.execute(
-                    "SELECT count(*) FROM jarvis_app.memories"
-                ).fetchone()[0]
-                rows = connection.execute(
-                    f"""SELECT {_RETURNING} FROM jarvis_app.memories
-                        ORDER BY created_at DESC, id ASC LIMIT %s OFFSET %s""",
-                    (limit, offset),
-                ).fetchall()
+                if category is None:
+                    total = connection.execute("SELECT count(*) FROM jarvis_app.memories").fetchone()[0]
+                    rows = connection.execute(
+                        f"""SELECT {_RETURNING} FROM jarvis_app.memories
+                            ORDER BY created_at DESC, id ASC LIMIT %s OFFSET %s""", (limit, offset),
+                    ).fetchall()
+                else:
+                    total = connection.execute(
+                        "SELECT count(*) FROM jarvis_app.memories WHERE category = %s", (category,),
+                    ).fetchone()[0]
+                    rows = connection.execute(
+                        f"""SELECT {_RETURNING} FROM jarvis_app.memories WHERE category = %s
+                            ORDER BY created_at DESC, id ASC LIMIT %s OFFSET %s""",
+                        (category, limit, offset),
+                    ).fetchall()
             items = tuple(self._record(row) for row in rows)
             return MemoryPage(
                 items=items, total=total, limit=limit, offset=offset,

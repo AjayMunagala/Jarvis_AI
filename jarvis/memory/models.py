@@ -1,6 +1,7 @@
 """Validated contracts for explicitly managed long-term memories."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator, model_validator
@@ -92,3 +93,16 @@ class RetrievedMemory(MemoryContract):
     id: UUID
     category: StrictStr | None = None
     content: StrictStr = Field(min_length=1, max_length=MAX_MEMORY_CONTENT_LENGTH)
+
+
+class MemoryRetrievalResult(MemoryContract):
+    """Bounded chat context plus whether retrieval succeeded or fell back."""
+
+    records: tuple[RetrievedMemory, ...] = Field(max_length=5)
+    outcome: Literal["success", "empty", "fallback"]
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> "MemoryRetrievalResult":
+        if (self.outcome == "success") != bool(self.records):
+            raise ValueError("Successful retrieval must contain records; other outcomes must be empty.")
+        return self

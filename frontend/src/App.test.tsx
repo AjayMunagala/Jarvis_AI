@@ -3,9 +3,12 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import App from './App'
 import './styles.css'
-import { sendChatMessage } from './services/api'
+import { getMemory, listMemories, sendChatMessage } from './services/api'
 
-vi.mock('./services/api', () => ({ sendChatMessage: vi.fn() }))
+vi.mock('./services/api', () => ({
+  sendChatMessage: vi.fn(), listMemories: vi.fn(), searchMemories: vi.fn(),
+  createMemory: vi.fn(), updateMemory: vi.fn(), deleteMemory: vi.fn(), getMemory: vi.fn(),
+}))
 const sendMock = vi.mocked(sendChatMessage)
 
 afterEach(() => {
@@ -180,5 +183,19 @@ describe('JARVIS chat', () => {
       expect(getComputedStyle(renderedTitle).textOverflow).toBe('ellipsis')
       expect(getComputedStyle(renderedTitle).overflow).toBe('hidden')
     }
+  })
+
+  it('links the retrieval outcome and IDs to the current memory manager', async () => {
+    vi.mocked(listMemories).mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0, has_more: false })
+    vi.mocked(getMemory).mockRejectedValue(new Error('That memory is no longer available. Refresh the list and try again.'))
+    sendMock.mockResolvedValue({
+      reply: 'Here is a response.', provider: 'mock', demo: true,
+      memory_context: { outcome: 'success', memory_ids: ['memory-123'] },
+    })
+    render(<App />)
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'Use my saved context{Enter}')
+    await userEvent.click(await screen.findByRole('button', { name: /Memory context · success · 1 record/ }))
+    expect(screen.getByRole('heading', { name: 'Memory' })).toBeInTheDocument()
+    expect(screen.getByText(/not a historical snapshot/i)).toBeInTheDocument()
   })
 })

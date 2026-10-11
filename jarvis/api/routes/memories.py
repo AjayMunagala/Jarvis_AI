@@ -63,10 +63,13 @@ async def list_memories(
     request: Request,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=1000000),
+    category: str | None = Query(default=None, min_length=1, max_length=80),
 ) -> MemoryPage:
+    if category is not None and not category.strip():
+        raise HTTPException(status_code=422, detail="Category must not be blank.")
     repository = _repository(request)
     try:
-        return await run_in_threadpool(repository.list, limit=limit, offset=offset)
+        return await run_in_threadpool(repository.list, limit=limit, offset=offset, category=category)
     except MemoryPersistenceError as exc:
         raise _unavailable() from exc
 

@@ -1,5 +1,8 @@
-export interface ChatRequest {
-  message: string
+export interface ChatRequest { message: string }
+
+export interface ChatMemoryContext {
+  outcome: 'success' | 'empty' | 'fallback'
+  memory_ids: string[]
 }
 
 export interface ChatResponse {
@@ -7,41 +10,107 @@ export interface ChatResponse {
   provider: string
   demo: boolean
   partial?: boolean
+  memory_context?: ChatMemoryContext | null
+}
+
+export interface MemoryRecord {
+  id: string
+  content: string
+  category: string | null
+  source_reference: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface MemoryPage {
+  items: MemoryRecord[]
+  total: number
+  limit: number
+  offset: number
+  has_more: boolean
+}
+
+export interface MemoryInput {
+  content: string
+  category: string | null
+  source_reference: string | null
 }
 
 const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, '')
 const apiBaseUrl = configuredBaseUrl || '/api'
 
-export async function sendChatMessage(message: string): Promise<ChatResponse> {
+async function request<T>(path: string, init?: RequestInit, allowChatValidation = false): Promise<T> {
   let response: Response
   try {
-    response = await fetch(`${apiBaseUrl}/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message } satisfies ChatRequest),
-    })
+    response = await fetch(`${apiBaseUrl}${path}`, init)
   } catch {
     throw new Error('Could not reach JARVIS. Check that the backend is running and try again.')
   }
-
-  let data: unknown
+  if (response.status === 204) return undefined as T
+  if (!response.ok) {
+    if (response.status === 503) {
+      throw new Error('Memory storage is disabled or unavailable. Enable local PostgreSQL persistence to manage saved memories.')
+    }
+    if (response.status === 404) throw new Error('That memory is no longer available. Refresh the list and try again.')
+    if (response.status === 422) {
+      if (allowChatValidation) {
+        try {
+          const data = await response.clone().json() as { detail?: unknown }
+          if (data.detail === 'The request body is invalid.' || data.detail === 'Message exceeds the configured size limit.') throw new Error(data.detail)
+        } catch (cause) {
+          if (cause instanceof Error && (cause.message === 'The request body is invalid.' || cause.message === 'Message exceeds the configured size limit.')) throw cause
+        }
+      }
+      throw new Error('The request is invalid. Check the fields and try again.')
+    }
+    throw new Error('JARVIS could not complete that request. Please try again.')
+  }
   try {
-    data = await response.json() as unknown
+    return await response.json() as T
   } catch {
     throw new Error('JARVIS returned an unreadable response. Please try again.')
   }
+}
 
-  if (!response.ok) {
-    const detail = typeof data === 'object' && data !== null && 'detail' in data && typeof data.detail === 'string'
-      ? data.detail
-      : 'Please try again.'
-    throw new Error(detail)
-  }
-  if (typeof data !== 'object' || data === null || !('reply' in data)
-    || typeof data.reply !== 'string' || !('provider' in data) || typeof data.provider !== 'string'
-    || !('demo' in data) || typeof data.demo !== 'boolean'
-    || ('partial' in data && typeof data.partial !== 'boolean')) {
-    throw new Error('JARVIS returned an unexpected response. Please try again.')
-  }
-  return data as ChatResponse
+const json = (body: unknown): RequestInit => ({
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+})
+
+export function sendChatMessage(message: string): Promise<ChatResponse> {
+  return request<ChatResponse>('/chat', json({ message } satisfies ChatRequest), true).then((data) => {
+    if (!data || typeof data.reply !== 'string' || typeof data.provider !== 'string' || typeof data.demo !== 'boolean') {
+      throw new Error('JARVIS returned an unexpected response. Please try again.')
+    }
+    return data
+  })
+}
+
+export function listMemories(options: { limit?: number; offset?: number; category?: string } = {}): Promise<MemoryPage> {
+  const query = new URLSearchParams()
+  query.set('limit', String(options.limit ?? 20))
+  query.set('offset', String(options.offset ?? 0))
+  if (options.category) query.set('category', options.category)
+  return request<MemoryPage>(`/memories?${query.toString()}`)
+}
+
+export function searchMemories(query: string, options: { limit?: number; offset?: number } = {}): Promise<MemoryPage> {
+  return request<MemoryPage>('/memories/search', json({ query, limit: options.limit ?? 20, offset: options.offset ?? 0 }))
+}
+
+export function createMemory(input: MemoryInput): Promise<MemoryRecord> {
+  return request<MemoryRecord>('/memories', json(input))
+}
+
+export function updateMemory(id: string, input: Partial<MemoryInput>): Promise<MemoryRecord> {
+  return request<MemoryRecord>(`/memories/${encodeURIComponent(id)}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  })
+}
+
+export function deleteMemory(id: string): Promise<void> {
+  return request<void>(`/memories/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export function getMemory(id: string): Promise<MemoryRecord> {
+  return request<MemoryRecord>(`/memories/${encodeURIComponent(id)}`)
 }
