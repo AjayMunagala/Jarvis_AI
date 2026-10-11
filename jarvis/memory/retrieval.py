@@ -1,6 +1,8 @@
 """Bounded, best-effort memory retrieval for chat context."""
 
 import logging
+from time import perf_counter
+
 from jarvis.memory.base import MemoryRepository, MemoryPersistenceError
 from jarvis.memory.models import RetrievedMemory
 
@@ -14,26 +16,39 @@ def retrieve_context(
     limit: int,
     execution_id: str,
 ) -> tuple[RetrievedMemory, ...]:
-    """Return ranked context, falling back to an empty tuple on storage errors."""
+    """Return bounded ranked context and emit metadata-only outcome diagnostics."""
+    started = perf_counter()
+    record_limit = min(max(limit, 0), 5)
+
+    def record_outcome(outcome: str, record_count: int) -> None:
+        logger.info(
+            "Memory retrieval completed",
+            extra={
+                "execution_id": execution_id,
+                "outcome": outcome,
+                "duration_ms": round((perf_counter() - started) * 1000, 3),
+                "record_count": record_count,
+            },
+        )
+
     if repository is None:
-        logger.warning("Memory retrieval unavailable", extra={"execution_id": execution_id})
+        record_outcome("fallback", 0)
         return ()
     try:
-        page = repository.search(query, limit=limit, offset=0)
-        return tuple(
+        if record_limit == 0:
+            record_outcome("empty", 0)
+            return ()
+        page = repository.search(query, limit=record_limit, offset=0)
+        records = tuple(
             RetrievedMemory(id=item.id, category=item.category, content=item.content)
-            for item in page.items
+            for item in page.items[:record_limit]
         )
+        record_outcome("success" if records else "empty", len(records))
+        return records
     except MemoryPersistenceError:
-        logger.warning("Memory retrieval failed", extra={"execution_id": execution_id})
+        record_outcome("fallback", 0)
         return ()
-    except Exception as exc:
-        # Third-party adapters may fail unexpectedly; do not log exception details or content.
-        error_type = type(exc).__name__
-        if not error_type.isidentifier() or len(error_type) > 80:
-            error_type = "MemoryRetrievalError"
-        logger.warning(
-            "Memory retrieval failed",
-            extra={"execution_id": execution_id, "error_type": error_type},
-        )
+    except Exception:
+        # Do not include exception types or details: third-party messages may contain private data.
+        record_outcome("fallback", 0)
         return ()

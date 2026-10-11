@@ -69,6 +69,15 @@ API and repository behavior is covered with controlled repository/connection dou
 
 The local PostgreSQL 18 integration suite passed 11/11 tests (5 URL guard cases and 6 live database cases). The generated database was removed. See the verification note in `docs/HANDOFF.md` for the environment and remaining deployment limitations.
 
+## Core v1.0 — Memory Retrieval Quality and Lifecycle (in progress)
+
+- Define a small deterministic PostgreSQL corpus for lexical search regression tests. Assert explicitly relevant IDs, ranking/tie behavior, pagination, and no-match results; this is a regression fixture, not a general relevance benchmark.
+- Specify duplicate, PATCH/null, timestamp, and permanent-delete semantics with API, repository, and opt-in PostgreSQL integration coverage.
+- Emit metadata-only retrieval diagnostics for success, empty results, and fallback with execution ID, duration, and returned count. Never log queries, memory fields/IDs, credentials, or exception details.
+- Preserve explicit API-only memory creation, retrieval-off-by-default, the five-record maximum, untrusted-context framing, and the existing public API contract.
+
+No migration or dependency is planned. Authentication, per-user ownership, embeddings, pgvector, automatic extraction, schedulers, and frontend controls remain excluded; the memory API remains unsuitable for shared/untrusted deployments.
+
 ## Core v0.9 — Persistent Memory and Retrieval Foundation (implemented; verified locally)
 
 - Add an incremental PostgreSQL memory migration and a separate memory repository protocol/adapter. Memory content is strictly bounded, explicitly created/updated/deleted, and never copied automatically from chat messages.

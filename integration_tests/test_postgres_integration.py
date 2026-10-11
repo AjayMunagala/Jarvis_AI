@@ -201,40 +201,81 @@ def test_clean_migrations_checksums_and_rerun(isolated_postgres):
 
 
 def test_memory_crud_search_ranking_and_delete(isolated_postgres):
+    import psycopg
+
     from jarvis.memory.models import MemoryUpdate
     from jarvis.persistence.memory_postgres import PostgresMemoryRepository
 
     repository = PostgresMemoryRepository(isolated_postgres.database_url, connect_timeout_seconds=3)
-    repeated = repository.create(
-        "JARVIS memory retrieval memory retrieval improves lexical ranking.",
-        category="project",
-        source_reference="manual-note-1",
+    top_relevant = repository.create(
+        "JARVIS memory retrieval memory retrieval improves lexical ranking.", category="project"
     )
-    ordinary = repository.create("JARVIS memory retrieval is deterministic.", category="project")
+    second_relevant = repository.create("JARVIS memory retrieval is deterministic.", category="project")
+    partial_match = repository.create("JARVIS memory is stored separately.", category="project")
     unrelated = repository.create("Tomato plants need sunlight.", category="garden")
+    privacy_relevant = repository.create("Privacy-safe retrieval diagnostics exclude private query text.")
+    repository.create("This record discusses diagnostics only.")
 
-    first_page = repository.search("memory retrieval", limit=1)
-    assert first_page.total == 2
-    assert first_page.has_more is True
-    assert len(first_page.items) == 1
-    assert first_page.items[0].id == repeated.id
-    second_page = repository.search("memory retrieval", limit=1, offset=1)
-    assert second_page.total == 2
-    assert second_page.has_more is False
-    assert [item.id for item in (*first_page.items, *second_page.items)] == [repeated.id, ordinary.id]
+    # The expected relevant IDs are explicit for this small lexical regression corpus.
+    ranked = repository.search("memory retrieval", limit=2)
+    assert ranked.total == 2
+    assert ranked.has_more is False
+    assert [item.id for item in ranked.items] == [top_relevant.id, second_relevant.id]
+    assert sum(item.id in {top_relevant.id, second_relevant.id} for item in ranked.items) / 2 == 1.0
+
+    other_terms = repository.search("privacy retrieval", limit=5)
+    assert [item.id for item in other_terms.items] == [privacy_relevant.id]
+    assert partial_match.id not in {item.id for item in ranked.items}
+    assert unrelated.id not in {item.id for item in ranked.items}
     assert repository.search("term-with-no-match", limit=5).items == ()
 
-    fetched = repository.get(repeated.id)
+    first_page = repository.search("memory retrieval", limit=1)
+    second_page = repository.search("memory retrieval", limit=1, offset=1)
+    assert first_page.has_more is True
+    assert second_page.has_more is False
+    assert [item.id for item in (*first_page.items, *second_page.items)] == [
+        top_relevant.id, second_relevant.id
+    ]
+
+    # Identical content and timestamps make rank equal; UUID ordering must then decide.
+    tie_a = repository.create("tie breaker lexical corpus")
+    tie_b = repository.create("tie breaker lexical corpus")
+    with psycopg.connect(isolated_postgres.database_url) as connection:
+        connection.execute(
+            "UPDATE jarvis_app.memories SET updated_at = TIMESTAMPTZ '2001-01-01 00:00:00+00' "
+            "WHERE id = ANY(%s)",
+            ([tie_a.id, tie_b.id],),
+        )
+    tied_results = repository.search("tie breaker", limit=5)
+    assert [item.id for item in tied_results.items] == sorted((tie_a.id, tie_b.id), key=str)
+
+    duplicate_a = repository.create("duplicate lifecycle content", category="notes", source_reference="manual")
+    duplicate_b = repository.create("duplicate lifecycle content", category="notes", source_reference="manual")
+    assert duplicate_a.id != duplicate_b.id
+
+    with psycopg.connect(isolated_postgres.database_url) as connection:
+        connection.execute(
+            "UPDATE jarvis_app.memories SET updated_at = TIMESTAMPTZ '2001-01-01 00:00:00+00' WHERE id = %s",
+            (duplicate_a.id,),
+        )
+    before = repository.get(duplicate_a.id)
+    assert before is not None
+    changed = repository.update(
+        duplicate_a.id,
+        MemoryUpdate(category=None, source_reference=None),
+    )
+    assert changed is not None
+    assert changed.content == "duplicate lifecycle content"
+    assert changed.category is None and changed.source_reference is None
+    assert changed.updated_at > before.updated_at
+    assert repository.delete(duplicate_a.id) is True
+    assert repository.get(duplicate_a.id) is None
+    assert repository.delete(duplicate_a.id) is False
+    assert repository.get(duplicate_b.id) is not None
+
+    fetched = repository.get(top_relevant.id)
     assert fetched is not None
-    assert fetched.source_reference == "manual-note-1"
-    changed = repository.update(repeated.id, MemoryUpdate(category="updated"))
-    assert changed is not None and changed.category == "updated"
-    assert changed.updated_at >= fetched.updated_at
-    assert repository.delete(repeated.id) is True
-    assert repository.get(repeated.id) is None
-    assert repository.delete(uuid4()) is False
-    assert repository.get(ordinary.id) is not None
-    assert repository.get(unrelated.id) is not None
+    assert fetched.category == "project"
 
 
 def test_chat_creates_continues_and_reads_history_across_pages(isolated_postgres):

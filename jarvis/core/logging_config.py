@@ -18,6 +18,7 @@ class JsonFormatter(logging.Formatter):
             "environment", "error_type", "execution_id", "intent", "confidence",
             "planned_experts", "successful_experts", "failed_experts", "partial",
             "rounds", "tool_execution_enabled", "expert_id", "error_code", "attempts",
+            "outcome", "duration_ms", "record_count",
         )
         for key in scalar_fields:
             value = getattr(record, key, None)

@@ -1,3 +1,5 @@
+import json
+import logging
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
@@ -136,6 +138,41 @@ def test_memory_api_crud_search_paging_and_missing_ids():
         assert too_many.status_code == 422
 
 
+def test_memory_api_duplicate_patch_and_delete_lifecycle():
+    repository = FakeMemoryRepository()
+    app = create_app(settings=Settings(environment="test"))
+    app.state.memory_repository = repository
+
+    with TestClient(app) as client:
+        first = client.post("/memories", json={
+            "content": "same content", "category": "notes", "source_reference": "source-a"
+        })
+        second = client.post("/memories", json={
+            "content": "same content", "category": "notes", "source_reference": "source-a"
+        })
+        assert first.status_code == second.status_code == 201
+        first_id = first.json()["id"]
+        second_id = second.json()["id"]
+        assert first_id != second_id
+
+        cleared = client.patch(
+            f"/memories/{first_id}",
+            json={"category": None, "source_reference": None},
+        )
+        assert cleared.status_code == 200
+        assert cleared.json()["content"] == "same content"
+        assert cleared.json()["category"] is None
+        assert cleared.json()["source_reference"] is None
+
+        assert client.patch(f"/memories/{first_id}", json={"content": None}).status_code == 422
+        assert client.patch(f"/memories/{first_id}", json={}).status_code == 422
+        assert client.delete(f"/memories/{first_id}").status_code == 204
+        repeated_delete = client.delete(f"/memories/{first_id}")
+        assert repeated_delete.status_code == 404
+        assert repeated_delete.json()["error"] == "memory_not_found"
+        assert client.get(f"/memories/{second_id}").status_code == 200
+
+
 def test_memory_api_is_clear_when_persistence_is_disabled():
     with TestClient(create_app(settings=Settings(environment="test"))) as client:
         responses = [
@@ -192,24 +229,82 @@ def test_memory_retrieval_defaults_offline_and_requires_persistence_when_enabled
     assert enabled.memory_retrieval_enabled
 
 
-def test_retrieval_failure_falls_back_without_logging_memory_or_exception(caplog):
+def test_retrieval_diagnostics_are_allowlisted_and_privacy_safe(caplog):
+    caplog.set_level(logging.INFO, logger="jarvis.memory.retrieval")
+
+    query_sentinel = "query-secret-sentinel"
+    content_sentinel = "content-secret-sentinel"
+
+    class ReturningRepository(FakeMemoryRepository):
+        def search(self, query, *, limit=10, offset=0):
+            self.calls.append((query, limit, offset))
+            return MemoryPage(
+                items=(memory_record(content=f"{content_sentinel} {query}"),),
+                total=1, limit=limit, offset=offset, has_more=False,
+            )
+
+    repository = ReturningRepository()
+    records = retrieve_context(
+        repository, query_sentinel, limit=3, execution_id="exec-success"
+    )
+    assert len(records) == 1
+    assert repository.calls == [(query_sentinel, 3, 0)]
+    success = next(record for record in caplog.records if record.execution_id == "exec-success")
+    assert success.outcome == "success"
+    assert success.record_count == 1
+    assert isinstance(success.duration_ms, float)
+
+    empty = retrieve_context(FakeMemoryRepository(), "empty-query", limit=2, execution_id="exec-empty")
+    assert empty == ()
+    empty_log = next(record for record in caplog.records if record.execution_id == "exec-empty")
+    assert empty_log.outcome == "empty"
+    assert empty_log.record_count == 0
+
     class BrokenRepository(FakeMemoryRepository):
         def search(self, query, *, limit=10, offset=0):
-            raise RuntimeError("private memory content and credential")
+            raise RuntimeError("exception-secret-sentinel")
 
-    marker = "memory-private-marker"
-    records = retrieve_context(
-        BrokenRepository(), marker, limit=3, execution_id="exec-123"
+    fallback = retrieve_context(
+        BrokenRepository(), "error-query-sentinel", limit=3, execution_id="exec-fallback"
     )
-    assert records == ()
-    assert "Memory retrieval failed" in caplog.text
-    record = next(item for item in caplog.records if item.getMessage() == "Memory retrieval failed")
-    assert record.execution_id == "exec-123"
-    assert marker not in record.getMessage()
-    assert "credential" not in record.getMessage()
-    assert marker not in caplog.text
-    assert "private memory content" not in caplog.text
-    assert "credential" not in caplog.text
+    assert fallback == ()
+    fallback_log = next(record for record in caplog.records if record.execution_id == "exec-fallback")
+    assert fallback_log.outcome == "fallback"
+    assert fallback_log.record_count == 0
+
+    from jarvis.core.logging_config import JsonFormatter
+
+    formatted = "\n".join(
+        JsonFormatter().format(record)
+        for record in caplog.records
+        if getattr(record, "execution_id", None) in {"exec-success", "exec-empty", "exec-fallback"}
+    )
+    parsed_success = json.loads(JsonFormatter().format(success))
+    assert parsed_success["outcome"] == "success"
+    assert parsed_success["record_count"] == 1
+    assert "duration_ms" in parsed_success
+    assert query_sentinel not in formatted
+    assert content_sentinel not in formatted
+    assert "error-query-sentinel" not in formatted
+    assert "exception-secret-sentinel" not in formatted
+
+
+def test_retrieval_enforces_five_record_maximum_even_for_untrusted_repository():
+    records = tuple(memory_record(content=f"memory {index}") for index in range(7))
+
+    class OversizedRepository:
+        def __init__(self):
+            self.requested_limit = None
+
+        def search(self, query, *, limit=10, offset=0):
+            self.requested_limit = limit
+            return MemoryPage(items=records, total=len(records), limit=limit, offset=offset, has_more=True)
+
+    repository = OversizedRepository()
+    result = retrieve_context(repository, "memory", limit=20, execution_id="exec-bounded")
+    assert repository.requested_limit == 5
+    assert len(result) == 5
+    assert len(result) <= 5
 
 
 def test_retrieval_context_is_delimited_as_untrusted_provider_data():
@@ -448,6 +543,14 @@ def test_postgres_memory_update_and_delete_use_parameters_and_sanitize_errors():
     assert updated is not None
     query, parameters = connection.calls[-1]
     assert "content = %s" in query and parameters == ("updated", memory_id)
+    assert "updated_at = CURRENT_TIMESTAMP" in query
+    cleared = repository.update(
+        memory_id, MemoryUpdate(category=None, source_reference=None)
+    )
+    assert cleared is not None
+    clear_query, clear_parameters = connection.calls[-1]
+    assert "category = %s" in clear_query and "source_reference = %s" in clear_query
+    assert clear_parameters == (None, None, memory_id)
     assert repository.delete(memory_id)
     assert connection.calls[-1][1] == (memory_id,)
 
