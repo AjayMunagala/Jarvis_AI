@@ -25,6 +25,14 @@ Core v0.2 currently uses deterministic intent rules and the mock provider. It do
 
 The adapter is verified with mocked HTTP transport only. No live credentials or model endpoint were available for verification. It does not add tools, external actions, or persistence.
 
+## Core v0.4 — Specialist Intelligence and Provider Reliability (current implementation)
+
+- Give the AnalysisExpert and ValidationExpert distinct configured instructions through the existing provider interface; retain deterministic mock behavior, which ignores those instructions.
+- Validate provider responses as nonblank bounded text and reject refusal, malformed, empty, and whitespace-only OpenAI completions as sanitized permanent failures.
+- Keep bounded execution deadlines, transient-only retries, partial results, trace metadata, API response metadata, and the advisory-only boundary.
+
+Offline regression tests use controlled mock providers and HTTP transport to assert specialist prompt selection and OpenAI request wiring; 83 backend tests pass when run outside the restricted sandbox. No live provider call or semantic model-quality evaluation is performed. The output contract remains bounded advisory text rather than persona-specific structured JSON. In the sandbox, asyncio loop startup is blocked because local socketpair creation attempts a restricted localhost accept.
+
 ## Later milestones
 
 1. Application persistence: the optional PostgreSQL provisioning and migration-ledger foundation now exists; later add a reviewed data model, user/conversation records, persistence integration, and retrieval foundations.

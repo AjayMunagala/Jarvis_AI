@@ -62,7 +62,13 @@ class OpenAIProvider:
             raise ProviderError()
         try:
             completion = _ChatCompletion.model_validate(response.json())
-            content = completion.choices[0].message.content
+            choice = completion.choices[0]
+            if choice.finish_reason not in (None, "stop", "length"):
+                raise ProviderError()
+            message = choice.message
+            if message.refusal:
+                raise ProviderError()
+            content = message.content
             if content is None:
                 raise ProviderError()
             return ProviderReply(content=content).content

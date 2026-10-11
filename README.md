@@ -1,6 +1,6 @@
-# JARVIS Core v0.3
+# JARVIS Core v0.4
 
-JARVIS is a modular foundation for a personal AI operating system. Core v0.3 adds an optional OpenAI Chat Completions adapter behind the bounded Mother Orchestrator while retaining the provider-independent interface and offline mock provider.
+JARVIS is a modular foundation for a personal AI operating system. Core v0.4 adds distinct configured analysis and validation instructions and safer handling of unsupported OpenAI completions, while retaining the provider-independent interface and offline mock provider.
 
 ## What works now
 
@@ -8,7 +8,7 @@ JARVIS is a modular foundation for a personal AI operating system. Core v0.3 add
 - `POST /chat` accepts a validated message and returns a structured response.
 - The default `mock` provider works without an API key, internet access, GPU, or paid service. It echoes the received message with a clear demo label; it does not reason like an LLM.
 - An optional OpenAI Chat Completions adapter can be selected with `JARVIS_PROVIDER=openai`. It uses the existing provider interface and configured connect/read timeouts. Live OpenAI access is optional and was not verified in this environment.
-- Chat requests pass through deterministic intent classification, a validated bounded plan, and JSON-configured advisory expert definitions. The current mock adapter still returns the same deterministic demo text; expert personas do not provide separate model reasoning.
+- Chat requests pass through deterministic intent classification, a validated bounded plan, and JSON-configured advisory expert definitions. `AnalysisExpert` and `ValidationExpert` have distinct configured instructions sent to the selected model provider; their replies are still validated as bounded, nonblank advisory text, not as a specialized structured JSON schema. These instructions shape provider requests but do not independently prove reasoning quality. The mock provider ignores them and remains deterministic demo text.
 - `/chat` retains `reply`, `provider`, and `demo`, and adds `partial` to indicate whether some configured expert steps failed while useful results remained. It returns an `X-JARVIS-Execution-ID` header for chat success, provider failure, and timeout responses.
 - Successful expert outputs are joined in plan order. If the combined reply exceeds 40,000 characters, it is clipped to fit that limit and ends with a visible truncation marker; this does not change the `partial` flag, which reports expert failures.
 - The expert/tool registries and audit-event contracts are typed. `jarvis/orchestration/config/tools.json` is intentionally empty and no tool executor or external action exists.
@@ -16,13 +16,13 @@ JARVIS is a modular foundation for a personal AI operating system. Core v0.3 add
 - Settings are validated at startup and JSON logs avoid request contents and secrets.
 - API errors use a JSON `{ "error": ..., "detail": ... }` envelope. Validation errors return 422, oversized requests return 413, provider failures return 502, provider timeouts return 504, and unexpected application errors return a generic 500.
 
-## Verification baseline
+## Verification status
 
-Verified on Windows with Python 3.12: `.venv\Scripts\python.exe -m pytest -v` reports 74 passed (one Starlette deprecation warning recommending `httpx2`); `npm test -- --run` reports 16 frontend tests passed; `npm run build` succeeds; and `git diff --check` is clean. Provider tests use mocked HTTP transport; live OpenAI access was not verified.
+Core v0.4 verification on Windows/Python 3.12.10: `.venv\Scripts\python.exe -m pytest -v` passed 83 tests, and `.venv\Scripts\python.exe -m pytest tests/test_intelligence_provider.py -v` passed 26 tests. Both ran successfully outside the restricted sandbox. Inside the sandbox, Python asyncio hangs creating its local socketpair because the fallback blocks in localhost `accept()`; the same commands should be run in a local environment that permits loopback socket creation. `npm test -- --run` passed 16 tests, `npm run build` succeeded, `.venv\Scripts\python.exe -m compileall -q jarvis` succeeded, and `git diff --check` passed. OpenAI tests use mocked HTTP transport; no live provider call was made. The active environment has pytest 9.1.1 although `pyproject.toml` declares `<9.0`; Starlette also warns that its `TestClient` use of `httpx` is deprecated and recommends `httpx2`. The tests pass with the installed versions outside the sandbox; no dependency change was made because neither mismatch caused the observed hang.
 
 ## Not implemented yet
 
-There are not seven independent specialist agents: all configured experts share one provider, and only the validation expert has a distinct model instruction. Mock mode does not perform model reasoning. There is no model-driven intent classification or planning, multi-turn model context, application database connection, persistent memory, tool execution, approval system, account system, or external action integration. The optional OpenAI adapter produces single-request model responses but has not been live-verified here. Optional standalone PostgreSQL provisioning is documented below, but the app does not use it or persist conversations. The frontend is a local React interface only; the API never runs shell commands or external actions.
+There are not seven independent specialist agents: all configured experts share one provider. AnalysisExpert and ValidationExpert have distinct instructions, but no persona-specific structured JSON schema or semantic reasoning-quality guarantee. Mock mode ignores the instructions and does not perform model reasoning. There is no model-driven intent classification or planning, multi-turn model context, application database connection, persistent memory, tool execution, approval system, account system, or external action integration. The optional OpenAI adapter produces single-request model responses but has not been live-verified here. Optional standalone PostgreSQL provisioning is documented below, but the app does not use it or persist conversations. The frontend is a local React interface only; the API never runs shell commands or external actions.
 
 ## Prerequisites
 
@@ -107,8 +107,10 @@ HTTP contracts live in `jarvis/api/routes/`; request and response types live in 
 
 ## Known limitations and troubleshooting
 
-- The mock response is deterministic text, not model output.
+- The mock response is deterministic text, not model output, and does not emulate specialist reasoning.
+- The analysis specialist is instructed to explain relevant factors, trade-offs, and supported conclusions. The validation specialist is instructed to check completeness, consistency, assumptions, and missing information. These are two instructed personas using the shared provider, not independent agent implementations or guaranteed expert judgments.
 - `mock` and `openai` are the only supported providers. OpenAI selection fails startup without a nonblank API key. OpenAI live connectivity and credentials were not verified here.
+- OpenAI refusal responses, malformed completion payloads, and empty or whitespace-only content are treated as sanitized provider failures; they are not retried as transient errors and do not switch to mock mode.
 - In-memory chat state is not persistent. PostgreSQL setup scripts provide optional database creation and migration metadata only; application persistence and memory remain later milestones.
 - `/ready` confirms that settings and the configured provider were constructed; it does not probe external dependencies. Setting `JARVIS_ENVIRONMENT=production` only changes the validated environment label and does not add authentication, rate limiting, or production hardening.
 - If `python` is not found, install Python 3.11+ and ensure the Python launcher/PATH is configured. If imports fail, activate `.venv` and run `python -m pip install -e ".[dev]"` again.

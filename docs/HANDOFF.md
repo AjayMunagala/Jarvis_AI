@@ -2,7 +2,7 @@
 
 ## Current milestone
 
-JARVIS Core v0.3 adds an optional OpenAI Chat Completions adapter behind the existing provider interface. Mock remains the default and runs offline. PostgreSQL setup remains standalone. The live OpenAI endpoint has not been verified.
+JARVIS Core v0.4 extends the optional OpenAI Chat Completions adapter with distinct configured instructions for AnalysisExpert and ValidationExpert and explicit rejection of refusal/malformed/blank completions. Mock remains the default and runs offline while ignoring specialist instructions. PostgreSQL setup remains standalone. The live OpenAI endpoint has not been verified.
 
 ## Implemented
 
@@ -16,7 +16,9 @@ JARVIS Core v0.3 adds an optional OpenAI Chat Completions adapter behind the exi
 - Metadata-only logs/audit-event schemas; message text, provider output, exception text, and credentials are excluded. Audit events are in-memory only.
 - The `/chat` response retains `reply`, `provider`, and `demo` and adds a `partial` boolean. Frontend renders a partial-result label when that value is true. Combined expert output is clipped at 40,000 characters with a visible truncation marker; clipping does not set `partial`.
 - Chat success, provider failure, and timeout responses carry an `X-JARVIS-Execution-ID` header that correlates with safe structured log and audit metadata. `provider` and `demo` identify the selected response source without changing the response contract.
-- The validation expert has one configured system instruction for real providers; all experts still share a provider adapter, and the mock does not perform model reasoning.
+- AnalysisExpert and ValidationExpert have separate configured system instructions. Regression tests verify that each instruction reaches OpenAI request payloads through mocked HTTP. They still share one provider adapter; the mock does not perform model reasoning.
+- Provider replies are validated as nonblank bounded advisory text. A persona-specific structured JSON output contract and semantic specialist-quality checks are not implemented.
+- OpenAI refusal responses and malformed, empty, or whitespace-only completion content are sanitized permanent provider failures; no retry or mock fallback occurs.
 - Tool configuration is currently empty, the registry has no executor, and no shell command or external/state-changing action can be invoked.
 - Standalone Windows PostgreSQL provisioning scripts remain optional and outside application startup.
 
@@ -42,7 +44,7 @@ npm run build
 
 ## Current limits
 
-- Intent classification and planning are deterministic, not model-driven. The configured personas share one provider; only the validation expert has a distinct model instruction. In mock mode that instruction is ignored and responses are deterministic demo text, not model reasoning.
+- Intent classification and planning are deterministic, not model-driven. The configured personas share one provider; AnalysisExpert and ValidationExpert have distinct model instructions. In mock mode both instructions are ignored and responses are deterministic demo text, not model reasoning.
 - The only configured tool list is empty. Tool execution, permission/approval gateway, persistent memory, persistent audit storage, application database integration, authentication, and external integrations are not implemented.
 - `/ready` confirms successful settings/provider/orchestrator construction; it does not probe external systems.
 - The default provider runs without a GPU, API key, or internet. Frontend conversation state is in-memory only.
@@ -52,12 +54,16 @@ npm run build
 
 ## Verification on this working tree
 
-- `.venv\Scripts\python.exe -m pytest -v`: 74 passed; one Starlette test-client deprecation warning recommending `httpx2`.
+- `.venv\Scripts\python.exe -m pytest -v`: 83 passed in 1.28s when run with sandbox restrictions lifted.
+- `.venv\Scripts\python.exe -m pytest tests/test_intelligence_provider.py -v`: 26 passed in 0.65s when run with sandbox restrictions lifted.
+- The earlier sandbox hang was traced with a bounded faulthandler dump to Windows asyncio Proactor and Selector loop startup blocking in Python's `socket.py::_fallback_socketpair`, at local `accept()`. A local `socket.socketpair()` and `asyncio.run(asyncio.sleep(0))` work with sandbox restrictions lifted. This was a sandbox loopback restriction, not a JARVIS production-code defect. Run Python tests in an environment that permits loopback socket creation.
+- Python is 3.12.10 and the active pytest is 9.1.1 although `pyproject.toml` declares pytest `<9.0`. The TestClient warning recommends `httpx2`; it is not installed or declared. Since the stack trace showed the loopback restriction as the cause and the suite passes with these installed versions outside the sandbox, dependencies were left unchanged. `pip check` reported no broken requirements.
 - `npm test -- --run` from `frontend/`: 16 passed.
 - `npm run build` from `frontend/`: passed.
+- `.venv\Scripts\python.exe -m compileall -q jarvis`: passed.
 - `git diff --check`: passed.
-- OpenAI adapter request/response, timeout, retry classification, sanitization, configuration, and API metadata tests use mocked HTTP transport. No live provider call was made.
+- OpenAI request/refusal/error tests use mocked HTTP transport; no live provider call was made.
 
 ## Next work
 
-Review Core v0.3 results and approve the next milestone before implementing it. Preserve the roadmap's longer-term goals and do not infer that future tools, memory, model-driven planning, or actions exist from the current configuration interfaces.
+Review the Core v0.4 changes before approving another milestone. Live OpenAI connectivity and the semantic quality of live model reasoning remain unverified. Preserve the roadmap's longer-term goals and do not infer that future tools, memory, model-driven planning, or actions exist from the current configuration interfaces.

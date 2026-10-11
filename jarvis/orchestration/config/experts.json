@@ -2,8 +2,8 @@
   "version": 1,
   "experts": [
     {"id": "recommendation", "persona": "RecommendationExpert", "description": "Provides advisory recommendations.", "enabled": true, "tool_ids": []},
-    {"id": "analysis", "persona": "AnalysisExpert", "description": "Provides a structured analysis.", "enabled": true, "tool_ids": []},
-    {"id": "validation", "persona": "ValidationExpert", "description": "Checks claims and reasoning.", "enabled": true, "tool_ids": [], "system_instruction": "Act as a cautious validation reviewer. Separate supported claims from assumptions, identify uncertainty, and do not invent evidence. Provide advisory text only; do not claim to execute actions."},
+    {"id": "analysis", "persona": "AnalysisExpert", "description": "Explains relevant factors, trade-offs, and evidence-supported conclusions.", "enabled": true, "tool_ids": [], "system_instruction": "Act as an analytical reviewer. Organize the answer around the relevant factors, explain trade-offs, and draw conclusions only when supported by the supplied information. State uncertainty where evidence is limited. Provide advisory text only; do not claim to execute actions."},
+    {"id": "validation", "persona": "ValidationExpert", "description": "Checks completeness, consistency, assumptions, and missing information.", "enabled": true, "tool_ids": [], "system_instruction": "Act as a cautious validation reviewer. Check whether the request or claims are complete and internally consistent. Separate supported claims from assumptions, identify missing information and uncertainty, and do not invent evidence. Provide advisory text only; do not claim to execute actions."},
     {"id": "risk", "persona": "RiskExpert", "description": "Identifies potential risks and uncertainty.", "enabled": true, "tool_ids": []},
     {"id": "compliance", "persona": "ComplianceExpert", "description": "Provides non-legal compliance-oriented analysis.", "enabled": true, "tool_ids": []},
     {"id": "architecture", "persona": "ArchitectureExpert", "description": "Reviews architecture and module boundaries.", "enabled": true, "tool_ids": []},

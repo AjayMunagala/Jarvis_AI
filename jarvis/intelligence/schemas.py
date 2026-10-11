@@ -18,10 +18,12 @@ class ProviderReply(BaseModel):
 
 class _CompletionMessage(BaseModel):
     content: str | None
+    refusal: str | None = None
 
 
 class _CompletionChoice(BaseModel):
     message: _CompletionMessage
+    finish_reason: str | None = None
 
 
 class _ChatCompletion(BaseModel):

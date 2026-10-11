@@ -202,6 +202,7 @@ def test_transient_openai_error_retries_within_the_orchestrator_boundary():
 @pytest.mark.parametrize("payload", [
     {"choices": []},
     {"choices": [{"message": {"content": None}}]},
+    {"choices": [{"message": {"content": ""}}]},
     {"choices": [{"message": {"content": "   "}}]},
 ])
 def test_openai_adapter_rejects_malformed_or_blank_model_output(payload):
@@ -210,17 +211,26 @@ def test_openai_adapter_rejects_malformed_or_blank_model_output(payload):
         asyncio.run(provider.generate_reply("hello"))
 
 
-def test_validation_expert_uses_a_distinct_system_instruction():
+@pytest.mark.parametrize(
+    ("message", "expert_id", "persona", "instruction_marker"),
+    [
+        ("Analyze this claim", "analysis", "AnalysisExpert", "relevant factors"),
+        ("Validate this claim", "validation", "ValidationExpert", "internally consistent"),
+    ],
+)
+def test_analysis_and_validation_experts_send_distinct_instructions(
+    message, expert_id, persona, instruction_marker,
+):
     class RecordingProvider:
         name = "recording"
         is_demo = True
 
         def __init__(self):
-            self.instructions = []
+            self.requests = []
 
         async def generate_reply(self, message, *, system_instruction=None):
-            self.instructions.append(system_instruction)
-            return "Validation result."
+            self.requests.append((message, system_instruction))
+            return "Specialist advisory result."
 
     provider = RecordingProvider()
     service = OrchestrationService(
@@ -229,7 +239,81 @@ def test_validation_expert_uses_a_distinct_system_instruction():
         expert_registry=ExpertRegistry.load(),
         tool_registry=ToolRegistry(ToolRegistryConfig(version=1, tools=())),
     )
-    result = asyncio.run(service.run(RequestContext(message="Validate this claim")))
-    assert result.reply == "Validation result."
-    assert len(provider.instructions) == 1
-    assert "cautious validation reviewer" in provider.instructions[0]
+    context = RequestContext(message=message)
+    result = asyncio.run(service.run(context))
+    assert result.reply == "Specialist advisory result."
+    definitions = {item.id: item for item in service.expert_registry.config.experts}
+    assert provider.requests == [(message, definitions[expert_id].system_instruction)]
+    instruction = provider.requests[0][1]
+    assert instruction is not None
+    assert instruction_marker in instruction
+    assert result.execution_id == context.execution_id
+    assert len(result.expert_results) == 1
+    assert result.expert_results[0].expert_id == expert_id
+    assert result.expert_results[0].persona == persona
+    assert result.expert_results[0].status == "succeeded"
+
+
+def test_analysis_and_validation_instructions_are_meaningfully_distinct():
+    registry = ExpertRegistry.load()
+    definitions = {expert.id: expert for expert in registry.config.experts}
+    analysis = definitions["analysis"].system_instruction
+    validation = definitions["validation"].system_instruction
+    assert analysis and validation and analysis != validation
+    assert "trade-offs" in analysis
+    assert "missing information" in validation
+
+
+def test_configured_specialist_instructions_reach_openai_request_payloads():
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Advisory result."}}]})
+
+    settings = Settings(provider="openai", openai_api_key=SecretStr("unit-test-placeholder"))
+    provider = OpenAIProvider(
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+        model=settings.openai_model,
+        connect_timeout_seconds=settings.provider_connect_timeout_seconds,
+        read_timeout_seconds=settings.provider_read_timeout_seconds,
+        transport=httpx.MockTransport(handler),
+    )
+    service = OrchestrationService(
+        provider,
+        settings,
+        expert_registry=ExpertRegistry.load(),
+        tool_registry=ToolRegistry(ToolRegistryConfig(version=1, tools=())),
+    )
+    results = [
+        asyncio.run(service.run(RequestContext(message=message)))
+        for message in ("Analyze the proposal", "Validate the proposal")
+    ]
+    prompts = [payload["messages"][0]["content"] for payload in captured]
+    assert len(captured) == 2
+    assert prompts[0] != prompts[1]
+    assert "relevant factors" in prompts[0]
+    assert "internally consistent" in prompts[1]
+    assert [result.expert_results[0].expert_id for result in results] == ["analysis", "validation"]
+
+
+def test_mock_provider_remains_deterministic_and_ignores_specialist_instruction():
+    provider = MockProvider()
+    first = asyncio.run(provider.generate_reply("same request", system_instruction="Analyze trade-offs."))
+    second = asyncio.run(provider.generate_reply("same request", system_instruction="Check completeness."))
+    assert first == second
+    assert "not an AI-generated answer" in first
+
+
+@pytest.mark.parametrize("payload", [
+    {"choices": [{"message": {"content": None, "refusal": "Sensitive refusal detail"}}]},
+    {"choices": [{"message": {"content": "Unexpected text", "refusal": "Sensitive refusal detail"}}]},
+    {"choices": [{"message": {"content": "Unexpected tool call"}, "finish_reason": "tool_calls"}]},
+    {"choices": [{"message": {"content": "Filtered response"}, "finish_reason": "content_filter"}]},
+])
+def test_openai_adapter_rejects_refusal_without_exposing_provider_text(payload):
+    provider = openai_provider(httpx.MockTransport(lambda request: httpx.Response(200, json=payload)))
+    with pytest.raises(ProviderError) as error:
+        asyncio.run(provider.generate_reply("hello"))
+    assert "Sensitive refusal detail" not in str(error.value)
