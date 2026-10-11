@@ -2,16 +2,18 @@
 
 Roadmap items are goals, not claims about current functionality.
 
-## Core v0.1 (current)
+## Core v0.1 (complete)
 
 - Modular FastAPI monolith with validated settings, health/readiness, mock chat, bounded provider execution, and tests.
 
-## Next milestone: Core v0.2 — orchestration and provider seams
+## Core v0.2 — Mother Orchestrator (implemented)
 
 - Add explicit conversation/request context and a small orchestration service between HTTP and providers.
 - Add provider contract conformance tests and a configurable fake provider for timeout/failure cases.
 - Define capability registry and tool interface types without executing external actions.
 - Define audit event schemas and document production boundaries; keep the demo runnable offline.
+
+Core v0.2 currently uses deterministic intent rules and the mock provider. It does not implement specialist model reasoning, persistent audit storage, or tool execution. Tool configuration is empty by design.
 
 ## Later milestones
 

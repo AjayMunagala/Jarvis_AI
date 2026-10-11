@@ -22,3 +22,6 @@ addopts = "-ra"
 
 [tool.setuptools.packages.find]
 include = ["jarvis*"]
+
+[tool.setuptools.package-data]
+"jarvis.orchestration" = ["config/*.json"]

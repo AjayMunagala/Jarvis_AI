@@ -14,6 +14,7 @@ class ChatResponse(BaseModel):
     reply: str
     provider: str
     demo: bool
+    partial: bool = False
 
 
 class HealthResponse(BaseModel):

@@ -1,23 +1,27 @@
-# JARVIS Core v0.1
+# JARVIS Core v0.2
 
-JARVIS is a modular foundation for a personal AI operating system. This first milestone is a small FastAPI service with a provider-independent interface and a clearly labeled offline demo provider.
+JARVIS is a modular foundation for a personal AI operating system. Core v0.2 adds a bounded Mother Orchestrator behind the FastAPI chat endpoint while retaining the provider-independent interface and offline mock provider.
 
 ## What works now
 
 - `GET /health` and `GET /ready` report service status and version.
 - `POST /chat` accepts a validated message and returns a structured response.
 - The default `mock` provider works without an API key, internet access, GPU, or paid service. It echoes the received message with a clear demo label; it does not reason like an LLM.
+- Chat requests pass through deterministic intent classification, a validated bounded plan, and JSON-configured advisory expert definitions. The current mock adapter still returns the same deterministic demo text; expert personas do not provide separate model reasoning.
+- `/chat` retains `reply`, `provider`, and `demo`, and adds `partial` to indicate whether some configured expert steps failed while useful results remained. It returns an `X-JARVIS-Execution-ID` header for chat success, provider failure, and timeout responses.
+- Successful expert outputs are joined in plan order. If the combined reply exceeds 40,000 characters, it is clipped to fit that limit and ends with a visible truncation marker; this does not change the `partial` flag, which reports expert failures.
+- The expert/tool registries and audit-event contracts are typed. `jarvis/orchestration/config/tools.json` is intentionally empty and no tool executor or external action exists.
 - Provider timeouts, provider failures, invalid requests, and configured message limits are handled explicitly.
 - Settings are validated at startup and JSON logs avoid request contents and secrets.
 - API errors use a JSON `{ "error": ..., "detail": ... }` envelope. Validation errors return 422, oversized requests return 413, provider failures return 502, provider timeouts return 504, and unexpected application errors return a generic 500.
 
 ## Verification baseline
 
-The current Windows baseline uses Python 3.12.10. `python -m pytest -v` passes all 17 tests. The installed FastAPI/Starlette test client currently emits a deprecation warning recommending `httpx2`; it does not affect the test results.
+Verified on Windows with Python 3.12: `.venv\Scripts\python.exe -m pytest -v` reports 56 passed (one Starlette deprecation warning recommending `httpx2`); frontend tests report 15 passed; `npm run build` succeeds; and `git diff --check` is clean.
 
 ## Not implemented yet
 
-There is no real LLM adapter, application database connection, persistent memory, planner, tool execution, approval system, account system, or external integration. Optional standalone PostgreSQL provisioning is documented below, but the app does not use it or persist conversations. The frontend is a local React interface only; the API never runs shell commands or external actions.
+There is no real LLM adapter, model-driven intent or planning, specialist expert reasoning, application database connection, persistent memory, tool execution, approval system, account system, or external integration. The planner and classifier are deterministic and bounded. Optional standalone PostgreSQL provisioning is documented below, but the app does not use it or persist conversations. The frontend is a local React interface only; the API never runs shell commands or external actions.
 
 ## Prerequisites
 
@@ -37,6 +41,8 @@ Copy-Item .env.example .env
 ```
 
 If PowerShell blocks virtual environment activation, use `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` in that PowerShell session and activate again.
+
+The declared PEP 517 build backend is `setuptools.build_meta` and requires `setuptools>=68`. With package-index access, `pip install -e ".[dev]"` installs the build requirement in its isolated build environment. In an offline setup, the required setuptools build dependency (and the project's declared runtime and development packages) must already be available to pip's build environment or in its local wheel cache. Wheel packaging has not been verified as part of this setup.
 
 ## Run the application
 
@@ -96,7 +102,7 @@ Demo mode is the default. Set `JARVIS_PROVIDER=mock` in `.env` to make it explic
 
 ## Where future capabilities belong
 
-HTTP contracts live in `jarvis/api/routes/`; request and response types live in `jarvis/models/`; validated settings and shared infrastructure live in `jarvis/core/`; model adapters and provider selection live in `jarvis/intelligence/`. Future capability modules should depend on a small provider/tool interface and be registered at the orchestration boundary, rather than importing a specific model SDK. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+HTTP contracts live in `jarvis/api/routes/`; request and response types live in `jarvis/models/`; validated settings and shared infrastructure live in `jarvis/core/`; model adapters and provider selection live in `jarvis/intelligence/`; intent, plans, registries, expert execution and audit contracts live in `jarvis/orchestration/`. Expert and tool definitions are data in `jarvis/orchestration/config/`. Future capability modules should depend on small provider/tool interfaces and be registered at the orchestration boundary, rather than importing a specific model SDK. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Known limitations and troubleshooting
 
@@ -111,3 +117,4 @@ HTTP contracts live in `jarvis/api/routes/`; request and response types live in 
 - Messages longer than the configured limit, including messages beyond the 20,000-character schema ceiling, return 413. Other schema-invalid requests, including whitespace-only messages and extra fields, return 422.
 - Provider timeout defaults to 5 seconds and is configurable from greater than 0 up to 60 seconds with `JARVIS_REQUEST_TIMEOUT_SECONDS`.
 - `JARVIS_ENVIRONMENT` accepts `development`, `test`, or `production`; `JARVIS_LOG_LEVEL` accepts `DEBUG`, `INFO`, `WARNING`, or `ERROR`. `JARVIS_APP_NAME` sets the API title. Only `JARVIS_PROVIDER=mock` is currently supported.
+- `JARVIS_MAX_TOOL_ROUNDS` is bounded to 1–5 (default 5), `JARVIS_MAX_EXPERT_RETRIES` to 0–3 (default 2), and `JARVIS_MAX_PARALLEL_EXPERTS` to 1–3 (default 2). Execution is sequential by default; parallel plans must be explicitly declared in the expert configuration. Retries apply only to explicitly marked transient expert failures and share the configured request deadline.

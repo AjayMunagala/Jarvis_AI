@@ -13,11 +13,24 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        # Only copy an explicit safe allowlist; arbitrary `extra` values may be secrets.
-        for key in ("environment", "error_type"):
+        # Only copy explicit metadata; arbitrary `extra` values may contain secrets.
+        scalar_fields = (
+            "environment", "error_type", "execution_id", "intent", "confidence",
+            "planned_experts", "successful_experts", "failed_experts", "partial",
+            "rounds", "tool_execution_enabled", "expert_id", "error_code", "attempts",
+        )
+        for key in scalar_fields:
             value = getattr(record, key, None)
             if isinstance(value, (str, int, float, bool)):
                 payload[key] = value
+        outcomes = getattr(record, "expert_outcomes", None)
+        if isinstance(outcomes, list) and all(
+            isinstance(item, dict)
+            and set(item) <= {"expert_id", "status", "attempts", "error_code"}
+            and all(isinstance(value, (str, int, float, bool)) or value is None for value in item.values())
+            for item in outcomes
+        ):
+            payload["expert_outcomes"] = outcomes
         return json.dumps(payload, ensure_ascii=False)
 
 

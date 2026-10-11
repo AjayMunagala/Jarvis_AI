@@ -16,6 +16,7 @@ type Message = {
   retryText?: string
   provider?: string
   demo?: boolean
+  partial?: boolean
 }
 
 type Conversation = {
@@ -131,7 +132,7 @@ export default function App() {
       setNotice('')
       const result = await sendChatMessage(text)
       setConversations((current) => current.map((conversation) => conversation.id === conversationId
-        ? { ...conversation, updatedAt: Date.now(), messages: [...conversation.messages.filter((message) => !(retryMessageId && message.id === retryMessageId)), { id: createId(), role: 'assistant', content: result.reply, provider: result.provider, demo: result.demo }] }
+        ? { ...conversation, updatedAt: Date.now(), messages: [...conversation.messages.filter((message) => !(retryMessageId && message.id === retryMessageId)), { id: createId(), role: 'assistant', content: result.reply, provider: result.provider, demo: result.demo, partial: result.partial }] }
         : conversation))
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'Something went wrong. Please try again.'
@@ -236,7 +237,7 @@ export default function App() {
               <div className="message-list">
                 {messages.map((message) => <article key={message.id} className={`message-row ${message.role === 'user' ? 'message-user' : 'message-assistant'}`}>
                   {message.role === 'assistant' && <div className="message-avatar"><span>J</span></div>}
-                  <div className="message-content-wrap"><div className="message-label">{message.role === 'user' ? 'YOU' : 'JARVIS'}{message.demo && <span className="message-demo-tag">DEMO · {message.provider?.toUpperCase()}</span>}</div><div className={`message-bubble ${message.error ? 'message-error' : ''}`}>{message.content}</div>{message.error && <button className="retry-button" onClick={() => void submitMessage(message.retryText ?? '', message.id)}><Activity size={13} /> Try again</button>}</div>
+                  <div className="message-content-wrap"><div className="message-label">{message.role === 'user' ? 'YOU' : 'JARVIS'}{message.demo && <span className="message-demo-tag">DEMO · {message.provider?.toUpperCase()}</span>}{message.partial && <span className="message-partial-tag">PARTIAL RESULT</span>}</div><div className={`message-bubble ${message.error ? 'message-error' : ''}`}>{message.content}</div>{message.error && <button className="retry-button" onClick={() => void submitMessage(message.retryText ?? '', message.id)}><Activity size={13} /> Try again</button>}</div>
                   {message.role === 'user' && <div className="user-avatar">A</div>}
                 </article>)}
                 {pending && <div className="message-row message-assistant" role="status" aria-label="JARVIS is responding"><div className="message-avatar"><span>J</span></div><div className="message-content-wrap"><div className="message-label">JARVIS</div><div className="typing-bubble"><span /><span /><span /><small>Thinking</small></div></div></div>}

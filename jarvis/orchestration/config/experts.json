@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "experts": [
+    {"id": "recommendation", "persona": "RecommendationExpert", "description": "Provides advisory recommendations.", "enabled": true, "tool_ids": []},
+    {"id": "analysis", "persona": "AnalysisExpert", "description": "Provides a structured analysis.", "enabled": true, "tool_ids": []},
+    {"id": "validation", "persona": "ValidationExpert", "description": "Checks claims and reasoning.", "enabled": true, "tool_ids": []},
+    {"id": "risk", "persona": "RiskExpert", "description": "Identifies potential risks and uncertainty.", "enabled": true, "tool_ids": []},
+    {"id": "compliance", "persona": "ComplianceExpert", "description": "Provides non-legal compliance-oriented analysis.", "enabled": true, "tool_ids": []},
+    {"id": "architecture", "persona": "ArchitectureExpert", "description": "Reviews architecture and module boundaries.", "enabled": true, "tool_ids": []},
+    {"id": "knowledge", "persona": "KnowledgeExpert", "description": "Handles general informational requests.", "enabled": true, "tool_ids": []}
+  ],
+  "intent_experts": {
+    "recommendation": ["recommendation"],
+    "analysis": ["analysis"],
+    "validation": ["validation"],
+    "risk_assessment": ["risk"],
+    "compliance": ["compliance"],
+    "architecture": ["architecture"],
+    "general_inquiry": ["knowledge"]
+  },
+  "parallel_intents": []
+}

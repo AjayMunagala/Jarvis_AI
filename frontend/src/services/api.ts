@@ -6,6 +6,7 @@ export interface ChatResponse {
   reply: string
   provider: string
   demo: boolean
+  partial?: boolean
 }
 
 const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, '')
@@ -38,7 +39,8 @@ export async function sendChatMessage(message: string): Promise<ChatResponse> {
   }
   if (typeof data !== 'object' || data === null || !('reply' in data)
     || typeof data.reply !== 'string' || !('provider' in data) || typeof data.provider !== 'string'
-    || !('demo' in data) || typeof data.demo !== 'boolean') {
+    || !('demo' in data) || typeof data.demo !== 'boolean'
+    || ('partial' in data && typeof data.partial !== 'boolean')) {
     throw new Error('JARVIS returned an unexpected response. Please try again.')
   }
   return data as ChatResponse

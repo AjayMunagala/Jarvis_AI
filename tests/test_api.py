@@ -27,6 +27,53 @@ def test_demo_chat_returns_clear_structured_response():
         "reply": f"This is a JARVIS demo response, not an AI-generated answer. I received: {marker}",
         "provider": "mock",
         "demo": True,
+        "partial": False,
+    }
+    assert len(response.headers["x-jarvis-execution-id"]) == 32
+
+
+def test_chat_returns_partial_status_with_useful_expert_output():
+    from jarvis.orchestration.registry import ExpertRegistry, ToolRegistry, ToolRegistryConfig
+    from jarvis.orchestration.service import OrchestrationService
+
+    settings = Settings(environment="test")
+    app = create_app(settings=settings)
+
+    class PartialProvider:
+        name = "mock"
+        is_demo = True
+
+        def __init__(self):
+            self.calls = 0
+
+        async def generate_reply(self, message):
+            self.calls += 1
+            if self.calls == 1:
+                return "Useful partial analysis."
+            raise RuntimeError("private provider detail")
+
+    provider = PartialProvider()
+    registry = ExpertRegistry.load()
+    # Reuse the default registry shape with two sequential experts for analysis.
+    data = registry.config.model_dump()
+    data["intent_experts"]["analysis"] = ("analysis", "validation")
+    registry = ExpertRegistry(type(registry.config).model_validate(data))
+    app.state.provider = provider
+    app.state.orchestration_service = OrchestrationService(
+        provider,
+        settings,
+        expert_registry=registry,
+        tool_registry=ToolRegistry(ToolRegistryConfig(version=1, tools=())),
+    )
+
+    with TestClient(app) as test_client:
+        response = test_client.post("/chat", json={"message": "Please analyze this"})
+    assert response.status_code == 200
+    assert response.json() == {
+        "reply": "Useful partial analysis.",
+        "provider": "mock",
+        "demo": True,
+        "partial": True,
     }
 
 
@@ -78,6 +125,7 @@ def test_provider_failure_is_sanitized(caplog):
     with client(provider=BrokenProvider()) as test_client:
         response = test_client.post("/chat", json={"message": "Hello"})
     assert response.status_code == 502
+    assert len(response.headers["x-jarvis-execution-id"]) == 32
     assert response.json() == {
         "error": "provider_error",
         "detail": "The configured provider failed.",
@@ -87,12 +135,13 @@ def test_provider_failure_is_sanitized(caplog):
     assert any(
         record.getMessage() == "Chat provider failed"
         and getattr(record, "error_type", None) == "RuntimeError"
+        and len(getattr(record, "execution_id", "")) == 32
         for record in caplog.records
     )
     assert "secret provider detail" not in caplog.text
 
 
-def test_provider_timeout_is_sanitized():
+def test_provider_timeout_is_sanitized(caplog):
     import asyncio
 
     class SlowProvider:
@@ -106,10 +155,16 @@ def test_provider_timeout_is_sanitized():
     with client(provider=SlowProvider(), request_timeout_seconds=0.01) as test_client:
         response = test_client.post("/chat", json={"message": "Hello"})
     assert response.status_code == 504
+    assert len(response.headers["x-jarvis-execution-id"]) == 32
     assert response.json() == {
         "error": "provider_timeout",
         "detail": "The configured provider timed out.",
     }
+    assert any(
+        record.getMessage() == "Chat provider timed out"
+        and getattr(record, "execution_id", None) == response.headers["x-jarvis-execution-id"]
+        for record in caplog.records
+    )
 
 
 def test_message_limit_uses_validated_configuration():

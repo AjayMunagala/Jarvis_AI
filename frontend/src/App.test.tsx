@@ -35,6 +35,14 @@ describe('JARVIS chat', () => {
     expect(screen.getByRole('button', { name: /Hello JARVIS/ })).toBeInTheDocument()
   })
 
+  it('marks synthesized partial expert responses clearly', async () => {
+    sendMock.mockResolvedValue({ reply: 'Some useful results.', provider: 'mock', demo: true, partial: true })
+    render(<App />)
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'Analyze this{Enter}')
+    expect(await screen.findByText('Some useful results.')).toBeInTheDocument()
+    expect(screen.getByText('PARTIAL RESULT')).toBeInTheDocument()
+  })
+
   it('shows a loading state and prevents duplicate submissions while pending', async () => {
     const user = userEvent.setup()
     let resolveRequest!: (value: { reply: string; provider: string; demo: boolean }) => void

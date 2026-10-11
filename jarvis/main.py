@@ -15,6 +15,7 @@ from jarvis.core.logging_config import configure_logging
 from jarvis.core.middleware import RequestBodyLimitMiddleware
 from jarvis.intelligence.base import IntelligenceProvider
 from jarvis.intelligence.router import build_provider
+from jarvis.orchestration.service import OrchestrationService
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ def create_app(
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.log_level)
     resolved_provider = provider if provider is not None else build_provider(resolved_settings.provider)
+    orchestration_service = OrchestrationService(resolved_provider, resolved_settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -40,6 +42,7 @@ def create_app(
     )
     app.state.settings = resolved_settings
     app.state.provider = resolved_provider
+    app.state.orchestration_service = orchestration_service
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=resolved_settings.max_request_body_bytes,
