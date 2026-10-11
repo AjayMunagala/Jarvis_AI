@@ -2,7 +2,7 @@
 
 ## Current milestone
 
-JARVIS Core v0.6 adds optional PostgreSQL conversation persistence behind a repository interface. It remains disabled by default, and mock mode does not need a PostgreSQL driver or server. Each successful chat request stores a separate conversation with user and assistant messages in one transaction. No history endpoint, multi-turn linking, or audit/provider internals are persisted. Apply migrations using the existing Windows migration runner; the app does not migrate at startup.
+JARVIS Core v0.7 adds conversation identity, continuation, and a read-only paginated history API to the optional PostgreSQL persistence foundation. Persistence remains disabled by default, and mock mode does not need a PostgreSQL driver or server. New persistent chats create a conversation ID; a supplied existing ID continues that conversation atomically. Unknown IDs return 404, and history/continuation requests return 503 when persistence is disabled. The history route returns chronological pages of up to 100 messages. IDs are not authorization; accounts and ownership checks do not exist. Apply migrations using the existing Windows migration runner; the app does not migrate at startup.
 
 ## Implemented
 
@@ -22,6 +22,7 @@ JARVIS Core v0.6 adds optional PostgreSQL conversation persistence behind a repo
 - Tool configuration is currently empty, the registry has no executor, and no shell command or external/state-changing action can be invoked.
 - Standalone Windows PostgreSQL provisioning scripts remain optional and outside application startup.
 - Optional `jarvis.persistence` provides a small repository protocol and PostgreSQL adapter. The `persistence` extra declares `psycopg[binary]`; set `JARVIS_PERSISTENCE_ENABLED=true` and a secret `JARVIS_PERSISTENCE_DATABASE_URL` only in a local environment. `/chat` returns sanitized HTTP 503 if saving fails. The same response shape is retained on success.
+- `/chat` accepts an optional UUID `conversation_id`. Persistent responses return the created or continued ID; non-persistent responses return `null`. `GET /conversations/{conversation_id}/messages` accepts `limit` (1–100, default 50) and `before_sequence` for older pages. Malformed IDs return sanitized 422, unknown IDs return sanitized 404, and unavailable persistence returns sanitized 503.
 
 ## Commands
 
@@ -46,18 +47,19 @@ npm run build
 ## Current limits
 
 - Intent classification and planning are deterministic, not model-driven. The configured personas share one provider; AnalysisExpert and ValidationExpert have distinct model instructions and structured contracts. In mock mode the instructions are ignored and responses are deterministic demo text with `not_evaluated` structured placeholders, not model reasoning.
-- The only configured tool list is empty. Tool execution, permission/approval gateway, persistent memory, persistent audit storage, authentication, and external integrations are not implemented. Conversation persistence is opt-in and limited to one request/response exchange per conversation.
+- The only configured tool list is empty. Tool execution, permission/approval gateway, persistent memory, persistent audit storage, authentication, and external integrations are not implemented. Conversation persistence is opt-in; v0.7 can link request/response exchanges by conversation ID and read bounded history pages, but has no user ownership or frontend history UI.
 - `/ready` confirms successful settings/provider/orchestrator construction; it does not probe external systems.
 - The default provider runs without a GPU, API key, or internet. Frontend conversation state is in-memory only.
 - OpenAI selection requires `JARVIS_OPENAI_API_KEY`; setting it does not fall back to mock if calls fail. Requests send user message content to the configured endpoint and may incur charges. No live provider call was performed during tests.
 - Analysis and validation require an endpoint/model that supports strict Chat Completions JSON Schema output. Unsupported-schema behavior is verified using mocked HTTP responses; live compatibility, model quality, and network connectivity remain unverified.
 - Provider cancellation is performed by `asyncio.wait_for`; future asynchronous adapters must release resources when cancelled.
 - The PostgreSQL foundation and its restore drill are documented in `database/README.md`; operational use still requires confirming the user's local server configuration and restore target.
-- Persistence is one exchange per conversation for now. No client-supplied conversation identifier, history API, multi-user ownership, or PostgreSQL integration test against a live server is included in this milestone unless verification below says otherwise.
+- Persistence can link multiple exchanges with a client-supplied conversation ID and expose bounded history pages. Multi-user ownership, authentication, frontend history UI, and a PostgreSQL integration test against a live server are not included unless verification below says otherwise.
 
 ## Verification on this working tree
 
-Core v0.6 verification on Windows/Python 3.12.10: `.venv-dev\Scripts\python.exe -m pytest -v` passed 117 tests; `.venv-dev\Scripts\python.exe -m compileall -q jarvis tests` passed; `npm test -- --run` passed 16 frontend tests; `npm run build` succeeded; and `git diff --check` passed. The Python suite required loopback access because the restricted sandbox blocks asyncio socket initialization. Persistence repository/API behavior is covered using controlled doubles. No `psql` executable or psycopg package was available, so no live PostgreSQL migration or integration test was run. The OpenAI adapter was not live-tested.
+Core v0.7 verification on Windows/Python 3.12.10: `.venv-dev\Scripts\python.exe -m pytest -v` passed 130 tests; `.venv-dev\Scripts\python.exe -m compileall -q jarvis tests` passed; `npm test -- --run` passed 16 frontend tests; `npm run build` succeeded; and `git diff --check` passed. Python tests ran with loopback access because restricted sandbox socket initialization stalls FastAPI TestClient. API and repository paging/transaction behavior used controlled doubles. No live PostgreSQL migration or adapter test was run; the `psycopg` package and `psql` executable were unavailable.
+
 
 - `.venv-dev\Scripts\python.exe -m pytest -v`: 101 passed in 1.42s when run with sandbox restrictions lifted.
 - `.venv-dev\Scripts\python.exe -m pytest tests/test_intelligence_provider.py -q`: 44 passed in 0.77s when run with sandbox restrictions lifted.
@@ -71,4 +73,4 @@ Core v0.6 verification on Windows/Python 3.12.10: `.venv-dev\Scripts\python.exe 
 
 ## Next work
 
-Review the Core v0.6 changes before approving another milestone. Live PostgreSQL migration/adapter behavior, live OpenAI connectivity, strict-schema compatibility against a live endpoint, and semantic model quality remain unverified. Preserve the roadmap's longer-term goals and do not infer that future tools, memory, model-driven planning, or actions exist from current configuration interfaces.
+Review the Core v0.7 changes before approving another milestone. Live PostgreSQL migration/adapter behavior, live OpenAI connectivity, strict-schema compatibility against a live endpoint, and semantic model quality remain unverified. Preserve the roadmap's longer-term goals and do not infer that future tools, memory, model-driven planning, or actions exist from current configuration interfaces.

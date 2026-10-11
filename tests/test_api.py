@@ -1,6 +1,9 @@
 import io
 import logging
+from uuid import UUID, uuid4
+from datetime import datetime, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 
 from jarvis.core.config import Settings
@@ -28,6 +31,7 @@ def test_demo_chat_returns_clear_structured_response():
         "provider": "mock",
         "demo": True,
         "partial": False,
+        "conversation_id": None,
     }
     assert len(response.headers["x-jarvis-execution-id"]) == 32
 
@@ -37,8 +41,9 @@ def test_optional_persistence_saves_user_and_assistant_without_changing_response
         def __init__(self):
             self.saved = None
 
-        def save_exchange(self, user_content, assistant_content):
+        def save_exchange(self, user_content, assistant_content, conversation_id=None):
             self.saved = (user_content, assistant_content)
+            return conversation_id or UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 
     repository = Repository()
     app = create_app(settings=Settings(environment="test"))
@@ -46,16 +51,154 @@ def test_optional_persistence_saves_user_and_assistant_without_changing_response
     with TestClient(app) as test_client:
         response = test_client.post("/chat", json={"message": "persist this request"})
     assert response.status_code == 200
-    assert set(response.json()) == {"reply", "provider", "demo", "partial"}
+    assert response.json()["conversation_id"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     assert repository.saved == (
         "persist this request",
         "This is a JARVIS demo response, not an AI-generated answer. I received: persist this request",
     )
 
 
+def test_chat_continues_supplied_conversation_id_and_returns_same_id():
+    conversation_id = uuid4()
+
+    class Repository:
+        def __init__(self):
+            self.calls = []
+
+        def save_exchange(self, user_content, assistant_content, supplied_id=None):
+            self.calls.append((user_content, assistant_content, supplied_id))
+            return supplied_id
+
+    repository = Repository()
+    app = create_app(settings=Settings(environment="test"))
+    app.state.conversation_repository = repository
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/chat", json={"message": "continue", "conversation_id": str(conversation_id)}
+        )
+    assert response.status_code == 200
+    assert response.json()["conversation_id"] == str(conversation_id)
+    assert repository.calls[0][2] == conversation_id
+
+
+def test_chat_unknown_conversation_is_not_replaced():
+    from jarvis.persistence.base import ConversationNotFound
+
+    conversation_id = uuid4()
+
+    class Repository:
+        def save_exchange(self, user_content, assistant_content, supplied_id=None):
+            assert supplied_id == conversation_id
+            raise ConversationNotFound()
+
+    app = create_app(settings=Settings(environment="test"))
+    app.state.conversation_repository = Repository()
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/chat", json={"message": "continue", "conversation_id": str(conversation_id)}
+        )
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "conversation_not_found",
+        "detail": "The requested conversation was not found.",
+    }
+
+
+def test_history_returns_bounded_chronological_isolated_messages():
+    conversation_id, other_id = uuid4(), uuid4()
+
+    class Repository:
+        def get_messages(self, requested_id, *, before_sequence=None, limit=51):
+            assert requested_id == conversation_id
+            assert before_sequence is None
+            assert limit == 3
+            return tuple(
+                ConversationMessage(
+                    id=uuid4(), conversation_id=conversation_id, sequence_number=i,
+                    role="user" if i % 2 == 0 else "assistant", content=f"m{i}",
+                    created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                )
+                for i in range(3)
+            )
+
+    from jarvis.persistence.base import ConversationMessage
+
+    app = create_app(settings=Settings(environment="test"))
+    app.state.conversation_repository = Repository()
+    with TestClient(app) as test_client:
+        response = test_client.get(f"/conversations/{conversation_id}/messages?limit=2")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["conversation_id"] == str(conversation_id)
+    assert [m["sequence_number"] for m in data["messages"]] == [1, 2]
+    assert data["has_more"] is True
+    assert data["next_before_sequence"] == 1
+    assert str(other_id) not in response.text
+
+
+def test_history_is_unavailable_when_persistence_is_disabled():
+    with client() as test_client:
+        response = test_client.get(f"/conversations/{uuid4()}/messages")
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "persistence_unavailable",
+        "detail": "Conversation persistence is not enabled.",
+    }
+
+
+@pytest.mark.parametrize(
+    ("failure", "status", "error_code"),
+    [
+        ("missing", 404, "conversation_not_found"),
+        ("database", 503, "persistence_unavailable"),
+    ],
+)
+def test_history_failures_are_sanitized(failure, status, error_code):
+    from jarvis.persistence.base import ConversationNotFound, PersistenceError
+
+    class Repository:
+        def get_messages(self, conversation_id, *, before_sequence=None, limit=51):
+            if failure == "missing":
+                raise ConversationNotFound()
+            raise PersistenceError() from RuntimeError("private database details")
+
+    app = create_app(settings=Settings(environment="test"))
+    app.state.conversation_repository = Repository()
+    with TestClient(app) as test_client:
+        response = test_client.get(f"/conversations/{uuid4()}/messages")
+    assert response.status_code == status
+    assert response.json()["error"] == error_code
+    assert "private database details" not in response.text
+
+
+def test_chat_cannot_continue_conversation_when_persistence_is_disabled():
+    conversation_id = uuid4()
+    with client() as test_client:
+        response = test_client.post(
+            "/chat", json={"message": "continue", "conversation_id": str(conversation_id)}
+        )
+    assert response.status_code == 503
+    assert response.json()["error"] == "persistence_unavailable"
+    assert response.headers["x-jarvis-execution-id"]
+
+
+def test_invalid_conversation_id_is_rejected():
+    with client() as test_client:
+        response = test_client.get("/conversations/not-a-uuid/messages")
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_request"
+
+
+def test_unmatched_route_keeps_generic_not_found_error():
+    with client() as test_client:
+        response = test_client.get("/not-a-route")
+    assert response.status_code == 404
+    assert response.json()["error"] == "http_error"
+
+
 def test_persistence_failure_does_not_report_success_or_leak_database_details(caplog):
     class UnavailableRepository:
-        def save_exchange(self, user_content, assistant_content):
+        def save_exchange(self, user_content, assistant_content, conversation_id=None):
             from jarvis.persistence.base import PersistenceError
             raise PersistenceError() from RuntimeError("private database credential")
 
@@ -135,6 +278,7 @@ def test_chat_returns_partial_status_with_useful_expert_output():
         "provider": "mock",
         "demo": True,
         "partial": True,
+        "conversation_id": None,
     }
 
 

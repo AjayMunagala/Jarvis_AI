@@ -7,7 +7,7 @@ from starlette.concurrency import run_in_threadpool
 
 from jarvis.models.schemas import ChatRequest, ChatResponse, ErrorResponse
 from jarvis.orchestration.models import ExpertExecutionError, ExpertTimeoutError, RequestContext
-from jarvis.persistence.base import PersistenceError
+from jarvis.persistence.base import ConversationNotFound, PersistenceError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["chat"])
@@ -22,6 +22,7 @@ router = APIRouter(tags=["chat"])
         502: {"model": ErrorResponse, "description": "Provider failure"},
         504: {"model": ErrorResponse, "description": "Provider timeout"},
         503: {"model": ErrorResponse, "description": "Persistence unavailable"},
+        404: {"model": ErrorResponse, "description": "Conversation not found"},
     },
 )
 async def chat(body: ChatRequest, request: Request, response: Response) -> ChatResponse:
@@ -29,6 +30,13 @@ async def chat(body: ChatRequest, request: Request, response: Response) -> ChatR
         raise HTTPException(status_code=413, detail="Message exceeds the configured size limit.")
     context = RequestContext(message=body.message)
     response.headers["X-JARVIS-Execution-ID"] = context.execution_id
+    repository = request.app.state.conversation_repository
+    if body.conversation_id is not None and repository is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Conversation persistence is not enabled.",
+            headers={"X-JARVIS-Execution-ID": context.execution_id},
+        )
     try:
         result = await request.app.state.orchestration_service.run(context)
     except ExpertTimeoutError as exc:
@@ -51,10 +59,18 @@ async def chat(body: ChatRequest, request: Request, response: Response) -> ChatR
             detail="The configured provider failed.",
             headers={"X-JARVIS-Execution-ID": context.execution_id},
         ) from exc
-    repository = request.app.state.conversation_repository
+    conversation_id = None
     if repository is not None:
         try:
-            await run_in_threadpool(repository.save_exchange, body.message, result.reply)
+            conversation_id = await run_in_threadpool(
+                repository.save_exchange, body.message, result.reply, body.conversation_id
+            )
+        except ConversationNotFound as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="The requested conversation was not found.",
+                headers={"X-JARVIS-Execution-ID": context.execution_id},
+            ) from exc
         except PersistenceError as exc:
             logger.error(
                 "Chat persistence failed",
@@ -70,4 +86,5 @@ async def chat(body: ChatRequest, request: Request, response: Response) -> ChatR
         provider=request.app.state.provider.name,
         demo=request.app.state.provider.is_demo,
         partial=result.partial,
+        conversation_id=conversation_id,
     )

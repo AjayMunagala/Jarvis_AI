@@ -9,6 +9,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from jarvis import __version__
 from jarvis.api.routes.chat import router as chat_router
+from jarvis.api.routes.conversations import router as conversations_router
 from jarvis.api.routes.health import router as health_router
 from jarvis.core.config import Settings, get_settings
 from jarvis.core.logging_config import configure_logging
@@ -63,6 +64,7 @@ def create_app(
     )
     app.include_router(health_router)
     app.include_router(chat_router)
+    app.include_router(conversations_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -92,10 +94,15 @@ def create_app(
             504: "provider_timeout",
             503: "persistence_unavailable",
         }
+        error_code = (
+            "conversation_not_found"
+            if exc.status_code == 404 and exc.detail == "The requested conversation was not found."
+            else error_codes.get(exc.status_code, "http_error")
+        )
         return JSONResponse(
             status_code=exc.status_code,
             content={
-                "error": error_codes.get(exc.status_code, "http_error"),
+                "error": error_code,
                 "detail": str(exc.detail),
             },
             headers=exc.headers,

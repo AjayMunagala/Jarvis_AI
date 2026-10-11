@@ -100,7 +100,7 @@ def test_openai_adapter_sends_typed_chat_request_and_validates_reply():
     ]
 
 
-def test_chat_contract_identifies_model_provider_without_changing_response_shape():
+def test_chat_contract_identifies_model_provider_and_returns_null_id_without_persistence():
     provider = openai_provider(httpx.MockTransport(
         lambda request: httpx.Response(200, json={"choices": [{"message": {"content": "Model-backed reply."}}]})
     ))
@@ -113,6 +113,7 @@ def test_chat_contract_identifies_model_provider_without_changing_response_shape
         "provider": "openai",
         "demo": False,
         "partial": False,
+        "conversation_id": None,
     }
     assert len(response.headers["x-jarvis-execution-id"]) == 32
 
@@ -137,7 +138,8 @@ def test_structured_specialist_chat_keeps_public_api_contract():
     with TestClient(create_app(settings=settings, provider=provider)) as client:
         response = client.post("/chat", json={"message": "Analyze the proposal"})
     assert response.status_code == 200
-    assert set(response.json()) == {"reply", "provider", "demo", "partial"}
+    assert set(response.json()) == {"reply", "provider", "demo", "partial", "conversation_id"}
+    assert response.json()["conversation_id"] is None
     assert response.json()["reply"] == (
         "The proposal has two material trade-offs.\n\nRelevant factors:\n"
         "- Cost: The upfront cost is higher.\n\nRecommendations:\n"
@@ -201,7 +203,8 @@ def test_validation_finding_is_rendered_in_readable_chat_reply_without_internal_
         response = client.post("/chat", json={"message": "Validate claim marker PRIVATE_PROMPT_MARKER"})
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"reply", "provider", "demo", "partial"}
+    assert set(body) == {"reply", "provider", "demo", "partial", "conversation_id"}
+    assert body["conversation_id"] is None
     assert "supported" in body["reply"]
     assert "The system retains no chat history." in body["reply"]
     assert "The implementation stores chat state only in memory." in body["reply"]

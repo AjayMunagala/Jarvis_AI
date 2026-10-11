@@ -4,7 +4,9 @@ from datetime import datetime, timezone
 from typing import Callable
 from uuid import UUID, uuid4
 
-from jarvis.persistence.base import ConversationMessage, MessageRole, PersistenceError
+from jarvis.persistence.base import (
+    ConversationMessage, ConversationNotFound, MessageRole, PersistenceError,
+)
 
 
 class PostgresConversationRepository:
@@ -53,6 +55,7 @@ class PostgresConversationRepository:
             message = ConversationMessage(
                 id=message_id,
                 conversation_id=conversation_id,
+                sequence_number=0,
                 role=role,
                 content=content,
                 created_at=datetime.now(timezone.utc),
@@ -73,52 +76,90 @@ class PostgresConversationRepository:
                     """INSERT INTO jarvis_app.messages
                        (id, conversation_id, sequence_number, role, content)
                        VALUES (%s, %s, %s, %s, %s)
-                       RETURNING id, conversation_id, role, content, created_at""",
+                       RETURNING id, conversation_id, sequence_number, role, content, created_at""",
                     (message.id, message.conversation_id, sequence_number, message.role, message.content),
                 ).fetchone()
             return ConversationMessage(
-                id=row[0], conversation_id=row[1], role=row[2], content=row[3], created_at=row[4]
+                id=row[0], conversation_id=row[1], sequence_number=row[2], role=row[3],
+                content=row[4], created_at=row[5]
             )
         except PersistenceError:
             raise
         except Exception as exc:
             raise PersistenceError() from exc
 
-    def get_messages(self, conversation_id: UUID) -> tuple[ConversationMessage, ...]:
+    def get_messages(
+        self, conversation_id: UUID, *, before_sequence: int | None = None, limit: int = 51
+    ) -> tuple[ConversationMessage, ...]:
         try:
             with self._open_connection() as connection:
+                exists = connection.execute(
+                    "SELECT id FROM jarvis_app.conversations WHERE id = %s", (conversation_id,)
+                ).fetchone()
+                if exists is None:
+                    raise ConversationNotFound()
+                if before_sequence is None:
+                    page_filter = "conversation_id = %s"
+                    page_parameters = (conversation_id, limit)
+                else:
+                    page_filter = "conversation_id = %s AND sequence_number < %s"
+                    page_parameters = (conversation_id, before_sequence, limit)
                 rows = connection.execute(
-                    """SELECT id, conversation_id, role, content, created_at
-                       FROM jarvis_app.messages WHERE conversation_id = %s
-                       ORDER BY sequence_number, id""",
-                    (conversation_id,),
+                    f"""SELECT id, conversation_id, sequence_number, role, content, created_at
+                       FROM jarvis_app.messages
+                       WHERE {page_filter}
+                       ORDER BY sequence_number DESC, id DESC LIMIT %s""",
+                    page_parameters,
                 ).fetchall()
-            return tuple(
+            messages = tuple(
                 ConversationMessage(
-                    id=row[0], conversation_id=row[1], role=row[2], content=row[3], created_at=row[4]
+                    id=row[0], conversation_id=row[1], sequence_number=row[2], role=row[3],
+                    content=row[4], created_at=row[5]
                 )
-                for row in rows
+                for row in reversed(rows)
             )
+            return messages
+        except ConversationNotFound:
+            raise
         except Exception as exc:
             raise PersistenceError() from exc
 
-    def save_exchange(self, user_content: str, assistant_content: str) -> UUID:
-        """Store the conversation and both messages in one transaction."""
-        conversation_id = uuid4()
+    def save_exchange(
+        self, user_content: str, assistant_content: str, conversation_id: UUID | None = None
+    ) -> UUID:
+        """Store a new conversation or append an exchange atomically."""
+        is_new = conversation_id is None
+        conversation_id = conversation_id or uuid4()
         user_message_id, assistant_message_id = uuid4(), uuid4()
         try:
             # psycopg connection context commits on success and rolls back on exception.
             with self._open_connection() as connection:
-                connection.execute(
-                    "INSERT INTO jarvis_app.conversations (id) VALUES (%s)", (conversation_id,)
-                )
+                if is_new:
+                    connection.execute(
+                        "INSERT INTO jarvis_app.conversations (id) VALUES (%s)", (conversation_id,)
+                    )
+                    first_sequence = 0
+                else:
+                    parent = connection.execute(
+                        "SELECT id FROM jarvis_app.conversations WHERE id = %s FOR UPDATE",
+                        (conversation_id,),
+                    ).fetchone()
+                    if parent is None:
+                        raise ConversationNotFound()
+                    first_sequence = connection.execute(
+                        """SELECT COALESCE(MAX(sequence_number), -1) + 1
+                           FROM jarvis_app.messages WHERE conversation_id = %s""",
+                        (conversation_id,),
+                    ).fetchone()[0]
                 connection.execute(
                     """INSERT INTO jarvis_app.messages
                        (id, conversation_id, sequence_number, role, content)
-                       VALUES (%s, %s, 0, 'user', %s), (%s, %s, 1, 'assistant', %s)""",
-                    (user_message_id, conversation_id, user_content,
-                     assistant_message_id, conversation_id, assistant_content),
+                       VALUES (%s, %s, %s, 'user', %s), (%s, %s, %s, 'assistant', %s)""",
+                    (user_message_id, conversation_id, first_sequence, user_content,
+                     assistant_message_id, conversation_id, first_sequence + 1, assistant_content),
                 )
+        except ConversationNotFound:
+            raise
         except Exception as exc:
             raise PersistenceError() from exc
         return conversation_id

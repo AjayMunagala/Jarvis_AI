@@ -6,7 +6,7 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from jarvis.core.config import Settings
-from jarvis.persistence.base import ConversationMessage, PersistenceError
+from jarvis.persistence.base import ConversationMessage, ConversationNotFound, PersistenceError
 from jarvis.persistence.postgres import PostgresConversationRepository
 
 
@@ -49,6 +49,7 @@ def test_message_contract_rejects_unsupported_roles(role):
     with pytest.raises(ValidationError):
         ConversationMessage(
             id=uuid4(), conversation_id=uuid4(), role=role, content="text",
+            sequence_number=0,
             created_at=datetime.now(timezone.utc),
         )
 
@@ -57,6 +58,7 @@ def test_message_contract_rejects_blank_content():
     with pytest.raises(ValidationError):
         ConversationMessage(
             id=uuid4(), conversation_id=uuid4(), role="user", content="  \n",
+            sequence_number=0,
             created_at=datetime.now(timezone.utc),
         )
 
@@ -65,6 +67,7 @@ class FakeConnection(AbstractContextManager):
     def __init__(self, rows=(), *, fail_on_call=None, next_sequence=0, conversation_exists=True):
         self.calls = []
         self.rows = list(rows)
+        self.message_rows = list(rows)
         self.fail_on_call = fail_on_call
         self.next_sequence = next_sequence
         self.conversation_exists = conversation_exists
@@ -85,10 +88,16 @@ class FakeConnection(AbstractContextManager):
             raise RuntimeError("private database password and provider payload")
         if "SELECT id FROM jarvis_app.conversations" in query:
             self.rows = [(params[0],)] if self.conversation_exists else []
+        elif "RETURNING id, conversation_id, sequence_number, role, content, created_at" in query:
+            self.rows = [(*params[:3], params[3], params[4], datetime.now(timezone.utc))]
+        elif "SELECT id, conversation_id, sequence_number, role, content, created_at" in query:
+            self.rows = (
+                list(reversed(self.message_rows))
+                if "ORDER BY sequence_number DESC" in query
+                else self.message_rows
+            )
         elif "SELECT COALESCE(MAX(sequence_number)" in query:
             self.rows = [(self.next_sequence,)]
-        elif "RETURNING id, conversation_id, role, content, created_at" in query:
-            self.rows = [(*params[:2], params[3], params[4], datetime.now(timezone.utc))]
         return self
 
     def fetchone(self):
@@ -117,8 +126,8 @@ def test_save_exchange_is_transactional_and_parameterized():
     assert connection.calls[0][1] == (conversation_id,)
     message_query, parameters = connection.calls[1]
     assert "%s" in message_query and "sequence_number" in message_query
-    assert parameters[1] == conversation_id and parameters[2] == "question"
-    assert parameters[4] == conversation_id and parameters[5] == "answer"
+    assert parameters[1] == conversation_id and parameters[2] == 0 and parameters[3] == "question"
+    assert parameters[5] == conversation_id and parameters[6] == 1 and parameters[7] == "answer"
 
 
 def test_save_exchange_rolls_back_and_sanitizes_database_failure():
@@ -135,20 +144,79 @@ def test_save_exchange_rolls_back_and_sanitizes_database_failure():
     assert "private database password" not in str(error.value)
 
 
+def test_save_exchange_appends_to_existing_conversation_atomically():
+    conversation_id = uuid4()
+    connection = FakeConnection(next_sequence=2)
+    repository = PostgresConversationRepository(
+        "postgresql://secret", connect=lambda _, **__: connection
+    )
+
+    saved_id = repository.save_exchange("next question", "next answer", conversation_id)
+
+    assert saved_id == conversation_id
+    assert connection.committed
+    assert "INSERT INTO jarvis_app.conversations" not in " ".join(
+        query for query, _ in connection.calls
+    )
+    insert_query, params = connection.calls[2]
+    assert "sequence_number" in insert_query
+    assert params[1:4] == (conversation_id, 2, "next question")
+    assert params[5:8] == (conversation_id, 3, "next answer")
+
+
+def test_save_exchange_unknown_conversation_does_not_create_replacement():
+    conversation_id = uuid4()
+    connection = FakeConnection(conversation_exists=False)
+    repository = PostgresConversationRepository(
+        "postgresql://secret", connect=lambda _, **__: connection
+    )
+
+    with pytest.raises(ConversationNotFound):
+        repository.save_exchange("question", "answer", conversation_id)
+
+    assert connection.rolled_back
+    assert all("INSERT INTO jarvis_app.conversations" not in query for query, _ in connection.calls)
+
+
+def test_message_retrieval_rejects_unknown_conversation():
+    connection = FakeConnection(conversation_exists=False)
+    repository = PostgresConversationRepository(
+        "postgresql://secret", connect=lambda _, **__: connection
+    )
+    with pytest.raises(ConversationNotFound):
+        repository.get_messages(uuid4())
+
+
 def test_message_retrieval_uses_stable_insertion_order():
     conversation_id = uuid4()
     earlier_id, later_id = uuid4(), uuid4()
-    earlier = (earlier_id, conversation_id, "user", "first", datetime(2026, 1, 1, tzinfo=timezone.utc))
-    later = (later_id, conversation_id, "assistant", "second", datetime(2026, 1, 2, tzinfo=timezone.utc))
+    earlier = (earlier_id, conversation_id, 0, "user", "first", datetime(2026, 1, 1, tzinfo=timezone.utc))
+    later = (later_id, conversation_id, 1, "assistant", "second", datetime(2026, 1, 2, tzinfo=timezone.utc))
     connection = FakeConnection((earlier, later))
     repository = PostgresConversationRepository("postgresql://secret", connect=lambda _, **__: connection)
 
     messages = repository.get_messages(conversation_id)
 
     assert [message.content for message in messages] == ["first", "second"]
-    query, params = connection.calls[0]
-    assert "ORDER BY sequence_number, id" in query
-    assert params == (conversation_id,)
+    query, params = connection.calls[1]
+    assert "WHERE conversation_id = %s" in query
+    assert "ORDER BY sequence_number DESC" in query
+    assert params == (conversation_id, 51)
+    assert [message.sequence_number for message in messages] == [0, 1]
+
+
+def test_message_retrieval_cursor_filters_to_older_sequence_numbers():
+    conversation_id = uuid4()
+    connection = FakeConnection()
+    repository = PostgresConversationRepository(
+        "postgresql://secret", connect=lambda _, **__: connection
+    )
+
+    assert repository.get_messages(conversation_id, before_sequence=9, limit=21) == ()
+
+    query, params = connection.calls[1]
+    assert "sequence_number < %s" in query
+    assert params == (conversation_id, 9, 21)
 
 
 def test_append_message_assigns_next_conversation_sequence_and_checks_parent():

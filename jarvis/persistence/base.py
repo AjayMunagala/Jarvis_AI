@@ -15,6 +15,7 @@ class ConversationMessage(BaseModel):
 
     id: UUID
     conversation_id: UUID
+    sequence_number: int = Field(ge=0)
     role: MessageRole
     content: StrictStr = Field(min_length=1, max_length=40000)
     created_at: datetime
@@ -36,10 +37,14 @@ class ConversationRepository(Protocol):
         self, conversation_id: UUID, role: MessageRole, content: str
     ) -> ConversationMessage: ...
 
-    def get_messages(self, conversation_id: UUID) -> tuple[ConversationMessage, ...]: ...
+    def get_messages(
+        self, conversation_id: UUID, *, before_sequence: int | None = None, limit: int = 51
+    ) -> tuple[ConversationMessage, ...]: ...
 
-    def save_exchange(self, user_content: str, assistant_content: str) -> UUID:
-        """Atomically create a one-request conversation and store its two messages."""
+    def save_exchange(
+        self, user_content: str, assistant_content: str, conversation_id: UUID | None = None
+    ) -> UUID:
+        """Atomically create or continue a conversation and store one exchange."""
         ...
 
 
@@ -48,3 +53,7 @@ class PersistenceError(Exception):
 
     def __init__(self) -> None:
         super().__init__("Conversation persistence is unavailable.")
+
+
+class ConversationNotFound(Exception):
+    """The caller supplied an identifier that does not exist."""

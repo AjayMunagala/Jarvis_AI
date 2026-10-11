@@ -52,6 +52,15 @@ The new behavior is covered by offline mocked-provider tests, including actual o
 
 Repository transaction behavior and API failure/compatibility paths are tested with controlled doubles. No `psql` executable or installed psycopg extra was available, so migration application and live PostgreSQL behavior remain unverified.
 
+## Core v0.7 — Conversation Identity and History API (implemented; live PostgreSQL unverified)
+
+- Extend `/chat` with an optional UUID `conversation_id`; create a new persistent conversation when absent and atomically append exchanges when an existing ID is supplied.
+- Return `conversation_id` in the response when persistence is enabled and `null` when disabled, preserving the existing reply/provider/demo/partial fields. Unknown supplied IDs return 404 rather than being replaced.
+- Add read-only `GET /conversations/{conversation_id}/messages` with chronological, bounded pages and a sequence cursor. History and continuation return sanitized 503 when persistence is disabled.
+- Keep PostgreSQL optional and mock chat functional without it. Conversation IDs do not provide authentication or user ownership; no frontend history UI, account system, retention policy, or long-term memory is introduced.
+
+API and repository behavior is covered with controlled repository/connection doubles. Live PostgreSQL migration, paging, and transaction behavior remain unverified unless separately reported by a live database run.
+
 ## Later milestones
 
 1. Conversation continuity and memory: design client conversation identity, retrieval APIs, retention, and user isolation before adding continuity or memory.
