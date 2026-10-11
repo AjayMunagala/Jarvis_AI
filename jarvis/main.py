@@ -11,6 +11,7 @@ from jarvis import __version__
 from jarvis.api.routes.chat import router as chat_router
 from jarvis.api.routes.conversations import router as conversations_router
 from jarvis.api.routes.health import router as health_router
+from jarvis.api.routes.memories import router as memories_router
 from jarvis.core.config import Settings, get_settings
 from jarvis.core.logging_config import configure_logging
 from jarvis.core.middleware import RequestBodyLimitMiddleware
@@ -18,6 +19,7 @@ from jarvis.intelligence.base import IntelligenceProvider
 from jarvis.intelligence.router import build_provider
 from jarvis.orchestration.service import OrchestrationService
 from jarvis.persistence.postgres import PostgresConversationRepository
+from jarvis.persistence.memory_postgres import PostgresMemoryRepository
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +36,16 @@ def create_app(
     )
     orchestration_service = OrchestrationService(resolved_provider, resolved_settings)
     conversation_repository = None
+    memory_repository = None
     if resolved_settings.persistence_enabled:
         database_url = resolved_settings.persistence_database_url
         # Settings validation guarantees the URL exists when this option is enabled.
         assert database_url is not None
         conversation_repository = PostgresConversationRepository(
+            database_url.get_secret_value(),
+            connect_timeout_seconds=resolved_settings.persistence_connect_timeout_seconds,
+        )
+        memory_repository = PostgresMemoryRepository(
             database_url.get_secret_value(),
             connect_timeout_seconds=resolved_settings.persistence_connect_timeout_seconds,
         )
@@ -58,6 +65,7 @@ def create_app(
     app.state.provider = resolved_provider
     app.state.orchestration_service = orchestration_service
     app.state.conversation_repository = conversation_repository
+    app.state.memory_repository = memory_repository
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=resolved_settings.max_request_body_bytes,
@@ -65,6 +73,7 @@ def create_app(
     app.include_router(health_router)
     app.include_router(chat_router)
     app.include_router(conversations_router)
+    app.include_router(memories_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -97,6 +106,8 @@ def create_app(
         error_code = (
             "conversation_not_found"
             if exc.status_code == 404 and exc.detail == "The requested conversation was not found."
+            else "memory_not_found"
+            if exc.status_code == 404 and exc.detail == "The requested memory was not found."
             else error_codes.get(exc.status_code, "http_error")
         )
         return JSONResponse(

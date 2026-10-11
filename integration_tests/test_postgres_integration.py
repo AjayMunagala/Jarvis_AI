@@ -200,6 +200,43 @@ def test_clean_migrations_checksums_and_rerun(isolated_postgres):
     assert dict(rows) == expected
 
 
+def test_memory_crud_search_ranking_and_delete(isolated_postgres):
+    from jarvis.memory.models import MemoryUpdate
+    from jarvis.persistence.memory_postgres import PostgresMemoryRepository
+
+    repository = PostgresMemoryRepository(isolated_postgres.database_url, connect_timeout_seconds=3)
+    repeated = repository.create(
+        "JARVIS memory retrieval memory retrieval improves lexical ranking.",
+        category="project",
+        source_reference="manual-note-1",
+    )
+    ordinary = repository.create("JARVIS memory retrieval is deterministic.", category="project")
+    unrelated = repository.create("Tomato plants need sunlight.", category="garden")
+
+    first_page = repository.search("memory retrieval", limit=1)
+    assert first_page.total == 2
+    assert first_page.has_more is True
+    assert len(first_page.items) == 1
+    assert first_page.items[0].id == repeated.id
+    second_page = repository.search("memory retrieval", limit=1, offset=1)
+    assert second_page.total == 2
+    assert second_page.has_more is False
+    assert [item.id for item in (*first_page.items, *second_page.items)] == [repeated.id, ordinary.id]
+    assert repository.search("term-with-no-match", limit=5).items == ()
+
+    fetched = repository.get(repeated.id)
+    assert fetched is not None
+    assert fetched.source_reference == "manual-note-1"
+    changed = repository.update(repeated.id, MemoryUpdate(category="updated"))
+    assert changed is not None and changed.category == "updated"
+    assert changed.updated_at >= fetched.updated_at
+    assert repository.delete(repeated.id) is True
+    assert repository.get(repeated.id) is None
+    assert repository.delete(uuid4()) is False
+    assert repository.get(ordinary.id) is not None
+    assert repository.get(unrelated.id) is not None
+
+
 def test_chat_creates_continues_and_reads_history_across_pages(isolated_postgres):
     with isolated_postgres.client() as client:
         first = client.post("/chat", json={"message": "first turn"})

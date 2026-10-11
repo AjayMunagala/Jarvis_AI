@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     persistence_enabled: bool = False
     persistence_database_url: SecretStr | None = None
     persistence_connect_timeout_seconds: int = Field(default=3, ge=1, le=15)
+    memory_retrieval_enabled: bool = False
+    memory_retrieval_limit: int = Field(default=3, ge=1, le=5)
 
     @model_validator(mode="after")
     def validate_provider_configuration(self) -> "Settings":
@@ -72,6 +74,10 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "JARVIS_PERSISTENCE_DATABASE_URL must include a PostgreSQL host and database name."
                 )
+        if self.memory_retrieval_enabled and not self.persistence_enabled:
+            raise ValueError(
+                "JARVIS_MEMORY_RETRIEVAL_ENABLED=true requires JARVIS_PERSISTENCE_ENABLED=true."
+            )
         return self
 
 

@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 from jarvis.models.schemas import ChatRequest, ChatResponse, ErrorResponse
+from jarvis.memory.retrieval import retrieve_context
 from jarvis.orchestration.models import ExpertExecutionError, ExpertTimeoutError, RequestContext
 from jarvis.persistence.base import ConversationNotFound, PersistenceError
 
@@ -37,6 +38,15 @@ async def chat(body: ChatRequest, request: Request, response: Response) -> ChatR
             detail="Conversation persistence is not enabled.",
             headers={"X-JARVIS-Execution-ID": context.execution_id},
         )
+    if request.app.state.settings.memory_retrieval_enabled:
+        retrieved_memories = await run_in_threadpool(
+            retrieve_context,
+            request.app.state.memory_repository,
+            body.message,
+            limit=request.app.state.settings.memory_retrieval_limit,
+            execution_id=context.execution_id,
+        )
+        context = context.model_copy(update={"retrieved_memories": retrieved_memories})
     try:
         result = await request.app.state.orchestration_service.run(context)
     except ExpertTimeoutError as exc:

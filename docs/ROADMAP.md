@@ -61,13 +61,31 @@ Repository transaction behavior and API failure/compatibility paths are tested w
 
 API and repository behavior is covered with controlled repository/connection doubles. Live PostgreSQL migration, paging, and transaction behavior remain unverified unless separately reported by a live database run.
 
+## Core v0.8 — PostgreSQL Integration Verification (implemented; live verified)
+
+- Add an opt-in live PostgreSQL integration suite using a password-free loopback admin URL, `PGPASSFILE`, PostgreSQL client tools, and a unique disposable `jarvis_it_<hex>` database.
+- Exercise migration checksums/reruns, chat continuation/history pagination, missing conversations, rollback/recovery, concurrent appends, and sanitized connection failure.
+- Keep the suite outside the default offline `tests/` collection; skipped live tests are never reported as database verification.
+
+The local PostgreSQL 18 integration suite passed 11/11 tests (5 URL guard cases and 6 live database cases). The generated database was removed. See the verification note in `docs/HANDOFF.md` for the environment and remaining deployment limitations.
+
+## Core v0.9 — Persistent Memory and Retrieval Foundation (implemented; verified locally)
+
+- Add an incremental PostgreSQL memory migration and a separate memory repository protocol/adapter. Memory content is strictly bounded, explicitly created/updated/deleted, and never copied automatically from chat messages.
+- Add bounded `/memories` create/list/get/patch/delete and deterministic PostgreSQL lexical full-text search. Search is not semantic and does not use embeddings or pgvector.
+- Make chat retrieval explicitly configurable and disabled by default. Pass a small typed set of retrieved records as untrusted context; retrieval failures fall back to no memory context.
+- Preserve offline mock startup and ordinary chat when persistence is disabled. Memory API operations return sanitized 503 when storage is unavailable.
+- Document that the memory API is global and unauthenticated and must not be exposed to untrusted/shared deployments; UUIDs do not grant ownership or authorization.
+
+Verification on Windows/Python 3.12.10: 143 default Python tests and 13 focused memory tests passed; the opt-in PostgreSQL integration suite passed 12/12 (5 URL checks and 7 live PostgreSQL cases); compileall, 16 frontend tests, the production build, and `git diff --check` passed. Live OpenAI behavior and semantic quality remain unverified. The milestone adds no account/ownership model, embedding generation, pgvector, automatic memory extraction, retention scheduler, memory audit history, or frontend memory controls.
+
 ## Later milestones
 
-1. Conversation continuity and memory: design client conversation identity, retrieval APIs, retention, and user isolation before adding continuity or memory.
+1. Identity and memory governance: authenticated users, explicit ownership, access controls, retention/export/revocation, and user-visible memory controls before exposing memory in shared deployments.
 2. Real model adapters: optional local CPU model and compatible hosted providers behind provider interfaces, with explicit cost, privacy, timeout, and retry controls.
 3. Safe tools and permissions: tool registry/runtime, permission and approval gateway, independent verification, bounded retries, and fault isolation.
 4. User experience: React/TypeScript interface, natural conversation, voice input/output, and supported desktop/mobile integrations.
-5. Personal knowledge: document analysis, web research, memory, retrieval, and personalized learning/tutoring.
+5. Personal knowledge: document ingestion, web research, semantic retrieval, citations, and personalized learning/tutoring, building on the explicit lexical memory foundation.
 6. Personal workflows: task management, reminders, scheduling, and proactive monitoring/notifications.
 7. Specialized capabilities: travel planning, creative tools, and smart-home integrations behind explicit user permissions.
 8. High-risk domains: financial planning, expense analysis, stock-market research, and experimental forecasting with clear limitations and no transactions without explicit authorization.

@@ -1,6 +1,6 @@
 # JARVIS PostgreSQL setup
 
-This directory provides optional Windows tooling to prepare PostgreSQL and track schema migrations. Ordinary backend startup and tests do not need a database. Migration `0001` creates the ledger; `0002` adds the optional conversation/message schema. User accounts, memory, agents, tools, audit storage, and other application tables remain out of scope.
+This directory provides optional Windows tooling to prepare PostgreSQL and track schema migrations. Ordinary backend startup and tests do not need a database. Migration `0001` creates the ledger; `0002` adds the optional conversation/message schema; `0003` adds explicitly managed long-term memories. User accounts, agents, tools, audit storage, and other application tables remain out of scope.
 
 ## Requirements and configuration
 
@@ -49,14 +49,15 @@ localhost:5432:*:postgre:REPLACE_WITH_LOCAL_PASSWORD
 
 Do not paste a real credential into this documentation. The scripts and runner never read or print the password file contents. The repository ignores the local database config, project-local pgpass file, and backup output directory. If a password was exposed in a shared conversation and is reused elsewhere, rotate it.
 
-The bootstrap role is used only by these setup scripts. No application role is created by this foundation. For application use, provision a separate least-privilege role and grant `USAGE` on `jarvis_app` plus `SELECT, INSERT` on both tables, then configure its URL independently. For example, run the following as an authorized database owner after replacing the role name:
+The bootstrap role is used only by these setup scripts. No application role is created by this foundation. For application use, provision a separate least-privilege role and grant only the operations required by the deployed API on `jarvis_app`, `conversations`, `messages`, and `memories`, then configure its URL independently. Memory CRUD requires `SELECT, INSERT, UPDATE, DELETE` on `memories`; chat/history requires `SELECT, INSERT` on `conversations` and `messages`. For example, run the following as an authorized database owner after replacing the role name:
 
 ```sql
 GRANT USAGE ON SCHEMA jarvis_app TO jarvis_app_role;
 GRANT SELECT, INSERT ON jarvis_app.conversations, jarvis_app.messages TO jarvis_app_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON jarvis_app.memories TO jarvis_app_role;
 ```
 
-The adapter does not need schema DDL, update, or delete privileges.
+Neither adapter needs schema DDL privileges. Conversation persistence uses insert/select on conversations and messages; the memory adapter needs select/insert/update/delete on memories for the exposed CRUD endpoints.
 
 ## Files and execution order
 
@@ -70,10 +71,11 @@ database/
   config/db_config.example.bat
   scripts/0001_migration_metadata.sql
   scripts/0002_conversation_persistence.sql
+  scripts/0003_long_term_memories.sql
   migrations/README.md
 ```
 
-Migration files are sorted by their numeric identifier. `0001_migration_metadata.sql` creates `jarvis_meta.schema_migrations`. `0002_conversation_persistence.sql` creates `jarvis_app.conversations` and `jarvis_app.messages`, with role/content constraints, a foreign key, and ordered-message index. Both require schema-creation permission. There are no placeholder SQL files.
+Migration files are sorted by their numeric identifier. `0001_migration_metadata.sql` creates `jarvis_meta.schema_migrations`. `0002_conversation_persistence.sql` creates `jarvis_app.conversations` and `jarvis_app.messages`, with role/content constraints, a foreign key, and ordered-message index. `0003_long_term_memories.sql` creates `jarvis_app.memories` and its listing/full-text indexes. The migrations require schema-creation permission. There are no placeholder SQL files.
 
 ## Install or update
 
@@ -146,4 +148,4 @@ Add a new non-empty `scripts/NNNN_lowercase_name.sql` file with a unique identif
 - **Checksum or unknown migration:** use a project revision matching the database's migration history; do not reset the ledger or edit deployed files.
 - **Backup file exists:** keep the existing backup and rerun after the timestamp changes or choose another output directory.
 
-This is a Windows setup foundation with standard-library Python and PostgreSQL CLI tools; the optional FastAPI adapter uses the separately installed psycopg extra. It does not install PostgreSQL, configure server authentication, create application roles, add pgvector, or implement automated backup scheduling. Core v0.6 stores one two-message conversation per successful request; it is not multi-turn memory. Validate the schema and adapter against the PostgreSQL versions and deployment configuration you intend to use before relying on them operationally. Previous provisioning/restore-drill results do not verify the new application adapter.
+This is a Windows setup foundation with standard-library Python and PostgreSQL CLI tools; the optional FastAPI adapter uses the separately installed psycopg extra. It does not install PostgreSQL, configure server authentication, create application roles, add pgvector, or implement automated backup scheduling. Conversation history and explicitly created memory are separate. Validate the schema and adapter against the PostgreSQL versions and deployment configuration you intend to use before relying on them operationally. Previous provisioning/restore-drill results do not verify the new application adapter.
