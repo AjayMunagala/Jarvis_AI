@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from jarvis.intelligence.base import IntelligenceProvider, TransientProviderError
 from jarvis.orchestration.models import (
+    AnalysisExpertOutput,
     AuditEvent,
     ExpertExecutionError,
     ExpertOutput,
@@ -18,6 +19,7 @@ from jarvis.orchestration.models import (
     ExecutionPlan,
     RequestContext,
     TransientExpertError,
+    ValidationExpertOutput,
 )
 from jarvis.orchestration.registry import ExpertDefinition, ExpertRegistry
 
@@ -43,12 +45,34 @@ class ConfiguredExpert:
         self._provider = provider
 
     async def execute(self, context: RequestContext) -> object:
+        response_model = {
+            "AnalysisExpert": AnalysisExpertOutput,
+            "ValidationExpert": ValidationExpertOutput,
+        }.get(self.definition.persona)
+        kwargs = {}
         if self.definition.system_instruction:
-            return await self._provider.generate_reply(
-                context.message,
-                system_instruction=self.definition.system_instruction,
+            kwargs["system_instruction"] = self.definition.system_instruction
+        if response_model is not None and not self._provider.is_demo:
+            kwargs["response_model"] = response_model
+        raw = await self._provider.generate_reply(context.message, **kwargs)
+        if response_model is None:
+            return raw
+        if self._provider.is_demo:
+            # Preserve the historical deterministic response while making clear
+            # that the mock did not evaluate structured specialist criteria.
+            payload = {
+                "summary": raw,
+                "assessment_status": "not_evaluated",
+                "assumptions": (),
+                "missing_information": (),
+                "recommendations": (),
+            }
+            payload.update(
+                {"factors": (), "supported_conclusions": ()}
+                if response_model is AnalysisExpertOutput else {"findings": ()}
             )
-        return await self._provider.generate_reply(context.message)
+            return response_model.model_validate(payload)
+        return response_model.model_validate_json(raw)
 
 
 class ExpertExecutor:
@@ -137,7 +161,12 @@ class ExpertExecutor:
                     break
                 try:
                     raw = await asyncio.wait_for(expert.execute(context), timeout=remaining)
-                    output = ExpertOutput.model_validate({"content": raw, "advisory_only": True})
+                    if isinstance(raw, AnalysisExpertOutput):
+                        output = ExpertOutput(content=raw.summary, analysis=raw, advisory_only=True)
+                    elif isinstance(raw, ValidationExpertOutput):
+                        output = ExpertOutput(content=raw.summary, validation=raw, advisory_only=True)
+                    else:
+                        output = ExpertOutput.model_validate({"content": raw, "advisory_only": True})
                     result = ExpertResult(step_id=step.step_id, expert_id=step.expert_id, persona=expert.definition.persona, status="succeeded", output=output, attempts=attempts)
                     return result, AuditEvent(execution_id=execution_id, event_type="expert_completed", expert_id=step.expert_id, outcome="succeeded")
                 except TimeoutError:

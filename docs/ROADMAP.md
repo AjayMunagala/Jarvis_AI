@@ -25,13 +25,22 @@ Core v0.2 currently uses deterministic intent rules and the mock provider. It do
 
 The adapter is verified with mocked HTTP transport only. No live credentials or model endpoint were available for verification. It does not add tools, external actions, or persistence.
 
-## Core v0.4 — Specialist Intelligence and Provider Reliability (current implementation)
+## Core v0.4 — Specialist Intelligence and Provider Reliability (implemented)
 
 - Give the AnalysisExpert and ValidationExpert distinct configured instructions through the existing provider interface; retain deterministic mock behavior, which ignores those instructions.
 - Validate provider responses as nonblank bounded text and reject refusal, malformed, empty, and whitespace-only OpenAI completions as sanitized permanent failures.
 - Keep bounded execution deadlines, transient-only retries, partial results, trace metadata, API response metadata, and the advisory-only boundary.
 
-Offline regression tests use controlled mock providers and HTTP transport to assert specialist prompt selection and OpenAI request wiring; 83 backend tests pass when run outside the restricted sandbox. No live provider call or semantic model-quality evaluation is performed. The output contract remains bounded advisory text rather than persona-specific structured JSON. In the sandbox, asyncio loop startup is blocked because local socketpair creation attempts a restricted localhost accept.
+Offline regression tests for Core v0.4 use controlled mock providers and HTTP transport to assert specialist prompt selection and transient failure handling. No live provider call or semantic model-quality evaluation was performed. In the restricted sandbox, asyncio loop startup is blocked because local socketpair creation attempts a restricted localhost accept.
+
+## Core v0.5 — Structured Specialist Outputs (current implementation)
+
+- Add typed, bounded Pydantic contracts for AnalysisExpert and ValidationExpert, including evidence rules for supported conclusions and validation findings.
+- Extend the vendor-neutral provider contract with an optional response-model request; transform a copied strict Chat Completions JSON Schema by removing size bounds and documented unsupported composition keywords, verify required/closed objects and references, and validate returned JSON locally with all original Pydantic bounds before synthesis.
+- Keep deterministic mock behavior and the existing `/chat` response shape. Mock specialist outputs use `not_evaluated` and preserve the established demo response text.
+- Render validated specialist fields into readable response text, use a bounded 8,192 completion-token allowance for structured requests (1,024 for ordinary text), and treat unsupported schemas, malformed JSON, refusals, and truncated structured completions as sanitized permanent failures.
+
+The new behavior is covered by offline mocked-provider tests, including actual outgoing schemas for both specialists. OpenAI's guide lists array bounds as unsupported on fine-tuned models; because provider model selection is configurable, the adapter omits all schema size-bound keywords and retains those checks in local Pydantic validation. No live API request, strict-schema endpoint compatibility, or semantic quality evaluation has been performed. Structured contracts constrain shape and local bounds; they do not prove factual correctness. No tools, external actions, persistence, or new specialist agents are introduced.
 
 ## Later milestones
 

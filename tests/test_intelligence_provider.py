@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 
 import httpx
@@ -9,10 +10,16 @@ from fastapi.testclient import TestClient
 from jarvis.core.config import Settings
 from jarvis.intelligence.base import ProviderError, TransientProviderError
 from jarvis.intelligence.mock_provider import MockProvider
-from jarvis.intelligence.openai_provider import OpenAIProvider
+from jarvis.intelligence.openai_provider import (
+    MAX_COMPLETION_TOKENS, MAX_STRUCTURED_COMPLETION_TOKENS,
+    OpenAIProvider, _copy_for_strict_outputs, _strict_response_schema,
+    _validate_strict_schema,
+)
 from jarvis.intelligence.router import build_provider
 from jarvis.main import create_app
-from jarvis.orchestration.models import RequestContext
+from jarvis.orchestration.models import (
+    AnalysisExpertOutput, RequestContext, ValidationExpertOutput,
+)
 from jarvis.orchestration.registry import ExpertRegistry, ToolRegistry, ToolRegistryConfig
 from jarvis.orchestration.service import OrchestrationService
 
@@ -86,7 +93,7 @@ def test_openai_adapter_sends_typed_chat_request_and_validates_reply():
     assert captured["url"] == "https://api.openai.com/v1/chat/completions"
     assert captured["authorization_present"]
     assert captured["body"]["model"] == "gpt-4o-mini"
-    assert captured["body"]["max_completion_tokens"] == 1024
+    assert captured["body"]["max_completion_tokens"] == MAX_COMPLETION_TOKENS == 1024
     assert captured["body"]["messages"] == [
         {"role": "system", "content": "Check claims."},
         {"role": "user", "content": "Review this"},
@@ -108,6 +115,100 @@ def test_chat_contract_identifies_model_provider_without_changing_response_shape
         "partial": False,
     }
     assert len(response.headers["x-jarvis-execution-id"]) == 32
+
+
+def test_structured_specialist_chat_keeps_public_api_contract():
+    structured = {
+        "summary": "The proposal has two material trade-offs.",
+        "assessment_status": "completed",
+        "factors": [{"factor": "Cost", "implications": "The upfront cost is higher."}],
+        "supported_conclusions": [],
+        "assumptions": [],
+        "missing_information": [],
+        "recommendations": ["Compare total cost over the full term."],
+    }
+    provider = openai_provider(httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(structured)}}]},
+        )
+    ))
+    settings = Settings(provider="openai", openai_api_key=SecretStr("unit-test-placeholder"))
+    with TestClient(create_app(settings=settings, provider=provider)) as client:
+        response = client.post("/chat", json={"message": "Analyze the proposal"})
+    assert response.status_code == 200
+    assert set(response.json()) == {"reply", "provider", "demo", "partial"}
+    assert response.json()["reply"] == (
+        "The proposal has two material trade-offs.\n\nRelevant factors:\n"
+        "- Cost: The upfront cost is higher.\n\nRecommendations:\n"
+        "- Compare total cost over the full term."
+    )
+    assert response.json()["provider"] == "openai"
+    assert response.json()["demo"] is False
+    assert response.headers["x-jarvis-execution-id"]
+
+
+def test_malformed_structured_specialist_response_is_sanitized_at_api_boundary():
+    raw = '{"summary":"private malformed output"'
+    provider = openai_provider(httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"choices": [{"message": {"content": raw}}]})
+    ))
+    settings = Settings(provider="openai", openai_api_key=SecretStr("unit-test-placeholder"))
+    with TestClient(create_app(settings=settings, provider=provider)) as client:
+        response = client.post("/chat", json={"message": "Analyze this claim"})
+    assert response.status_code == 502
+    assert response.json() == {"error": "provider_error", "detail": "The configured provider failed."}
+    assert "private malformed output" not in response.text
+    assert response.headers["x-jarvis-execution-id"]
+
+
+def test_structured_output_still_enforces_local_bounds_removed_from_transmitted_schema():
+    structured = {
+        "summary": "Assessment.", "assessment_status": "completed",
+        "factors": [{"factor": "x" * 121, "implications": "y"}],
+        "supported_conclusions": [], "assumptions": [], "missing_information": [],
+        "recommendations": [],
+    }
+    provider = openai_provider(httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(structured)}}]})
+    ))
+    settings = Settings(provider="openai", openai_api_key=SecretStr("unit-test-placeholder"))
+    with TestClient(create_app(settings=settings, provider=provider)) as client:
+        response = client.post("/chat", json={"message": "Analyze the proposal"})
+    assert response.status_code == 502
+    assert response.json() == {"error": "provider_error", "detail": "The configured provider failed."}
+    assert response.headers["x-jarvis-execution-id"]
+
+
+def test_validation_finding_is_rendered_in_readable_chat_reply_without_internal_metadata(caplog):
+    structured = {
+        "summary": "The claim is supported by the supplied evidence.",
+        "assessment_status": "completed",
+        "findings": [{
+            "claim": "The system retains no chat history.", "verdict": "supported",
+            "rationale": "The implementation stores chat state only in memory.",
+            "evidence": ["The handoff documents in-memory-only chat state."],
+        }],
+        "assumptions": ["The cited implementation description is current."],
+        "missing_information": [], "recommendations": [],
+    }
+    provider = openai_provider(httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(structured)}}]})
+    ))
+    settings = Settings(provider="openai", openai_api_key=SecretStr("unit-test-placeholder"))
+    caplog.set_level("INFO")
+    with TestClient(create_app(settings=settings, provider=provider)) as client:
+        response = client.post("/chat", json={"message": "Validate claim marker PRIVATE_PROMPT_MARKER"})
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"reply", "provider", "demo", "partial"}
+    assert "supported" in body["reply"]
+    assert "The system retains no chat history." in body["reply"]
+    assert "The implementation stores chat state only in memory." in body["reply"]
+    assert "The handoff documents in-memory-only chat state." in body["reply"]
+    assert "PRIVATE_PROMPT_MARKER" not in caplog.text
+    assert "execution_id" not in body
+    assert response.headers["x-jarvis-execution-id"]
 
 
 @pytest.mark.parametrize("status_code", [429, 500, 503])
@@ -268,8 +369,21 @@ def test_configured_specialist_instructions_reach_openai_request_payloads():
     captured = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(json.loads(request.content))
-        return httpx.Response(200, json={"choices": [{"message": {"content": "Advisory result."}}]})
+        payload = json.loads(request.content)
+        captured.append(payload)
+        if payload["response_format"]["json_schema"]["name"] == "analysisexpertoutput":
+            structured = {
+                "summary": "Analysis summary.", "assessment_status": "completed",
+                "factors": [], "supported_conclusions": [], "assumptions": [],
+                "missing_information": [], "recommendations": [],
+            }
+        else:
+            structured = {
+                "summary": "Validation summary.", "assessment_status": "completed",
+                "findings": [], "assumptions": [], "missing_information": [],
+                "recommendations": [],
+            }
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(structured)}}]})
 
     settings = Settings(provider="openai", openai_api_key=SecretStr("unit-test-placeholder"))
     provider = OpenAIProvider(
@@ -296,6 +410,208 @@ def test_configured_specialist_instructions_reach_openai_request_payloads():
     assert "relevant factors" in prompts[0]
     assert "internally consistent" in prompts[1]
     assert [result.expert_results[0].expert_id for result in results] == ["analysis", "validation"]
+    assert [result.reply for result in results] == ["Analysis summary.", "Validation summary."]
+    for payload in captured:
+        schema = payload["response_format"]["json_schema"]
+        assert payload["response_format"]["type"] == "json_schema"
+        assert schema["strict"] is True
+        assert schema["schema"]["additionalProperties"] is False
+        assert payload["max_completion_tokens"] == MAX_STRUCTURED_COMPLETION_TOKENS == 8192
+        assert "AnalysisFactor" in schema["schema"]["$defs"] or "ValidationFinding" in schema["schema"]["$defs"]
+        assert schema["schema"]["properties"]["assessment_status"]["enum"] == [
+            "completed", "limited", "not_evaluated",
+        ]
+        schema_nodes = list(_all_dicts(schema["schema"]))
+        assert not any(
+            {"minLength", "maxLength", "minItems", "maxItems", "allOf", "not", "if", "then", "else"}
+            .intersection(node)
+            for node in schema_nodes
+        )
+        assert all(
+            set(node["required"]) == set(node["properties"])
+            and node["additionalProperties"] is False
+            for node in schema_nodes if node.get("type") == "object"
+        )
+
+
+def _all_dicts(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _all_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _all_dicts(child)
+
+
+def test_strict_schema_transform_is_recursive_and_preserves_property_names_and_structure():
+    source = {
+        "type": "object",
+        "properties": {
+            "maxLength": {"type": "string", "minLength": 2, "maxLength": 8},
+            "nested": {"$ref": "#/$defs/nested"},
+            "choice": {"anyOf": [{"type": "string", "maxLength": 4}, {"type": "string", "minLength": 1}]},
+            "mode": {"type": "string", "enum": ["not", "maxItems"]},
+        },
+        "required": ["maxLength", "nested", "choice", "mode"],
+        "additionalProperties": False,
+        "$defs": {
+            "nested": {
+                "type": "object",
+                "properties": {"items": {"type": "array", "items": {"type": "string"}, "maxItems": 3}},
+                "required": ["items"],
+                "additionalProperties": False,
+            },
+        },
+    }
+    transformed = _validate_strict_schema(_copy_for_strict_outputs(source))
+    assert "maxLength" in transformed["properties"]
+    assert transformed["properties"]["maxLength"] == {"type": "string"}
+    assert transformed["properties"]["nested"]["$ref"] == "#/$defs/nested"
+    assert transformed["properties"]["choice"] == {
+        "anyOf": [{"type": "string"}, {"type": "string"}],
+    }
+    assert transformed["properties"]["mode"]["enum"] == ["not", "maxItems"]
+    assert transformed["$defs"]["nested"]["properties"]["items"]["items"] == {"type": "string"}
+    assert transformed["$defs"]["nested"]["properties"]["items"] == {
+        "type": "array", "items": {"type": "string"},
+    }
+    assert source["properties"]["maxLength"]["maxLength"] == 8
+    assert source["$defs"]["nested"]["properties"]["items"]["maxItems"] == 3
+
+
+def test_pydantic_bounds_remain_unchanged_and_are_enforced_locally():
+    original = AnalysisExpertOutput.model_json_schema()
+    original_snapshot = copy.deepcopy(original)
+    transmitted = _strict_response_schema(AnalysisExpertOutput)
+    assert original == original_snapshot
+    assert original["properties"]["summary"]["minLength"] == 1
+    assert original["properties"]["summary"]["maxLength"] == 40000
+    assert original["properties"]["factors"]["maxItems"] == 8
+    assert transmitted["properties"]["summary"] == {
+        "title": "Summary", "type": "string",
+    }
+    with pytest.raises(ValidationError):
+        AnalysisExpertOutput.model_validate({
+            "summary": "ok", "assessment_status": "completed",
+            "factors": [{"factor": "x" * 121, "implications": "y"}],
+            "supported_conclusions": [], "assumptions": [], "missing_information": [],
+            "recommendations": [],
+        })
+
+
+def test_strict_schema_validator_rejects_untransformed_unsupported_features():
+    invalid = {
+        "type": "object", "properties": {"value": {"type": "string", "oneOf": []}},
+        "required": ["value"], "additionalProperties": False,
+    }
+    with pytest.raises(ValueError, match="unsupported keyword"):
+        _validate_strict_schema(invalid)
+
+
+def test_provider_fails_sanitized_before_network_for_unrecognized_schema(monkeypatch):
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+    unsupported = {
+        "type": "object", "properties": {"value": {"type": "string", "oneOf": []}},
+        "required": ["value"], "additionalProperties": False,
+    }
+    monkeypatch.setattr(AnalysisExpertOutput, "model_json_schema", classmethod(lambda cls, **kwargs: unsupported))
+    provider = openai_provider(httpx.MockTransport(handler))
+    with pytest.raises(ProviderError) as error:
+        asyncio.run(provider.generate_reply("review", response_model=AnalysisExpertOutput))
+    assert str(error.value) == "The configured provider request failed."
+    assert calls == 0
+
+
+@pytest.mark.parametrize("response_model,payload", [
+    (AnalysisExpertOutput, {
+        "summary": "Assessment.", "assessment_status": "completed", "factors": [],
+        "supported_conclusions": [], "assumptions": [], "missing_information": [], "recommendations": [],
+    }),
+    (ValidationExpertOutput, {
+        "summary": "Assessment.", "assessment_status": "completed", "findings": [],
+        "assumptions": [], "missing_information": [], "recommendations": [],
+    }),
+])
+def test_openai_structured_output_uses_schema_and_returns_json(response_model, payload):
+    captured = {}
+
+    def handler(request):
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(payload)}}]})
+
+    provider = openai_provider(httpx.MockTransport(handler))
+    result = asyncio.run(provider.generate_reply("review", response_model=response_model))
+    assert json.loads(result) == payload
+    assert captured["response_format"]["type"] == "json_schema"
+    assert captured["response_format"]["json_schema"]["strict"] is True
+
+
+def test_openai_structured_unsupported_schema_is_sanitized_and_not_retried():
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(400, json={"error": {"message": "private unsupported schema details"}})
+
+    provider = openai_provider(httpx.MockTransport(handler))
+    with pytest.raises(ProviderError) as error:
+        asyncio.run(provider.generate_reply("review", response_model=AnalysisExpertOutput))
+    assert calls == 1
+    assert "private unsupported schema details" not in str(error.value)
+
+
+def test_openai_structured_truncation_is_sanitized_permanent_failure():
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={"choices": [{"finish_reason": "length", "message": {"content": "{}"}}]})
+
+    provider = openai_provider(httpx.MockTransport(handler))
+    with pytest.raises(ProviderError):
+        asyncio.run(provider.generate_reply("review", response_model=AnalysisExpertOutput))
+    assert calls == 1
+
+
+@pytest.mark.parametrize("payload", [
+    {"summary": " ", "assessment_status": "completed", "factors": [], "supported_conclusions": [], "assumptions": [], "missing_information": [], "recommendations": []},
+    {"summary": "ok", "assessment_status": "unknown", "factors": [], "supported_conclusions": [], "assumptions": [], "missing_information": [], "recommendations": []},
+    {"summary": "ok", "assessment_status": "completed", "factors": [{"factor": "x", "implications": "y"}], "supported_conclusions": [{"conclusion": "claim", "evidence": []}], "assumptions": [], "missing_information": [], "recommendations": []},
+])
+def test_analysis_output_contract_rejects_blank_invalid_or_unsupported_content(payload):
+    with pytest.raises(ValidationError):
+        AnalysisExpertOutput.model_validate(payload)
+
+
+@pytest.mark.parametrize("payload", [
+    {"summary": "ok", "assessment_status": "completed", "findings": [{"claim": "x", "verdict": "supported", "rationale": "y", "evidence": []}], "assumptions": [], "missing_information": [], "recommendations": []},
+    {"summary": "ok", "assessment_status": "completed", "findings": [{"claim": "x", "verdict": "uncertain", "rationale": "y", "evidence": ["   "]}], "assumptions": [], "missing_information": [], "recommendations": []},
+])
+def test_validation_output_requires_evidence_for_certain_verdicts_and_nonblank_evidence(payload):
+    with pytest.raises(ValidationError):
+        ValidationExpertOutput.model_validate(payload)
+
+
+def test_mock_analysis_contract_is_explicitly_not_evaluated_and_keeps_legacy_reply():
+    service = OrchestrationService(
+        MockProvider(), Settings(), expert_registry=ExpertRegistry.load(),
+        tool_registry=ToolRegistry(ToolRegistryConfig(version=1, tools=())),
+    )
+    context = RequestContext(message="Analyze this claim")
+    result = asyncio.run(service.run(context))
+    assert result.reply == "This is a JARVIS demo response, not an AI-generated answer. I received: Analyze this claim"
+    expert_output = result.expert_results[0].output
+    assert expert_output.analysis.assessment_status == "not_evaluated"
+    assert expert_output.analysis.factors == ()
 
 
 def test_mock_provider_remains_deterministic_and_ignores_specialist_instruction():

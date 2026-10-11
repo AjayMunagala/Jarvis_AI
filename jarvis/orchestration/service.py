@@ -19,6 +19,43 @@ logger = logging.getLogger(__name__)
 _TRUNCATION_MARKER = "\n\n[Response truncated because combined expert output exceeded the 40,000-character limit.]"
 
 
+def _render_expert_result(result) -> str:
+    output = result.output
+    if output is None:
+        return ""
+    analysis = output.analysis
+    validation = output.validation
+    structured = analysis or validation
+    if structured is None or structured.assessment_status == "not_evaluated":
+        return output.content
+
+    sections = [structured.summary]
+    if analysis is not None:
+        if analysis.factors:
+            sections.append("Relevant factors:\n" + "\n".join(
+                f"- {item.factor}: {item.implications}" for item in analysis.factors
+            ))
+        if analysis.supported_conclusions:
+            sections.append("Supported conclusions:\n" + "\n".join(
+                f"- {item.conclusion} (evidence: {'; '.join(item.evidence)})"
+                for item in analysis.supported_conclusions
+            ))
+    if validation is not None and validation.findings:
+        sections.append("Findings:\n" + "\n".join(
+            f"- {item.verdict}: {item.claim}. {item.rationale}"
+            + (f" (evidence: {'; '.join(item.evidence)})" if item.evidence else "")
+            for item in validation.findings
+        ))
+    for label, values in (
+        ("Assumptions", structured.assumptions),
+        ("Missing information", structured.missing_information),
+        ("Recommendations", structured.recommendations),
+    ):
+        if values:
+            sections.append(label + ":\n" + "\n".join(f"- {value}" for value in values))
+    return "\n\n".join(sections)
+
+
 class OrchestrationService:
     def __init__(
         self,
@@ -58,7 +95,10 @@ class OrchestrationService:
             max_concurrency=self._settings.max_parallel_experts,
         )
         results, expert_events = await self._executor.execute_plan(plan, context)
-        successful = [result.output.content for result in results if result.status == "succeeded" and result.output]
+        successful = [
+            _render_expert_result(result)
+            for result in results if result.status == "succeeded" and result.output
+        ]
         reply = "\n\n".join(successful)
         if len(reply) > MAX_SYNTHESIZED_REPLY_LENGTH:
             reply = reply[: MAX_SYNTHESIZED_REPLY_LENGTH - len(_TRUNCATION_MARKER)].rstrip() + _TRUNCATION_MARKER
