@@ -2,7 +2,7 @@
 
 ## Current milestone
 
-JARVIS Core v0.5 adds bounded structured output contracts for AnalysisExpert and ValidationExpert on top of the optional OpenAI Chat Completions adapter. Mock remains the default and runs offline while ignoring specialist instructions and explicitly marking specialist evaluation as `not_evaluated`. PostgreSQL setup remains standalone. Live OpenAI connectivity and strict-schema endpoint compatibility have not been verified.
+JARVIS Core v0.6 adds optional PostgreSQL conversation persistence behind a repository interface. It remains disabled by default, and mock mode does not need a PostgreSQL driver or server. Each successful chat request stores a separate conversation with user and assistant messages in one transaction. No history endpoint, multi-turn linking, or audit/provider internals are persisted. Apply migrations using the existing Windows migration runner; the app does not migrate at startup.
 
 ## Implemented
 
@@ -21,6 +21,7 @@ JARVIS Core v0.5 adds bounded structured output contracts for AnalysisExpert and
 - OpenAI refusal responses and malformed, empty, or whitespace-only completion content are sanitized permanent provider failures; no retry or mock fallback occurs.
 - Tool configuration is currently empty, the registry has no executor, and no shell command or external/state-changing action can be invoked.
 - Standalone Windows PostgreSQL provisioning scripts remain optional and outside application startup.
+- Optional `jarvis.persistence` provides a small repository protocol and PostgreSQL adapter. The `persistence` extra declares `psycopg[binary]`; set `JARVIS_PERSISTENCE_ENABLED=true` and a secret `JARVIS_PERSISTENCE_DATABASE_URL` only in a local environment. `/chat` returns sanitized HTTP 503 if saving fails. The same response shape is retained on success.
 
 ## Commands
 
@@ -45,15 +46,18 @@ npm run build
 ## Current limits
 
 - Intent classification and planning are deterministic, not model-driven. The configured personas share one provider; AnalysisExpert and ValidationExpert have distinct model instructions and structured contracts. In mock mode the instructions are ignored and responses are deterministic demo text with `not_evaluated` structured placeholders, not model reasoning.
-- The only configured tool list is empty. Tool execution, permission/approval gateway, persistent memory, persistent audit storage, application database integration, authentication, and external integrations are not implemented.
+- The only configured tool list is empty. Tool execution, permission/approval gateway, persistent memory, persistent audit storage, authentication, and external integrations are not implemented. Conversation persistence is opt-in and limited to one request/response exchange per conversation.
 - `/ready` confirms successful settings/provider/orchestrator construction; it does not probe external systems.
 - The default provider runs without a GPU, API key, or internet. Frontend conversation state is in-memory only.
 - OpenAI selection requires `JARVIS_OPENAI_API_KEY`; setting it does not fall back to mock if calls fail. Requests send user message content to the configured endpoint and may incur charges. No live provider call was performed during tests.
 - Analysis and validation require an endpoint/model that supports strict Chat Completions JSON Schema output. Unsupported-schema behavior is verified using mocked HTTP responses; live compatibility, model quality, and network connectivity remain unverified.
 - Provider cancellation is performed by `asyncio.wait_for`; future asynchronous adapters must release resources when cancelled.
 - The PostgreSQL foundation and its restore drill are documented in `database/README.md`; operational use still requires confirming the user's local server configuration and restore target.
+- Persistence is one exchange per conversation for now. No client-supplied conversation identifier, history API, multi-user ownership, or PostgreSQL integration test against a live server is included in this milestone unless verification below says otherwise.
 
 ## Verification on this working tree
+
+Core v0.6 verification on Windows/Python 3.12.10: `.venv-dev\Scripts\python.exe -m pytest -v` passed 117 tests; `.venv-dev\Scripts\python.exe -m compileall -q jarvis tests` passed; `npm test -- --run` passed 16 frontend tests; `npm run build` succeeded; and `git diff --check` passed. The Python suite required loopback access because the restricted sandbox blocks asyncio socket initialization. Persistence repository/API behavior is covered using controlled doubles. No `psql` executable or psycopg package was available, so no live PostgreSQL migration or integration test was run. The OpenAI adapter was not live-tested.
 
 - `.venv-dev\Scripts\python.exe -m pytest -v`: 101 passed in 1.42s when run with sandbox restrictions lifted.
 - `.venv-dev\Scripts\python.exe -m pytest tests/test_intelligence_provider.py -q`: 44 passed in 0.77s when run with sandbox restrictions lifted.
@@ -67,4 +71,4 @@ npm run build
 
 ## Next work
 
-Review the Core v0.5 changes before approving another milestone. Live OpenAI connectivity, strict-schema compatibility against a live endpoint, and the semantic quality of model reasoning remain unverified. Preserve the roadmap's longer-term goals and do not infer that future tools, memory, model-driven planning, or actions exist from the current configuration interfaces.
+Review the Core v0.6 changes before approving another milestone. Live PostgreSQL migration/adapter behavior, live OpenAI connectivity, strict-schema compatibility against a live endpoint, and semantic model quality remain unverified. Preserve the roadmap's longer-term goals and do not infer that future tools, memory, model-driven planning, or actions exist from current configuration interfaces.

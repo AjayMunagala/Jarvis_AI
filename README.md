@@ -1,6 +1,6 @@
-# JARVIS Core v0.5
+# JARVIS Core v0.6
 
-JARVIS is a modular foundation for a personal AI operating system. Core v0.5 adds bounded Pydantic output contracts for AnalysisExpert and ValidationExpert. The OpenAI adapter requests strict JSON Schema output for those experts and validates the returned JSON locally. The provider-independent interface and offline mock provider remain available.
+JARVIS is a modular foundation for a personal AI operating system. Core v0.6 adds opt-in PostgreSQL persistence for a single `/chat` request/response exchange. The provider-independent interface and offline mock provider remain available.
 
 ## What works now
 
@@ -15,15 +15,18 @@ JARVIS is a modular foundation for a personal AI operating system. Core v0.5 add
 - The expert/tool registries and audit-event contracts are typed. `jarvis/orchestration/config/tools.json` is intentionally empty and no tool executor or external action exists.
 - Provider timeouts, provider failures, invalid requests, and configured message limits are handled explicitly.
 - Settings are validated at startup and JSON logs avoid request contents and secrets.
-- API errors use a JSON `{ "error": ..., "detail": ... }` envelope. Validation errors return 422, oversized requests return 413, provider failures return 502, provider timeouts return 504, and unexpected application errors return a generic 500.
+- When persistence is enabled, database save failures return sanitized HTTP 503; persistence is not falsely reported as successful.
+- Optional conversation persistence is disabled by default. When enabled, successful chat exchanges are saved transactionally through a repository boundary; PostgreSQL is not needed for normal startup or mock-mode tests.
+- PostgreSQL connection attempts use `JARVIS_PERSISTENCE_CONNECT_TIMEOUT_SECONDS` (default 3, range 1–15); database connection failures are sanitized as HTTP 503.
+- API errors use a JSON `{ "error": ..., "detail": ... }` envelope. Validation errors return 422, oversized requests return 413, provider failures return 502, persistence failures return 503 when enabled, provider timeouts return 504, and unexpected application errors return a generic 500.
 
 ## Verification status
 
-Core v0.5 verification on Windows/Python 3.12.10: `.venv-dev\Scripts\python.exe -m pytest -v` passed 101 tests; the focused `tests/test_intelligence_provider.py` suite passed 44 tests; compileall passed; `npm test -- --run` passed 16 frontend tests; and `npm run build` succeeded. Python tests ran with sandbox restrictions lifted because the restricted Windows environment blocked asyncio loopback socketpair initialization. The active `.venv-dev` uses pytest 8.4.2, within the project's declared `<9.0` range. Starlette still emits its existing deprecation warning recommending `httpx2`; dependencies were not changed. OpenAI request tests use mocked HTTP transport; no live provider request or semantic model-quality evaluation was performed.
+Core v0.6 verification on Windows/Python 3.12.10: `.venv-dev\Scripts\python.exe -m pytest -v` passed 117 tests; compileall passed; `npm test -- --run` passed 16 frontend tests; `npm run build` succeeded; and `git diff --check` passed. The suite ran with loopback access because restricted sandbox socket initialization stalls FastAPI TestClient. PostgreSQL repository/transaction behavior was tested with controlled connection doubles. No `psql` executable or psycopg package was available here, so the migration was not applied and live adapter/database behavior was not verified.
 
 ## Not implemented yet
 
-There are not seven independent specialist agents: all configured experts share one provider. Only AnalysisExpert and ValidationExpert use distinct structured output contracts; these do not guarantee correct reasoning. Mock mode returns explicit `not_evaluated` placeholders and does not perform model reasoning. There is no model-driven intent classification or planning, multi-turn model context, application database connection, persistent memory, tool execution, approval system, account system, or external action integration. The optional OpenAI adapter and structured-output compatibility have not been live-verified here. Structured specialist requests use a bounded 8,192 completion-token allowance; ordinary text requests retain 1,024 tokens. Truncated structured output is a permanent sanitized failure. Pydantic still enforces bounds removed from the transmitted schema. Optional standalone PostgreSQL provisioning is documented below, but the app does not use it or persist conversations. The frontend is a local React interface only; the API never runs shell commands or external actions.
+There are not seven independent specialist agents: all configured experts share one provider. Only AnalysisExpert and ValidationExpert use distinct structured output contracts; these do not guarantee correct reasoning. Mock mode returns explicit `not_evaluated` placeholders and does not perform model reasoning. Persistence stores each request as its own two-message conversation; there is no client conversation ID, history endpoint, multi-turn linking, persistent memory, or audit/provider prompt storage. No model-driven intent classification or planning, tool execution, approval system, account system, or external action integration exists. The optional OpenAI adapter and structured-output compatibility have not been live-verified here. Structured specialist requests use a bounded 8,192 completion-token allowance; ordinary text requests retain 1,024 tokens. Truncated structured output is a permanent sanitized failure. Pydantic still enforces bounds removed from the transmitted schema. The frontend is a local React interface only; the API never runs shell commands or external actions.
 
 ## Prerequisites
 
@@ -40,6 +43,12 @@ python -m venv .venv
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 Copy-Item .env.example .env
+```
+
+To install the optional PostgreSQL driver, add the persistence extra:
+
+```powershell
+python -m pip install -e ".[dev,persistence]"
 ```
 
 If PowerShell blocks virtual environment activation, use `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` in that PowerShell session and activate again.
@@ -64,9 +73,13 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/chat -ContentType "app
 python -m pytest -v
 ```
 
-## Optional PostgreSQL setup
+## Optional conversation persistence
 
-The FastAPI app does not require PostgreSQL and does not persist chat data. The standalone, Windows-oriented database provisioning foundation creates the configured database when needed and tracks numbered migrations; its initial schema contains migration metadata only. See [database/README.md](database/README.md) for setup, verification, backup, and restore instructions.
+Persistence is off by default. To enable it, install `.[persistence]`, set `JARVIS_PERSISTENCE_ENABLED=true`, and set `JARVIS_PERSISTENCE_DATABASE_URL` in the ignored local `.env` to a PostgreSQL URL. `JARVIS_PERSISTENCE_CONNECT_TIMEOUT_SECONDS` defaults to 3 and accepts 1–15. Do not put a real URL in `.env.example`. Then apply the checked-in migrations with `database\\install_db.bat` following [database/README.md](database/README.md). The app does not connect to PostgreSQL at startup; a database connection is first made when a chat exchange is saved.
+
+When enabled, each successful `/chat` request stores exactly the submitted user message and the final assistant reply as a new conversation. The user and assistant rows are one transaction. If persistence fails, `/chat` returns sanitized HTTP 503 with its execution ID rather than reporting a successful saved response. The HTTP response fields remain unchanged. The repository can create conversations, append role-checked messages, and read messages in stable insertion order, but no history API or conversation ID input exists yet, so requests are not linked across turns. Provider prompts, credentials, raw provider payloads, and orchestration/audit traces are not stored. Ordinary tests use doubles; real PostgreSQL behavior is not claimed unless separately verified.
+
+The standalone provisioning foundation still creates/verifies the configured database and applies numbered migrations without destructive resets. See [database/README.md](database/README.md) for server, backup, and restore guidance.
 
 ## Run the web interface (Windows PowerShell)
 
@@ -112,7 +125,7 @@ HTTP contracts live in `jarvis/api/routes/`; request and response types live in 
 - The analysis specialist is instructed to explain relevant factors, trade-offs, and supported conclusions. The validation specialist is instructed to check completeness, consistency, assumptions, and missing information. These are two instructed personas using the shared provider, not independent agent implementations or guaranteed expert judgments.
 - `mock` and `openai` are the only supported providers. OpenAI selection fails startup without a nonblank API key. OpenAI live connectivity and credentials were not verified here.
 - OpenAI refusal responses, malformed completion payloads, and empty or whitespace-only content are treated as sanitized provider failures; they are not retried as transient errors and do not switch to mock mode.
-- In-memory chat state is not persistent. PostgreSQL setup scripts provide optional database creation and migration metadata only; application persistence and memory remain later milestones.
+- Conversation persistence is opt-in and PostgreSQL-backed. It stores one request/response exchange per conversation; it is not long-term memory and has no frontend history or retrieval API.
 - `/ready` confirms that settings and the configured provider were constructed; it does not probe external dependencies. Setting `JARVIS_ENVIRONMENT=production` only changes the validated environment label and does not add authentication, rate limiting, or production hardening.
 - If `python` is not found, install Python 3.11+ and ensure the Python launcher/PATH is configured. If imports fail, activate `.venv` and run `python -m pip install -e ".[dev]"` again.
 - If port 8000 is occupied, pass `--port 8001` to uvicorn.

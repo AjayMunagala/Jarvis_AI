@@ -1,12 +1,13 @@
 # JARVIS PostgreSQL setup
 
-This directory provides optional, standalone Windows tooling to create or prepare a PostgreSQL database and track schema migrations. The FastAPI app does not connect to PostgreSQL, and ordinary backend startup and tests do not need a database. The current SQL schema contains only the migration ledger; chat, user, memory, agent, tool, audit, and other application tables remain deferred until persistence requirements are designed.
+This directory provides optional Windows tooling to prepare PostgreSQL and track schema migrations. Ordinary backend startup and tests do not need a database. Migration `0001` creates the ledger; `0002` adds the optional conversation/message schema. User accounts, memory, agents, tools, audit storage, and other application tables remain out of scope.
 
 ## Requirements and configuration
 
 - Windows 10 or 11 with `cmd.exe` and Python 3.11 or later available on `PATH`.
 - PostgreSQL client tools from a compatible PostgreSQL installation: `psql.exe` and `createdb.exe` for installation; `psql.exe` for verification; `pg_dump.exe` and `pg_restore.exe` for backups.
 - Network access from this machine to the configured PostgreSQL host and port.
+- The optional FastAPI adapter requires `psycopg[binary]`, installed with `python -m pip install -e ".[persistence]"`.
 - A local PostgreSQL password file. The runner uses `PGPASSFILE` if set, otherwise `%APPDATA%\postgresql\pgpass.conf`. It passes `--no-password` to PostgreSQL tools, so a missing or incorrect password file fails without prompting or exposing a password.
 
 Copy `config\db_config.example.bat` to `config\db_config.local.bat` and adjust its values for the actual server. The example values (`localhost`, `5432`, database `jarvis_AI`, and bootstrap role `postgre`) are initial development settings only; this repository could not verify the server, port, role, or database. Confirm the host and port in pgAdmin or with your server administrator. The scripts require explicit host and port values; they do not silently assume a PostgreSQL port. You may instead set these environment variables before launching a script:
@@ -48,7 +49,14 @@ localhost:5432:*:postgre:REPLACE_WITH_LOCAL_PASSWORD
 
 Do not paste a real credential into this documentation. The scripts and runner never read or print the password file contents. The repository ignores the local database config, project-local pgpass file, and backup output directory. If a password was exposed in a shared conversation and is reused elsewhere, rotate it.
 
-The bootstrap role is used only by these setup scripts. No application role is created because the backend does not use the database yet. When backend persistence is introduced, create a separate least-privilege application role in a reviewed migration and configure its secret independently.
+The bootstrap role is used only by these setup scripts. No application role is created by this foundation. For application use, provision a separate least-privilege role and grant `USAGE` on `jarvis_app` plus `SELECT, INSERT` on both tables, then configure its URL independently. For example, run the following as an authorized database owner after replacing the role name:
+
+```sql
+GRANT USAGE ON SCHEMA jarvis_app TO jarvis_app_role;
+GRANT SELECT, INSERT ON jarvis_app.conversations, jarvis_app.messages TO jarvis_app_role;
+```
+
+The adapter does not need schema DDL, update, or delete privileges.
 
 ## Files and execution order
 
@@ -61,10 +69,11 @@ database/
   backup_db.bat
   config/db_config.example.bat
   scripts/0001_migration_metadata.sql
+  scripts/0002_conversation_persistence.sql
   migrations/README.md
 ```
 
-Migration files are sorted by their numeric identifier. `0001_migration_metadata.sql` creates `jarvis_meta.schema_migrations` with a migration identifier, SHA-256 checksum, and applied timestamp. It creates no application tables and requires schema-creation permission in the target database. There are no unnecessary placeholder SQL files.
+Migration files are sorted by their numeric identifier. `0001_migration_metadata.sql` creates `jarvis_meta.schema_migrations`. `0002_conversation_persistence.sql` creates `jarvis_app.conversations` and `jarvis_app.messages`, with role/content constraints, a foreign key, and ordered-message index. Both require schema-creation permission. There are no placeholder SQL files.
 
 ## Install or update
 
@@ -88,7 +97,7 @@ The migration ledger prevents successful one-time migrations from running again.
 database\verify_db.bat
 ```
 
-Verification checks the configured server and target database, confirms the migration ledger has the expected column layout, compares recorded checksums with the migrations in this checkout, and prints applied identifiers. It returns non-zero if the database or required migration metadata is missing or incompatible. It does not claim to validate application tables because none exist yet.
+Verification checks the configured server and target database, confirms the migration ledger has the expected column layout, compares recorded checksums with the migrations in this checkout, and prints applied identifiers. It returns non-zero if the database or required migration metadata is missing or incompatible. It verifies migration ledger/checksum state; it does not introspect all application table constraints.
 
 ## Backup and restore
 
@@ -119,4 +128,4 @@ Add a new non-empty `scripts/NNNN_lowercase_name.sql` file with a unique identif
 - **Checksum or unknown migration:** use a project revision matching the database's migration history; do not reset the ledger or edit deployed files.
 - **Backup file exists:** keep the existing backup and rerun after the timestamp changes or choose another output directory.
 
-This is a Windows setup foundation with standard-library Python and PostgreSQL CLI tools. It does not install PostgreSQL, configure server authentication, create application tables or roles, integrate a Python database driver, connect FastAPI to PostgreSQL, persist chat, add pgvector, or implement automated backup scheduling. The scripts were exercised against a disposable PostgreSQL 18 cluster with SCRAM authentication, including a restore into another temporary database. Validate again against the PostgreSQL versions and deployment configuration you intend to use before relying on them operationally.
+This is a Windows setup foundation with standard-library Python and PostgreSQL CLI tools; the optional FastAPI adapter uses the separately installed psycopg extra. It does not install PostgreSQL, configure server authentication, create application roles, add pgvector, or implement automated backup scheduling. Core v0.6 stores one two-message conversation per successful request; it is not multi-turn memory. Validate the schema and adapter against the PostgreSQL versions and deployment configuration you intend to use before relying on them operationally. Previous provisioning/restore-drill results do not verify the new application adapter.

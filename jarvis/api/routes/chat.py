@@ -3,9 +3,11 @@
 import logging
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from starlette.concurrency import run_in_threadpool
 
 from jarvis.models.schemas import ChatRequest, ChatResponse, ErrorResponse
 from jarvis.orchestration.models import ExpertExecutionError, ExpertTimeoutError, RequestContext
+from jarvis.persistence.base import PersistenceError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["chat"])
@@ -19,6 +21,7 @@ router = APIRouter(tags=["chat"])
         422: {"model": ErrorResponse, "description": "Invalid request"},
         502: {"model": ErrorResponse, "description": "Provider failure"},
         504: {"model": ErrorResponse, "description": "Provider timeout"},
+        503: {"model": ErrorResponse, "description": "Persistence unavailable"},
     },
 )
 async def chat(body: ChatRequest, request: Request, response: Response) -> ChatResponse:
@@ -48,6 +51,20 @@ async def chat(body: ChatRequest, request: Request, response: Response) -> ChatR
             detail="The configured provider failed.",
             headers={"X-JARVIS-Execution-ID": context.execution_id},
         ) from exc
+    repository = request.app.state.conversation_repository
+    if repository is not None:
+        try:
+            await run_in_threadpool(repository.save_exchange, body.message, result.reply)
+        except PersistenceError as exc:
+            logger.error(
+                "Chat persistence failed",
+                extra={"execution_id": context.execution_id, "error_type": type(exc).__name__},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="The response could not be saved.",
+                headers={"X-JARVIS-Execution-ID": context.execution_id},
+            ) from exc
     return ChatResponse(
         reply=result.reply,
         provider=request.app.state.provider.name,

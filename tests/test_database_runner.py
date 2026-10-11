@@ -34,6 +34,10 @@ def migration_checksum(directory: Path, migration_id: str = MIGRATION_ID) -> str
     return next(checksum for found_id, _, _, checksum in runner._migration_files(directory) if found_id == migration_id)
 
 
+def applied_migrations(directory: Path = runner.MIGRATIONS_DIR) -> dict[str, str]:
+    return {migration_id: checksum for migration_id, _, _, checksum in runner._migration_files(directory)}
+
+
 def database_runner(*, exists: bool = True, permission: bool = True, ledger: bool = False, applied: dict[str, str] | None = None, fail_file: str | None = None):
     calls: list[list[str]] = []
     state = {"exists": exists, "permission": permission, "ledger": ledger, "applied": dict(applied or {})}
@@ -117,8 +121,7 @@ def test_migrations_are_sorted_and_reject_psql_meta_commands(tmp_path):
 def test_existing_database_is_preserved_and_applied_migration_is_skipped(monkeypatch, tmp_path, capsys):
     config = make_config(tmp_path)
     scripts = Path(runner.MIGRATIONS_DIR)
-    checksum = migration_checksum(scripts)
-    calls, fake_run = database_runner(ledger=True, applied={MIGRATION_ID: checksum})
+    calls, fake_run = database_runner(ledger=True, applied=applied_migrations(scripts))
     fake_tool_lookup(monkeypatch)
 
     status = runner.install(config, environ={"PATH": ""}, runner=fake_run, database_dir=runner.DATABASE_DIR)
@@ -228,8 +231,7 @@ def test_password_file_is_required_and_backup_does_not_overwrite(monkeypatch, tm
     existing = config.backup_dir / "jarvis_AI_20261011_120000.dump"
     existing.write_bytes(b"keep")
     fixed_now = runner.datetime(2026, 10, 11, 12, 0, 0)
-    checksum = migration_checksum(runner.MIGRATIONS_DIR)
-    _, fake_run = database_runner(ledger=True, applied={MIGRATION_ID: checksum})
+    _, fake_run = database_runner(ledger=True, applied=applied_migrations())
     fake_tool_lookup(monkeypatch)
     assert runner.backup(config, environ={"PATH": ""}, runner=fake_run, now=fixed_now) == 1
     assert existing.read_bytes() == b"keep"
@@ -238,8 +240,7 @@ def test_password_file_is_required_and_backup_does_not_overwrite(monkeypatch, tm
 
 def test_backup_writes_timestamped_archive_and_validates_it(monkeypatch, tmp_path):
     config = make_config(tmp_path)
-    checksum = migration_checksum(runner.MIGRATIONS_DIR)
-    _, base_runner = database_runner(ledger=True, applied={MIGRATION_ID: checksum})
+    _, base_runner = database_runner(ledger=True, applied=applied_migrations())
     fake_tool_lookup(monkeypatch)
     now = runner.datetime(2026, 10, 11, 12, 34, 56)
 

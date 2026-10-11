@@ -33,7 +33,7 @@ The adapter is verified with mocked HTTP transport only. No live credentials or 
 
 Offline regression tests for Core v0.4 use controlled mock providers and HTTP transport to assert specialist prompt selection and transient failure handling. No live provider call or semantic model-quality evaluation was performed. In the restricted sandbox, asyncio loop startup is blocked because local socketpair creation attempts a restricted localhost accept.
 
-## Core v0.5 — Structured Specialist Outputs (current implementation)
+## Core v0.5 — Structured Specialist Outputs (implemented)
 
 - Add typed, bounded Pydantic contracts for AnalysisExpert and ValidationExpert, including evidence rules for supported conclusions and validation findings.
 - Extend the vendor-neutral provider contract with an optional response-model request; transform a copied strict Chat Completions JSON Schema by removing size bounds and documented unsupported composition keywords, verify required/closed objects and references, and validate returned JSON locally with all original Pydantic bounds before synthesis.
@@ -42,9 +42,19 @@ Offline regression tests for Core v0.4 use controlled mock providers and HTTP tr
 
 The new behavior is covered by offline mocked-provider tests, including actual outgoing schemas for both specialists. OpenAI's guide lists array bounds as unsupported on fine-tuned models; because provider model selection is configurable, the adapter omits all schema size-bound keywords and retains those checks in local Pydantic validation. No live API request, strict-schema endpoint compatibility, or semantic quality evaluation has been performed. Structured contracts constrain shape and local bounds; they do not prove factual correctness. No tools, external actions, persistence, or new specialist agents are introduced.
 
+## Core v0.6 — Optional Conversation Persistence Foundation (implemented; live PostgreSQL unverified)
+
+- Add a database-independent conversation repository contract and optional PostgreSQL adapter using parameterized psycopg operations.
+- Keep persistence disabled by default and leave PostgreSQL outside normal startup and mock-mode test requirements.
+- Store each successful chat request as a new conversation with exactly its submitted user message and final assistant reply in one transaction. A save failure returns sanitized HTTP 503 rather than an ordinary success response.
+- Add migration `0002_conversation_persistence.sql` with UUID identifiers, a conversation foreign key, restricted roles, nonblank bounded content, timestamps, and an ordered-message index.
+- Keep the public `/chat` response shape, provider boundary, and advisory-only behavior unchanged. No history API, multi-turn linking, frontend history, accounts, audit traces, or provider internals are added.
+
+Repository transaction behavior and API failure/compatibility paths are tested with controlled doubles. No `psql` executable or installed psycopg extra was available, so migration application and live PostgreSQL behavior remain unverified.
+
 ## Later milestones
 
-1. Application persistence: the optional PostgreSQL provisioning and migration-ledger foundation now exists; later add a reviewed data model, user/conversation records, persistence integration, and retrieval foundations.
+1. Conversation continuity and memory: design client conversation identity, retrieval APIs, retention, and user isolation before adding continuity or memory.
 2. Real model adapters: optional local CPU model and compatible hosted providers behind provider interfaces, with explicit cost, privacy, timeout, and retry controls.
 3. Safe tools and permissions: tool registry/runtime, permission and approval gateway, independent verification, bounded retries, and fault isolation.
 4. User experience: React/TypeScript interface, natural conversation, voice input/output, and supported desktop/mobile integrations.

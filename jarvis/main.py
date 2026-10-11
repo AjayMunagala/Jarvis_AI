@@ -16,6 +16,7 @@ from jarvis.core.middleware import RequestBodyLimitMiddleware
 from jarvis.intelligence.base import IntelligenceProvider
 from jarvis.intelligence.router import build_provider
 from jarvis.orchestration.service import OrchestrationService
+from jarvis.persistence.postgres import PostgresConversationRepository
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,15 @@ def create_app(
         settings=resolved_settings,
     )
     orchestration_service = OrchestrationService(resolved_provider, resolved_settings)
+    conversation_repository = None
+    if resolved_settings.persistence_enabled:
+        database_url = resolved_settings.persistence_database_url
+        # Settings validation guarantees the URL exists when this option is enabled.
+        assert database_url is not None
+        conversation_repository = PostgresConversationRepository(
+            database_url.get_secret_value(),
+            connect_timeout_seconds=resolved_settings.persistence_connect_timeout_seconds,
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -46,6 +56,7 @@ def create_app(
     app.state.settings = resolved_settings
     app.state.provider = resolved_provider
     app.state.orchestration_service = orchestration_service
+    app.state.conversation_repository = conversation_repository
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=resolved_settings.max_request_body_bytes,
@@ -79,6 +90,7 @@ def create_app(
             413: "request_too_large",
             502: "provider_error",
             504: "provider_timeout",
+            503: "persistence_unavailable",
         }
         return JSONResponse(
             status_code=exc.status_code,

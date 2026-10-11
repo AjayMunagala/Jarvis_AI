@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -30,6 +31,9 @@ class Settings(BaseSettings):
     max_parallel_experts: int = Field(default=2, ge=1, le=3)
     max_message_length: int = Field(default=4000, ge=1, le=20000)
     max_request_body_bytes: int = Field(default=65536, ge=1024, le=1048576)
+    persistence_enabled: bool = False
+    persistence_database_url: SecretStr | None = None
+    persistence_connect_timeout_seconds: int = Field(default=3, ge=1, le=15)
 
     @model_validator(mode="after")
     def validate_provider_configuration(self) -> "Settings":
@@ -45,6 +49,29 @@ class Settings(BaseSettings):
             raise ValueError("JARVIS_OPENAI_BASE_URL must not contain a query or fragment.")
         if not self.openai_model.strip():
             raise ValueError("JARVIS_OPENAI_MODEL must not be blank.")
+        if self.persistence_enabled:
+            database_url = (
+                self.persistence_database_url.get_secret_value()
+                if self.persistence_database_url else ""
+            )
+            if not database_url.strip():
+                raise ValueError(
+                    "JARVIS_PERSISTENCE_DATABASE_URL is required when JARVIS_PERSISTENCE_ENABLED=true."
+                )
+            try:
+                parsed_database_url = urlsplit(database_url)
+                valid_database_url = (
+                    parsed_database_url.scheme in {"postgresql", "postgres"}
+                    and bool(parsed_database_url.hostname)
+                    and parsed_database_url.path not in {"", "/"}
+                    and not parsed_database_url.fragment
+                )
+            except ValueError:
+                valid_database_url = False
+            if not valid_database_url:
+                raise ValueError(
+                    "JARVIS_PERSISTENCE_DATABASE_URL must include a PostgreSQL host and database name."
+                )
         return self
 
 

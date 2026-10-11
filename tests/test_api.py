@@ -32,6 +32,67 @@ def test_demo_chat_returns_clear_structured_response():
     assert len(response.headers["x-jarvis-execution-id"]) == 32
 
 
+def test_optional_persistence_saves_user_and_assistant_without_changing_response():
+    class Repository:
+        def __init__(self):
+            self.saved = None
+
+        def save_exchange(self, user_content, assistant_content):
+            self.saved = (user_content, assistant_content)
+
+    repository = Repository()
+    app = create_app(settings=Settings(environment="test"))
+    app.state.conversation_repository = repository
+    with TestClient(app) as test_client:
+        response = test_client.post("/chat", json={"message": "persist this request"})
+    assert response.status_code == 200
+    assert set(response.json()) == {"reply", "provider", "demo", "partial"}
+    assert repository.saved == (
+        "persist this request",
+        "This is a JARVIS demo response, not an AI-generated answer. I received: persist this request",
+    )
+
+
+def test_persistence_failure_does_not_report_success_or_leak_database_details(caplog):
+    class UnavailableRepository:
+        def save_exchange(self, user_content, assistant_content):
+            from jarvis.persistence.base import PersistenceError
+            raise PersistenceError() from RuntimeError("private database credential")
+
+    app = create_app(settings=Settings(environment="test"))
+    app.state.conversation_repository = UnavailableRepository()
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        response = test_client.post("/chat", json={"message": "do not lose this"})
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "persistence_unavailable",
+        "detail": "The response could not be saved.",
+    }
+    assert response.headers["x-jarvis-execution-id"]
+    assert "private database credential" not in response.text
+    assert "private database credential" not in caplog.text
+
+
+def test_enabled_persistence_constructs_adapter_without_connecting(monkeypatch):
+    from pydantic import SecretStr
+
+    constructed = {}
+    sentinel = object()
+
+    def adapter(database_url, *, connect_timeout_seconds):
+        constructed.update(url=database_url, timeout=connect_timeout_seconds)
+        return sentinel
+
+    monkeypatch.setattr("jarvis.main.PostgresConversationRepository", adapter)
+    app = create_app(settings=Settings(
+        environment="test",
+        persistence_enabled=True,
+        persistence_database_url=SecretStr("postgresql://local/jarvis"),
+    ))
+    assert app.state.conversation_repository is sentinel
+    assert constructed == {"url": "postgresql://local/jarvis", "timeout": 3}
+
+
 def test_chat_returns_partial_status_with_useful_expert_output():
     from jarvis.orchestration.registry import ExpertRegistry, ToolRegistry, ToolRegistryConfig
     from jarvis.orchestration.service import OrchestrationService
