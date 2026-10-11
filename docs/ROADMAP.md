@@ -15,7 +15,7 @@ Roadmap items are goals, not claims about current functionality.
 
 ## Later milestones
 
-1. Persistent storage: PostgreSQL, migrations, user/conversation records, and retrieval foundations.
+1. Application persistence: the optional PostgreSQL provisioning and migration-ledger foundation now exists; later add a reviewed data model, user/conversation records, persistence integration, and retrieval foundations.
 2. Real model adapters: optional local CPU model and compatible hosted providers behind provider interfaces, with explicit cost, privacy, timeout, and retry controls.
 3. Safe tools and permissions: tool registry/runtime, permission and approval gateway, independent verification, bounded retries, and fault isolation.
 4. User experience: React/TypeScript interface, natural conversation, voice input/output, and supported desktop/mobile integrations.

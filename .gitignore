@@ -1,6 +1,11 @@
 .env
 .env.*
 !.env.example
+database/config/db_config.local.bat
+database/config/*.local.*
+database/.pgpass
+database/backups/
+*.dump
 .venv/
 .venv*/
 venv/

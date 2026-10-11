@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import {
   Activity, ArrowDown, ArrowUp, AudioLines, Check, ChevronDown, CircleHelp,
   Clock3, Command, Cpu, FileText, Folder, Menu, MessageSquare, Plus, Search,
   Settings2, ShieldCheck, Sparkles, X,
 } from 'lucide-react'
 import { sendChatMessage } from './services/api'
+
+const MAX_MESSAGE_LENGTH = 4000
 
 type Message = {
   id: string
@@ -59,6 +61,11 @@ export default function App() {
   const [notice, setNotice] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const requestInFlightRef = useRef(false)
+
+  const shortcutLabel = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform)
+    ? '⌘ K'
+    : 'Ctrl K'
 
   const activeConversation = conversations.find((conversation) => conversation.id === activeId) ?? null
   const messages = activeConversation?.messages ?? []
@@ -67,43 +74,61 @@ export default function App() {
     if (messages.length) bottomRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'end' })
   }, [messages, pending])
 
-  function newConversation() {
+  const newConversation = useCallback(() => {
     setActiveId(null)
     setDraft('')
     setMobileMenuOpen(false)
     setNotice('')
     inputRef.current?.focus()
-  }
+  }, [])
+
+  useEffect(() => {
+    function handleGlobalKeyDown(event: globalThis.KeyboardEvent) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        newConversation()
+      }
+    }
+
+    window.addEventListener('keydown', handleGlobalKeyDown)
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown)
+  }, [newConversation])
 
   async function submitMessage(rawText: string, retryMessageId?: string) {
     const text = rawText.trim()
-    if (!text || pending) return
-
-    let conversationId = activeId
-    if (!conversationId) {
-      conversationId = createId()
-      const initial: Conversation = {
-        id: conversationId,
-        title: text.slice(0, 44),
-        updatedAt: Date.now(),
-        messages: [{ id: createId(), role: 'user', content: text }],
-      }
-      setConversations((current) => [initial, ...current])
-      setActiveId(conversationId)
-    } else if (retryMessageId) {
-      setConversations((current) => current.map((conversation) => conversation.id === conversationId
-        ? { ...conversation, messages: conversation.messages.map((message) => message.id === retryMessageId ? { ...message, error: false } : message) }
-        : conversation))
-    } else {
-      setConversations((current) => current.map((conversation) => conversation.id === conversationId
-        ? { ...conversation, title: conversation.messages.length === 0 ? text.slice(0, 44) : conversation.title, updatedAt: Date.now(), messages: [...conversation.messages, { id: createId(), role: 'user', content: text }] }
-        : conversation))
+    if (!text) return
+    if (text.length > MAX_MESSAGE_LENGTH) {
+      setNotice(`Messages are limited to ${MAX_MESSAGE_LENGTH.toLocaleString()} characters.`)
+      return
     }
+    if (requestInFlightRef.current || pending) return
 
-    setDraft('')
+    requestInFlightRef.current = true
     setPending(true)
-    setNotice('')
+    let conversationId = activeId
     try {
+      if (!conversationId) {
+        conversationId = createId()
+        const initial: Conversation = {
+          id: conversationId,
+          title: text.slice(0, 44),
+          updatedAt: Date.now(),
+          messages: [{ id: createId(), role: 'user', content: text }],
+        }
+        setConversations((current) => [initial, ...current])
+        setActiveId(conversationId)
+      } else if (retryMessageId) {
+        setConversations((current) => current.map((conversation) => conversation.id === conversationId
+          ? { ...conversation, messages: conversation.messages.map((message) => message.id === retryMessageId ? { ...message, error: false } : message) }
+          : conversation))
+      } else {
+        setConversations((current) => current.map((conversation) => conversation.id === conversationId
+          ? { ...conversation, title: conversation.messages.length === 0 ? text.slice(0, 44) : conversation.title, updatedAt: Date.now(), messages: [...conversation.messages, { id: createId(), role: 'user', content: text }] }
+          : conversation))
+      }
+
+      setDraft('')
+      setNotice('')
       const result = await sendChatMessage(text)
       setConversations((current) => current.map((conversation) => conversation.id === conversationId
         ? { ...conversation, updatedAt: Date.now(), messages: [...conversation.messages.filter((message) => !(retryMessageId && message.id === retryMessageId)), { id: createId(), role: 'assistant', content: result.reply, provider: result.provider, demo: result.demo }] }
@@ -117,6 +142,7 @@ export default function App() {
           : [...conversation.messages, failedMessage] }
         : conversation))
     } finally {
+      requestInFlightRef.current = false
       setPending(false)
       inputRef.current?.focus()
     }
@@ -156,7 +182,7 @@ export default function App() {
         </div>
 
         <button className="new-chat-button" onClick={newConversation}>
-          <Plus size={17} strokeWidth={2.2} /><span>New conversation</span><span className="shortcut">⌘ K</span>
+          <Plus size={17} strokeWidth={2.2} /><span>New conversation</span><span className="shortcut">{shortcutLabel}</span>
         </button>
 
         <div className="sidebar-section-label">WORKSPACE</div>
@@ -222,8 +248,8 @@ export default function App() {
 
         <div className="composer-dock">
           <form className="composer" onSubmit={handleSubmit}>
-            <textarea ref={inputRef} aria-label="Message JARVIS" placeholder="Message JARVIS…" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} maxLength={20000} rows={1} disabled={pending} />
-            <div className="composer-bottom"><div className="composer-hint"><span className="hint-key">↵</span> to send <span className="hint-separator">·</span> <span className="hint-key">⇧ ↵</span> for new line <span className="hint-separator">·</span> Demo replies are not AI-generated</div><div className="composer-actions"><span className="char-count">{draft.length > 0 ? `${draft.length}/4000` : ''}</span><button type="submit" className="send-button" aria-label="Send message" disabled={!draft.trim() || pending || draft.length > 4000}><ArrowUp size={18} strokeWidth={2.3} /></button></div></div>
+            <textarea ref={inputRef} aria-label="Message JARVIS" placeholder="Message JARVIS…" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} maxLength={MAX_MESSAGE_LENGTH} rows={1} disabled={pending} />
+            <div className="composer-bottom"><div className="composer-hint"><span className="hint-key">↵</span> to send <span className="hint-separator">·</span> <span className="hint-key">⇧ ↵</span> for new line <span className="hint-separator">·</span> Demo replies are not AI-generated</div><div className="composer-actions"><span className="char-count">{draft.length > 0 ? `${draft.length}/${MAX_MESSAGE_LENGTH}` : ''}</span><button type="submit" className="send-button" aria-label="Send message" disabled={!draft.trim() || pending || draft.trim().length > MAX_MESSAGE_LENGTH}><ArrowUp size={18} strokeWidth={2.3} /></button></div></div>
           </form>
           <div className="composer-footer"><span><ShieldCheck size={12} /> Private to this session</span><span><Clock3 size={12} /> No history is saved after closing</span></div>
         </div>

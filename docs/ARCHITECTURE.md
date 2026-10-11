@@ -23,4 +23,4 @@ Future planner, memory, expert/capability registry, tool runtime, permission gat
 
 ## Reliability and future persistence
 
-Current request processing has a configurable timeout and sanitized failure boundary. PostgreSQL, migrations, audit-event persistence, rate limiting, authentication, and multi-user isolation are not part of v0.1 and must be designed before production use. The health endpoint is process-level; readiness currently means startup configuration/provider construction succeeded.
+Current request processing has a configurable timeout and sanitized failure boundary. The repository now includes standalone PostgreSQL provisioning and a versioned migration ledger under `database/`, but the FastAPI application does not connect to it. The only database object currently justified is the migration metadata table; conversation persistence, audit-event persistence, application roles, rate limiting, authentication, and multi-user isolation remain deferred until their requirements are designed. The health endpoint is process-level; readiness currently means startup configuration/provider construction succeeded.

@@ -17,7 +17,7 @@ The current Windows baseline uses Python 3.12.10. `python -m pytest -v` passes a
 
 ## Not implemented yet
 
-There is no real LLM adapter, database, persistent memory, planner, tool execution, approval system, account system, or external integration. The frontend is a local React interface only; it does not persist conversations. The API never runs shell commands or external actions.
+There is no real LLM adapter, application database connection, persistent memory, planner, tool execution, approval system, account system, or external integration. Optional standalone PostgreSQL provisioning is documented below, but the app does not use it or persist conversations. The frontend is a local React interface only; the API never runs shell commands or external actions.
 
 ## Prerequisites
 
@@ -55,6 +55,10 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/chat -ContentType "app
 ```powershell
 python -m pytest -v
 ```
+
+## Optional PostgreSQL setup
+
+The FastAPI app does not require PostgreSQL and does not persist chat data. The standalone, Windows-oriented database provisioning foundation creates the configured database when needed and tracks numbered migrations; its initial schema contains migration metadata only. See [database/README.md](database/README.md) for setup, verification, backup, and restore instructions.
 
 ## Run the web interface (Windows PowerShell)
 
@@ -98,7 +102,7 @@ HTTP contracts live in `jarvis/api/routes/`; request and response types live in 
 
 - The mock response is deterministic text, not model output.
 - Only the mock provider is implemented. Other provider values are rejected.
-- In-memory state is not persistent; PostgreSQL and memory are later milestones.
+- In-memory chat state is not persistent. PostgreSQL setup scripts provide optional database creation and migration metadata only; application persistence and memory remain later milestones.
 - `/ready` confirms that settings and the configured provider were constructed; it does not probe external dependencies. Setting `JARVIS_ENVIRONMENT=production` only changes the validated environment label and does not add authentication, rate limiting, or production hardening.
 - If `python` is not found, install Python 3.11+ and ensure the Python launcher/PATH is configured. If imports fail, activate `.venv` and run `python -m pip install -e ".[dev]"` again.
 - If port 8000 is occupied, pass `--port 8001` to uvicorn.
