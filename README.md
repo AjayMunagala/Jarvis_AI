@@ -1,12 +1,13 @@
-# JARVIS Core v0.2
+# JARVIS Core v0.3
 
-JARVIS is a modular foundation for a personal AI operating system. Core v0.2 adds a bounded Mother Orchestrator behind the FastAPI chat endpoint while retaining the provider-independent interface and offline mock provider.
+JARVIS is a modular foundation for a personal AI operating system. Core v0.3 adds an optional OpenAI Chat Completions adapter behind the bounded Mother Orchestrator while retaining the provider-independent interface and offline mock provider.
 
 ## What works now
 
 - `GET /health` and `GET /ready` report service status and version.
 - `POST /chat` accepts a validated message and returns a structured response.
 - The default `mock` provider works without an API key, internet access, GPU, or paid service. It echoes the received message with a clear demo label; it does not reason like an LLM.
+- An optional OpenAI Chat Completions adapter can be selected with `JARVIS_PROVIDER=openai`. It uses the existing provider interface and configured connect/read timeouts. Live OpenAI access is optional and was not verified in this environment.
 - Chat requests pass through deterministic intent classification, a validated bounded plan, and JSON-configured advisory expert definitions. The current mock adapter still returns the same deterministic demo text; expert personas do not provide separate model reasoning.
 - `/chat` retains `reply`, `provider`, and `demo`, and adds `partial` to indicate whether some configured expert steps failed while useful results remained. It returns an `X-JARVIS-Execution-ID` header for chat success, provider failure, and timeout responses.
 - Successful expert outputs are joined in plan order. If the combined reply exceeds 40,000 characters, it is clipped to fit that limit and ends with a visible truncation marker; this does not change the `partial` flag, which reports expert failures.
@@ -17,18 +18,18 @@ JARVIS is a modular foundation for a personal AI operating system. Core v0.2 add
 
 ## Verification baseline
 
-Verified on Windows with Python 3.12: `.venv\Scripts\python.exe -m pytest -v` reports 56 passed (one Starlette deprecation warning recommending `httpx2`); frontend tests report 15 passed; `npm run build` succeeds; and `git diff --check` is clean.
+Verified on Windows with Python 3.12: `.venv\Scripts\python.exe -m pytest -v` reports 74 passed (one Starlette deprecation warning recommending `httpx2`); `npm test -- --run` reports 16 frontend tests passed; `npm run build` succeeds; and `git diff --check` is clean. Provider tests use mocked HTTP transport; live OpenAI access was not verified.
 
 ## Not implemented yet
 
-There is no real LLM adapter, model-driven intent or planning, specialist expert reasoning, application database connection, persistent memory, tool execution, approval system, account system, or external integration. The planner and classifier are deterministic and bounded. Optional standalone PostgreSQL provisioning is documented below, but the app does not use it or persist conversations. The frontend is a local React interface only; the API never runs shell commands or external actions.
+There are not seven independent specialist agents: all configured experts share one provider, and only the validation expert has a distinct model instruction. Mock mode does not perform model reasoning. There is no model-driven intent classification or planning, multi-turn model context, application database connection, persistent memory, tool execution, approval system, account system, or external action integration. The optional OpenAI adapter produces single-request model responses but has not been live-verified here. Optional standalone PostgreSQL provisioning is documented below, but the app does not use it or persist conversations. The frontend is a local React interface only; the API never runs shell commands or external actions.
 
 ## Prerequisites
 
 - Windows 10/11 and Python 3.11 or newer (developed with Python 3.12.10).
 - PowerShell.
 - Node.js 22.12 or newer for the frontend (tested with Node 24.14.1).
-- No GPU or API credentials are needed for demo mode.
+- No GPU, API credentials, or internet are needed for default mock mode. Selecting OpenAI requires internet access and a valid API key.
 
 ## Install on Windows (PowerShell)
 
@@ -87,7 +88,7 @@ npm install
 npm run dev
 ```
 
-Open the URL printed by Vite (normally `http://localhost:5173`). To use a different backend origin with Vite, set `VITE_API_PROXY_TARGET` before starting the frontend, for example `$env:VITE_API_PROXY_TARGET = 'http://127.0.0.1:8001'`. `VITE_API_BASE_URL` can be set to an absolute API base URL for a direct browser connection; that requires the backend to allow the frontend origin through CORS. Neither variable is a secret. The UI sends each message to the mock provider and displays its actual demo reply; conversation history is only kept in memory for the open page.
+Open the URL printed by Vite (normally `http://localhost:5173`). To use a different backend origin with Vite, set `VITE_API_PROXY_TARGET` before starting the frontend, for example `$env:VITE_API_PROXY_TARGET = 'http://127.0.0.1:8001'`. `VITE_API_BASE_URL` can be set to an absolute API base URL for a direct browser connection; that requires the backend to allow the frontend origin through CORS. Neither variable is a secret. The UI sends messages to the backend-selected provider and labels each reply as mock/demo or model output using the API response metadata; conversation history is only kept in memory for the open page.
 
 Run the frontend checks from `frontend/`:
 
@@ -98,7 +99,7 @@ npm run build
 
 ## Select demo mode
 
-Demo mode is the default. Set `JARVIS_PROVIDER=mock` in `.env` to make it explicit. Supported provider choices are validated; unsupported choices fail startup. `.env` is ignored by Git.
+Mock mode is the default. Set `JARVIS_PROVIDER=mock` in `.env` to make it explicit. To use OpenAI, set `JARVIS_PROVIDER=openai`, add `JARVIS_OPENAI_API_KEY` to the local `.env` file, and optionally configure `JARVIS_OPENAI_BASE_URL` and `JARVIS_OPENAI_MODEL`. The base URL defaults to `https://api.openai.com/v1`, and the model defaults to `gpt-4o-mini`. Connect/read timeout values are configurable with `JARVIS_PROVIDER_CONNECT_TIMEOUT_SECONDS` and `JARVIS_PROVIDER_READ_TIMEOUT_SECONDS`; the existing overall request deadline still bounds each expert call. Missing OpenAI credentials fail startup; the service never falls back to mock after a real-provider failure. A real provider sends message content to the configured endpoint and may incur usage charges. `.env` is ignored by Git; never put a real key in `.env.example`.
 
 ## Where future capabilities belong
 
@@ -107,7 +108,7 @@ HTTP contracts live in `jarvis/api/routes/`; request and response types live in 
 ## Known limitations and troubleshooting
 
 - The mock response is deterministic text, not model output.
-- Only the mock provider is implemented. Other provider values are rejected.
+- `mock` and `openai` are the only supported providers. OpenAI selection fails startup without a nonblank API key. OpenAI live connectivity and credentials were not verified here.
 - In-memory chat state is not persistent. PostgreSQL setup scripts provide optional database creation and migration metadata only; application persistence and memory remain later milestones.
 - `/ready` confirms that settings and the configured provider were constructed; it does not probe external dependencies. Setting `JARVIS_ENVIRONMENT=production` only changes the validated environment label and does not add authentication, rate limiting, or production hardening.
 - If `python` is not found, install Python 3.11+ and ensure the Python launcher/PATH is configured. If imports fail, activate `.venv` and run `python -m pip install -e ".[dev]"` again.
@@ -116,5 +117,5 @@ HTTP contracts live in `jarvis/api/routes/`; request and response types live in 
 - The default message limit is 4,000 characters (configurable from 1 to 20,000 with `JARVIS_MAX_MESSAGE_LENGTH`). The whole HTTP body is limited to 65,536 bytes by default (configurable from 1,024 bytes to 1,048,576 bytes with `JARVIS_MAX_REQUEST_BODY_BYTES`). The message character limit is checked after JSON parsing; the body byte limit is applied while the body is received.
 - Messages longer than the configured limit, including messages beyond the 20,000-character schema ceiling, return 413. Other schema-invalid requests, including whitespace-only messages and extra fields, return 422.
 - Provider timeout defaults to 5 seconds and is configurable from greater than 0 up to 60 seconds with `JARVIS_REQUEST_TIMEOUT_SECONDS`.
-- `JARVIS_ENVIRONMENT` accepts `development`, `test`, or `production`; `JARVIS_LOG_LEVEL` accepts `DEBUG`, `INFO`, `WARNING`, or `ERROR`. `JARVIS_APP_NAME` sets the API title. Only `JARVIS_PROVIDER=mock` is currently supported.
+- `JARVIS_ENVIRONMENT` accepts `development`, `test`, or `production`; `JARVIS_LOG_LEVEL` accepts `DEBUG`, `INFO`, `WARNING`, or `ERROR`. `JARVIS_APP_NAME` sets the API title. `JARVIS_PROVIDER` accepts `mock` or `openai`.
 - `JARVIS_MAX_TOOL_ROUNDS` is bounded to 1–5 (default 5), `JARVIS_MAX_EXPERT_RETRIES` to 0–3 (default 2), and `JARVIS_MAX_PARALLEL_EXPERTS` to 1–3 (default 2). Execution is sequential by default; parallel plans must be explicitly declared in the expert configuration. Retries apply only to explicitly marked transient expert failures and share the configured request deadline.

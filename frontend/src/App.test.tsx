@@ -14,11 +14,11 @@ afterEach(() => {
 })
 
 describe('JARVIS chat', () => {
-  it('renders an honest demo-mode welcome and prompt suggestions', () => {
+  it('renders a provider-neutral welcome and prompt suggestions before the first response', () => {
     render(<App />)
     expect(screen.getByRole('heading', { name: /good to have you here, ajay/i })).toBeInTheDocument()
-    expect(screen.getByText(/DEMO MODE/)).toBeInTheDocument()
-    expect(screen.getByText(/local mock provider/i)).toBeInTheDocument()
+    expect(screen.getByText(/PROVIDER MODE/)).toBeInTheDocument()
+    expect(screen.getByText(/backend selects the response provider/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /explain a concept/i })).toBeInTheDocument()
   })
 
@@ -31,8 +31,17 @@ describe('JARVIS chat', () => {
 
     expect(await screen.findByText('This is the returned mock reply.')).toBeInTheDocument()
     expect(sendMock).toHaveBeenCalledWith('Hello JARVIS')
-    expect(screen.getByText('DEMO · MOCK')).toBeInTheDocument()
+    expect(screen.getAllByText('DEMO · MOCK')).toHaveLength(2)
     expect(screen.getByRole('button', { name: /Hello JARVIS/ })).toBeInTheDocument()
+  })
+
+  it('labels real-provider responses as model output, not demo output', async () => {
+    sendMock.mockResolvedValue({ reply: 'Model response.', provider: 'openai', demo: false })
+    render(<App />)
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'Hello{Enter}')
+    expect(await screen.findByText('Model response.')).toBeInTheDocument()
+    expect(screen.getAllByText('MODEL · OPENAI')).toHaveLength(2)
+    expect(screen.queryByText('DEMO · OPENAI')).not.toBeInTheDocument()
   })
 
   it('marks synthesized partial expert responses clearly', async () => {

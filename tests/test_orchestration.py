@@ -20,6 +20,7 @@ from jarvis.orchestration.models import (
     RequestContext,
     TransientExpertError,
 )
+from jarvis.intelligence.base import TransientProviderError
 from jarvis.orchestration.planner import Planner
 from jarvis.orchestration.registry import (
     ExpertRegistry,
@@ -62,7 +63,7 @@ class TrackingProvider:
         self.active = 0
         self.max_active = 0
 
-    async def generate_reply(self, message: str):
+    async def generate_reply(self, message: str, *, system_instruction: str | None = None):
         self.calls += 1
         self.active += 1
         self.max_active = max(self.max_active, self.active)
@@ -207,6 +208,13 @@ def test_expert_retries_only_explicit_transient_failures_with_a_bound():
     assert result.reply == "recovered"
 
 
+def test_expert_retries_explicit_transient_provider_failures():
+    provider = TrackingProvider([TransientProviderError(), "recovered"])
+    result = asyncio.run(service(provider).run(RequestContext(message="hello")))
+    assert provider.calls == 2
+    assert result.reply == "recovered"
+
+
 def test_transient_retry_backoff_is_exponential_and_bounded(monkeypatch):
     provider = TrackingProvider([TransientExpertError(), TransientExpertError(), TransientExpertError()])
     settings = Settings(environment="test", max_expert_retries=2)
@@ -252,7 +260,7 @@ def test_provider_timeout_is_reported_as_sanitized_orchestration_timeout():
         name = "slow"
         is_demo = True
 
-        async def generate_reply(self, message):
+        async def generate_reply(self, message, *, system_instruction=None):
             await asyncio.sleep(0.05)
             return "late"
 
@@ -272,7 +280,7 @@ def test_parallel_timeout_cancels_active_provider_coroutines():
             self.calls = 0
             self.cancelled = 0
 
-        async def generate_reply(self, message):
+        async def generate_reply(self, message, *, system_instruction=None):
             self.calls += 1
             if self.calls == 2:
                 started.set()

@@ -25,6 +25,7 @@ class ExpertDefinition(RegistryModel):
     description: str = Field(min_length=1, max_length=240)
     enabled: StrictBool = True
     tool_ids: tuple[str, ...] = ()
+    system_instruction: str | None = Field(default=None, min_length=1, max_length=2000)
 
 
 class ExpertRegistryConfig(RegistryModel):

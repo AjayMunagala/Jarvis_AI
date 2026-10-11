@@ -46,7 +46,7 @@ def test_chat_returns_partial_status_with_useful_expert_output():
         def __init__(self):
             self.calls = 0
 
-        async def generate_reply(self, message):
+        async def generate_reply(self, message, *, system_instruction=None):
             self.calls += 1
             if self.calls == 1:
                 return "Useful partial analysis."
@@ -119,7 +119,7 @@ def test_provider_failure_is_sanitized(caplog):
         name = "broken"
         is_demo = False
 
-        async def generate_reply(self, message):
+        async def generate_reply(self, message, *, system_instruction=None):
             raise RuntimeError("secret provider detail")
 
     with client(provider=BrokenProvider()) as test_client:
@@ -148,7 +148,7 @@ def test_provider_timeout_is_sanitized(caplog):
         name = "slow"
         is_demo = False
 
-        async def generate_reply(self, message):
+        async def generate_reply(self, message, *, system_instruction=None):
             await asyncio.sleep(0.05)
             return "too late"
 
@@ -266,6 +266,10 @@ def test_invalid_configuration_is_rejected():
         Settings(provider="unknown")
     with pytest.raises(ValidationError):
         Settings(max_request_body_bytes=100)
+    with pytest.raises(ValidationError):
+        Settings(provider_connect_timeout_seconds=0)
+    with pytest.raises(ValidationError):
+        Settings(provider_read_timeout_seconds=61)
 
 
 def test_environment_configuration_is_validated(monkeypatch):

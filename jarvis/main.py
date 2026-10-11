@@ -26,7 +26,10 @@ def create_app(
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.log_level)
-    resolved_provider = provider if provider is not None else build_provider(resolved_settings.provider)
+    resolved_provider = provider if provider is not None else build_provider(
+        resolved_settings.provider,
+        settings=resolved_settings,
+    )
     orchestration_service = OrchestrationService(resolved_provider, resolved_settings)
 
     @asynccontextmanager

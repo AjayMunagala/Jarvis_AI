@@ -8,7 +8,7 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
-from jarvis.intelligence.base import IntelligenceProvider
+from jarvis.intelligence.base import IntelligenceProvider, TransientProviderError
 from jarvis.orchestration.models import (
     AuditEvent,
     ExpertExecutionError,
@@ -43,6 +43,11 @@ class ConfiguredExpert:
         self._provider = provider
 
     async def execute(self, context: RequestContext) -> object:
+        if self.definition.system_instruction:
+            return await self._provider.generate_reply(
+                context.message,
+                system_instruction=self.definition.system_instruction,
+            )
         return await self._provider.generate_reply(context.message)
 
 
@@ -140,13 +145,14 @@ class ExpertExecutor:
                     break
                 except Exception as exc:
                     failure_type = _safe_exception_type(exc)
-                    if isinstance(exc, TransientExpertError) and attempt < self._max_retries:
+                    transient_errors = (TransientExpertError, TransientProviderError)
+                    if isinstance(exc, transient_errors) and attempt < self._max_retries:
                         remaining = deadline - monotonic()
                         delay = min(0.05 * (2 ** attempt), max(remaining, 0))
                         if delay:
                             await asyncio.sleep(delay)
                         continue
-                    last_error = "malformed_output" if isinstance(exc, ValidationError) else ("transient_failure" if isinstance(exc, TransientExpertError) else "expert_failure")
+                    last_error = "malformed_output" if isinstance(exc, ValidationError) else ("transient_failure" if isinstance(exc, transient_errors) else "expert_failure")
                     break
         # Log stable metadata only; never include messages, outputs, or exception text.
         logger.warning("Configured expert failed", extra={"execution_id": execution_id, "expert_id": step.expert_id, "error_code": last_error, "attempts": attempts})
