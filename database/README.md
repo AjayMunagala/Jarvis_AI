@@ -99,6 +99,24 @@ database\verify_db.bat
 
 Verification checks the configured server and target database, confirms the migration ledger has the expected column layout, compares recorded checksums with the migrations in this checkout, and prints applied identifiers. It returns non-zero if the database or required migration metadata is missing or incompatible. It verifies migration ledger/checksum state; it does not introspect all application table constraints.
 
+## Opt-in PostgreSQL integration tests
+
+The live integration suite is separate from the default offline test suite at `integration_tests/test_postgres_integration.py`. It is skipped unless explicitly enabled. It uses the declared `persistence` extra and the existing migration runner, and creates a uniquely named `jarvis_it_<random hex>` database on a local loopback PostgreSQL server. The generated database is dropped during fixture cleanup. Do not point this suite at production or a database containing user data. The configured bootstrap account must be able to create databases and apply migrations. Tests cover migration checksums and reruns, chat persistence/history paging, unknown conversation IDs, transaction rollback/recovery, concurrent appends, and sanitized connection failures.
+
+From PowerShell at the repository root, install the optional adapter dependency if it is not already installed and configure a protected `PGPASSFILE` with a matching local account entry. Do not put a password in the URL or command line:
+
+```powershell
+python -m pip install -e ".[persistence]"
+$env:PGPASSFILE = "$env:APPDATA\postgresql\pgpass.conf"
+$env:JARVIS_TEST_POSTGRES_ADMIN_URL = "postgresql://YOUR_LOCAL_ADMIN@localhost:5432/postgres"
+$env:JARVIS_RUN_POSTGRES_INTEGRATION = "1"
+python -m pytest -v integration_tests/test_postgres_integration.py
+```
+
+If PostgreSQL client tools are not on `PATH`, set `JARVIS_PG_BIN_DIR` to their `bin` directory. The suite requires `psql.exe` and `createdb.exe` because it exercises the project migration runner. It accepts only a password-free admin URL naming `localhost`, `127.0.0.1`, or `::1` and the `postgres` maintenance database. Missing opt-in settings or prerequisites produce explicit skips. A skipped integration suite does not verify live migrations or adapter behavior.
+
+The fixture checks that `PGPASSFILE` names an existing file; it does not inspect or enforce its Windows ACL. Before enabling the suite, restrict access to the account running the tests (see the `icacls` example in [Credential handling](#credential-handling)) and verify the ACL locally. Keep the password only in that file, never in environment output, a URL, or a command argument.
+
 ## Backup and restore
 
 ```cmd

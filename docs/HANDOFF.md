@@ -71,6 +71,12 @@ Core v0.7 verification on Windows/Python 3.12.10: `.venv-dev\Scripts\python.exe 
 - `git diff --check`: passed.
 - OpenAI request/refusal/error tests use mocked HTTP transport; no live provider call was made.
 
+## Core v0.8 PostgreSQL verification review
+
+The v0.8 review adds an opt-in live PostgreSQL test module at `integration_tests/test_postgres_integration.py`. It is outside the default `tests/` collection and requires explicit opt-in, the optional `persistence` extra, PostgreSQL client tools, a password-free admin URL restricted to loopback, and a protected `PGPASSFILE`. The fixture provisions a randomly named disposable integration database and cleanup targets only that generated name. The module covers migrations/checksums/reruns, chat continuation/history paging, unknown IDs, transaction rollback/recovery, concurrent appends, and sanitized connection failure. Setup and exact PowerShell commands are documented in `database/README.md`.
+
+Verification during this review: the full default Python suite passed 130 tests; the focused persistence/database-runner suite passed 29 tests; `compileall` completed successfully; all 11 opt-in integration tests passed, including all 6 live database cases against the local PostgreSQL 18 server. Frontend tests passed 16 and the production build succeeded. `git diff --check` passed. The generated integration database was removed, and a read-only post-run query found no remaining generated integration databases. The fixture checks that `PGPASSFILE` exists but does not enforce its Windows ACL; the operator verified the local file ACL separately. The `httpx`/Starlette TestClient deprecation warning recommending `httpx2` remains; dependency changes are outside this database verification review.
+
 ## Next work
 
-Review the Core v0.7 changes before approving another milestone. Live PostgreSQL migration/adapter behavior, live OpenAI connectivity, strict-schema compatibility against a live endpoint, and semantic model quality remain unverified. Preserve the roadmap's longer-term goals and do not infer that future tools, memory, model-driven planning, or actions exist from current configuration interfaces.
+Review the Core v0.8 integration-test changes before approving another milestone. Live PostgreSQL migration/adapter behavior, live OpenAI connectivity, strict-schema compatibility against a live endpoint, and semantic model quality remain unverified. Preserve the roadmap's longer-term goals and do not infer that future tools, memory, model-driven planning, or actions exist from current configuration interfaces.
