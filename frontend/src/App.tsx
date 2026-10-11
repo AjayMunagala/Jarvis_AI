@@ -65,9 +65,24 @@ export default function App() {
   const [activeView, setActiveView] = useState<'Chat' | 'Memory'>('Chat')
   const [inspectMemoryIds, setInspectMemoryIds] = useState<string[]>([])
   const [providerInfo, setProviderInfo] = useState<{ provider: string; demo: boolean } | null>(null)
+  const [credential, setCredential] = useState('')
+  const [credentialDraft, setCredentialDraft] = useState('')
+  const [unlockOpen, setUnlockOpen] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const requestInFlightRef = useRef(false)
+
+  const handleUnauthorized = useCallback(() => {
+    setCredential('')
+    setCredentialDraft('')
+    setUnlockOpen(true)
+  }, [])
+
+  function lockWorkspace() {
+    setCredential('')
+    setCredentialDraft('')
+    setUnlockOpen(true)
+  }
 
   const shortcutLabel = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform)
     ? '⌘ K'
@@ -136,7 +151,7 @@ export default function App() {
 
       setDraft('')
       setNotice('')
-      const result = await sendChatMessage(text)
+      const result = await sendChatMessage(text, { token: credential || undefined, onUnauthorized: handleUnauthorized })
       setProviderInfo({ provider: result.provider, demo: result.demo })
       setConversations((current) => current.map((conversation) => conversation.id === conversationId
         ? { ...conversation, updatedAt: Date.now(), messages: [...conversation.messages.filter((message) => !(retryMessageId && message.id === retryMessageId)), { id: createId(), role: 'assistant', content: result.reply, provider: result.provider, demo: result.demo, partial: result.partial, memoryContext: result.memory_context }] }
@@ -217,7 +232,7 @@ export default function App() {
 
         <div className="sidebar-spacer" />
         <div className="sidebar-footer">
-          <div className="safety-note"><ShieldCheck size={15} /><span>Your messages stay in this session</span></div>
+          <div className="safety-note"><ShieldCheck size={15} /><span>Local workspace</span></div>
           <button className="nav-item settings-item" onClick={() => selectNav('Settings')}><Settings2 size={17} /><span>Settings</span><span className="nav-soon">SOON</span></button>
           <div className="profile-row"><div className="avatar">A</div><div className="profile-copy"><strong>Local session</strong><span>Personal workspace</span></div><button className="icon-button help-button" aria-label="About JARVIS" onClick={() => setNotice('JARVIS uses the provider configured by the backend. Mock mode is deterministic; model providers are external.')}><CircleHelp size={17} /></button></div>
         </div>
@@ -226,10 +241,10 @@ export default function App() {
       <main className="main-panel">
         <header className="topbar">
           <div className="topbar-left"><button className="icon-button mobile-menu-button" aria-label="Open navigation" onClick={() => setMobileMenuOpen(true)}><Menu size={20} /></button><div className="breadcrumb"><span>Workspace</span><span className="breadcrumb-sep">/</span><strong>{activeView}</strong></div></div>
-          <div className="topbar-right"><div className="provider-pill"><span className="provider-dot" /><span>{providerInfo ? `${providerInfo.demo ? 'DEMO' : 'MODEL'} · ${providerInfo.provider.toUpperCase()}` : 'PROVIDER MODE'}</span></div><span className="topbar-divider" /><div className="system-status"><span className="status-ring"><Check size={11} /></span><span>System ready</span></div></div>
+          <div className="topbar-right"><div className="provider-pill"><span className="provider-dot" /><span>{providerInfo ? `${providerInfo.demo ? 'DEMO' : 'MODEL'} · ${providerInfo.provider.toUpperCase()}` : 'PROVIDER MODE'}</span></div>{credential && <button type="button" className="workspace-lock" onClick={lockWorkspace}>Lock workspace</button>}<span className="topbar-divider" /><div className="system-status"><span className="status-ring"><Check size={11} /></span><span>System ready</span></div></div>
         </header>
 
-        {activeView === 'Memory' ? <div className="content-area"><MemoryManager inspectIds={inspectMemoryIds} /></div> : <><div className={`content-area ${messages.length ? 'has-messages' : ''}`}>
+        {activeView === 'Memory' ? <div className="content-area"><MemoryManager inspectIds={inspectMemoryIds} auth={{ token: credential || undefined, onUnauthorized: handleUnauthorized }} /></div> : <><div className={`content-area ${messages.length ? 'has-messages' : ''}`}>
           {notice && <div className="notice-banner" role="status"><CircleHelp size={16} /><span>{notice}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => setNotice('')}><X size={15} /></button></div>}
           {!messages.length ? (
             <section className="welcome-view" aria-label="Welcome to JARVIS">
@@ -263,9 +278,10 @@ export default function App() {
             <textarea ref={inputRef} aria-label="Message JARVIS" placeholder="Message JARVIS…" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} maxLength={MAX_MESSAGE_LENGTH} rows={1} disabled={pending} />
             <div className="composer-bottom"><div className="composer-hint"><span className="hint-key">↵</span> to send <span className="hint-separator">·</span> <span className="hint-key">⇧ ↵</span> for new line <span className="hint-separator">·</span> Provider mode is shown on each reply</div><div className="composer-actions"><span className="char-count">{draft.length > 0 ? `${draft.length}/${MAX_MESSAGE_LENGTH}` : ''}</span><button type="submit" className="send-button" aria-label="Send message" disabled={!draft.trim() || pending || draft.trim().length > MAX_MESSAGE_LENGTH}><ArrowUp size={18} strokeWidth={2.3} /></button></div></div>
           </form>
-          <div className="composer-footer"><span><ShieldCheck size={12} /> Private to this session</span><span><Clock3 size={12} /> No history is saved after closing</span></div>
+          <div className="composer-footer"><span><ShieldCheck size={12} /> Memory saving is explicit</span><span><Clock3 size={12} /> Chat history depends on backend persistence</span></div>
         </div></>}
       </main>
+      {unlockOpen && <div className="credential-backdrop"><section className="credential-dialog" role="dialog" aria-modal="true" aria-labelledby="credential-title" aria-describedby="credential-help"><h2 id="credential-title">Unlock local workspace</h2><p id="credential-help">Enter the local access token configured for this JARVIS instance. It is kept in this page's memory only and must be entered again after reload.</p><form onSubmit={(event) => { event.preventDefault(); const token = credentialDraft.trim(); if (token.length < 32) return; setCredential(token); setCredentialDraft(''); setUnlockOpen(false) }}><label htmlFor="workspace-token">Local access token</label><input id="workspace-token" type="password" autoComplete="off" value={credentialDraft} onChange={(event) => setCredentialDraft(event.target.value)} autoFocus /><div className="credential-actions"><button type="submit" disabled={credentialDraft.trim().length < 32}>Unlock</button></div></form><p className="credential-warning">This single-owner local prototype is not approved for shared or public deployment. Plain HTTP is unsafe on untrusted networks, and XSS could expose the in-memory token.</p></section></div>}
     </div>
   )
 }

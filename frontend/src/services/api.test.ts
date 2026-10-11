@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createMemory, deleteMemory, listMemories, searchMemories, sendChatMessage, updateMemory } from './api'
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.resetModules() })
 const page = { items: [], total: 0, limit: 20, offset: 0, has_more: false }
 
 describe('API client', () => {
@@ -10,7 +10,10 @@ describe('API client', () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
     await expect(sendChatMessage('Hello')).resolves.toEqual(body)
-    expect(fetchMock).toHaveBeenCalledWith('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'Hello' }) })
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/chat')
+    expect(init).toMatchObject({ method: 'POST', body: JSON.stringify({ message: 'Hello' }) })
+    expect(new Headers(init?.headers).get('content-type')).toBe('application/json')
   })
   it('returns the safe validation detail for chat', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'invalid_request', detail: 'The request body is invalid.' }), { status: 422 })))
@@ -50,5 +53,34 @@ describe('API client', () => {
     await expect(listMemories()).rejects.toThrow(/Could not reach JARVIS/)
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('null', { status: 200 })))
     await expect(sendChatMessage('hi')).rejects.toThrow('JARVIS returned an unexpected response.')
+  })
+
+  it('sends an in-memory bearer token only to the configured API origin', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ reply: 'ok', provider: 'mock', demo: true }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await sendChatMessage('hello', { token: 'never-log-this-token' })
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(new URL(String(url), window.location.origin).origin).toBe(window.location.origin)
+    expect(new Headers(init?.headers).get('authorization')).toBe('Bearer never-log-this-token')
+  })
+
+  it('clears the workspace through the unauthorized callback and sanitizes 401 errors', async () => {
+    const onUnauthorized = vi.fn()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: 'secret server detail' }), { status: 401 })))
+    await expect(listMemories({}, { token: 'private-token-value', onUnauthorized }))
+      .rejects.toThrow('Workspace locked. Enter your local access token again.')
+    expect(onUnauthorized).toHaveBeenCalledTimes(1)
+    await expect(listMemories({}, { token: 'private-token-value' })).rejects.not.toThrow(/private-token-value|secret server detail/)
+  })
+
+  it('does not forward a bearer token to an untrusted plain-HTTP API origin', async () => {
+    vi.stubEnv('VITE_API_BASE_URL', 'http://api.example.test')
+    vi.resetModules()
+    const { sendChatMessage: isolatedSend } = await import('./api')
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(isolatedSend('hello', { token: 'private-token-at-least-32-characters-long' }))
+      .rejects.toThrow(/Could not reach JARVIS/)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

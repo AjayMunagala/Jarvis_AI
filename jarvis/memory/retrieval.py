@@ -2,6 +2,7 @@
 
 import logging
 from time import perf_counter
+from uuid import UUID
 
 from jarvis.memory.base import MemoryRepository, MemoryPersistenceError
 from jarvis.memory.models import MemoryRetrievalResult, RetrievedMemory
@@ -13,6 +14,7 @@ def retrieve_context(
     repository: MemoryRepository | None,
     query: str,
     *,
+    owner_id: UUID,
     limit: int,
     execution_id: str,
 ) -> MemoryRetrievalResult:
@@ -38,7 +40,7 @@ def retrieve_context(
         if record_limit == 0:
             record_outcome("empty", 0)
             return MemoryRetrievalResult(records=(), outcome="empty")
-        page = repository.search(query, limit=record_limit, offset=0)
+        page = repository.search(owner_id, query, limit=record_limit, offset=0)
         records = tuple(
             RetrievedMemory(id=item.id, category=item.category, content=item.content)
             for item in page.items[:record_limit]

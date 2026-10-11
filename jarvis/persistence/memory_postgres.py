@@ -44,37 +44,43 @@ class PostgresMemoryRepository:
         )
 
     def create(
-        self, content: str, category: str | None = None, source_reference: str | None = None
+        self, owner_id: UUID, content: str, category: str | None = None, source_reference: str | None = None
     ) -> MemoryRecord:
         try:
             with self._open_connection() as connection:
                 row = connection.execute(
                     f"""INSERT INTO jarvis_app.memories
-                        (id, content, category, source_reference)
-                        VALUES (%s, %s, %s, %s) RETURNING {_RETURNING}""",
-                    (uuid4(), content, category, source_reference),
+                        (id, owner_id, content, category, source_reference)
+                        VALUES (%s, %s, %s, %s, %s) RETURNING {_RETURNING}""",
+                    (uuid4(), owner_id, content, category, source_reference),
                 ).fetchone()
             return self._record(row)
         except Exception as exc:
             raise MemoryPersistenceError() from exc
 
-    def list(self, *, limit: int = 50, offset: int = 0, category: str | None = None) -> MemoryPage:
+    def list(
+        self, owner_id: UUID, *, limit: int = 50, offset: int = 0, category: str | None = None
+    ) -> MemoryPage:
         try:
             with self._open_connection() as connection:
                 if category is None:
-                    total = connection.execute("SELECT count(*) FROM jarvis_app.memories").fetchone()[0]
+                    total = connection.execute(
+                        "SELECT count(*) FROM jarvis_app.memories WHERE owner_id = %s", (owner_id,)
+                    ).fetchone()[0]
                     rows = connection.execute(
-                        f"""SELECT {_RETURNING} FROM jarvis_app.memories
-                            ORDER BY created_at DESC, id ASC LIMIT %s OFFSET %s""", (limit, offset),
+                        f"""SELECT {_RETURNING} FROM jarvis_app.memories WHERE owner_id = %s
+                            ORDER BY created_at DESC, id ASC LIMIT %s OFFSET %s""", (owner_id, limit, offset),
                     ).fetchall()
                 else:
                     total = connection.execute(
-                        "SELECT count(*) FROM jarvis_app.memories WHERE category = %s", (category,),
+                        "SELECT count(*) FROM jarvis_app.memories WHERE owner_id = %s AND category = %s",
+                        (owner_id, category),
                     ).fetchone()[0]
                     rows = connection.execute(
-                        f"""SELECT {_RETURNING} FROM jarvis_app.memories WHERE category = %s
+                        f"""SELECT {_RETURNING} FROM jarvis_app.memories
+                            WHERE owner_id = %s AND category = %s
                             ORDER BY created_at DESC, id ASC LIMIT %s OFFSET %s""",
-                        (category, limit, offset),
+                        (owner_id, category, limit, offset),
                     ).fetchall()
             items = tuple(self._record(row) for row in rows)
             return MemoryPage(
@@ -84,18 +90,18 @@ class PostgresMemoryRepository:
         except Exception as exc:
             raise MemoryPersistenceError() from exc
 
-    def get(self, memory_id: UUID) -> MemoryRecord | None:
+    def get(self, owner_id: UUID, memory_id: UUID) -> MemoryRecord | None:
         try:
             with self._open_connection() as connection:
                 row = connection.execute(
-                    f"SELECT {_RETURNING} FROM jarvis_app.memories WHERE id = %s",
-                    (memory_id,),
+                    f"SELECT {_RETURNING} FROM jarvis_app.memories WHERE id = %s AND owner_id = %s",
+                    (memory_id, owner_id),
                 ).fetchone()
             return self._record(row) if row is not None else None
         except Exception as exc:
             raise MemoryPersistenceError() from exc
 
-    def update(self, memory_id: UUID, changes: MemoryUpdate) -> MemoryRecord | None:
+    def update(self, owner_id: UUID, memory_id: UUID, changes: MemoryUpdate) -> MemoryRecord | None:
         column_names = {
             "content": "content",
             "category": "category",
@@ -107,45 +113,47 @@ class PostgresMemoryRepository:
         assignments = [f"{column_names[name]} = %s" for name in supplied]
         assignments.append("updated_at = CURRENT_TIMESTAMP")
         parameters = [getattr(changes, name) for name in supplied]
-        parameters.append(memory_id)
+        parameters.extend((memory_id, owner_id))
         try:
             with self._open_connection() as connection:
                 row = connection.execute(
                     f"""UPDATE jarvis_app.memories SET {', '.join(assignments)}
-                        WHERE id = %s RETURNING {_RETURNING}""",
+                        WHERE id = %s AND owner_id = %s RETURNING {_RETURNING}""",
                     tuple(parameters),
                 ).fetchone()
             return self._record(row) if row is not None else None
         except Exception as exc:
             raise MemoryPersistenceError() from exc
 
-    def delete(self, memory_id: UUID) -> bool:
+    def delete(self, owner_id: UUID, memory_id: UUID) -> bool:
         try:
             with self._open_connection() as connection:
                 row = connection.execute(
-                    "DELETE FROM jarvis_app.memories WHERE id = %s RETURNING id",
-                    (memory_id,),
+                    "DELETE FROM jarvis_app.memories WHERE id = %s AND owner_id = %s RETURNING id",
+                    (memory_id, owner_id),
                 ).fetchone()
             return row is not None
         except Exception as exc:
             raise MemoryPersistenceError() from exc
 
-    def search(self, query: str, *, limit: int = 10, offset: int = 0) -> MemoryPage:
+    def search(self, owner_id: UUID, query: str, *, limit: int = 10, offset: int = 0) -> MemoryPage:
         try:
             with self._open_connection() as connection:
                 total = connection.execute(
                     """SELECT count(*) FROM jarvis_app.memories
-                       WHERE to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)""",
-                    (query,),
+                       WHERE owner_id = %s
+                         AND to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)""",
+                    (owner_id, query),
                 ).fetchone()[0]
                 rows = connection.execute(
                     f"""SELECT {_RETURNING} FROM jarvis_app.memories
-                        WHERE to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)
+                        WHERE owner_id = %s
+                          AND to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)
                         ORDER BY ts_rank_cd(to_tsvector('simple', content),
                                             plainto_tsquery('simple', %s)) DESC,
                                  updated_at DESC, id ASC
                         LIMIT %s OFFSET %s""",
-                    (query, query, limit, offset),
+                    (owner_id, query, query, limit, offset),
                 ).fetchall()
             items = tuple(self._record(row) for row in rows)
             return MemoryPage(

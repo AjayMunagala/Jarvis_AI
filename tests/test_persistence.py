@@ -9,6 +9,9 @@ from jarvis.core.config import Settings
 from jarvis.persistence.base import ConversationMessage, ConversationNotFound, PersistenceError
 from jarvis.persistence.postgres import PostgresConversationRepository
 
+TEST_AUTH_TOKEN = "test-only-token-with-at-least-32-characters"
+TEST_OWNER_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+
 
 def test_persistence_is_disabled_by_default_and_needs_no_database():
     settings = Settings(_env_file=None)
@@ -35,7 +38,36 @@ def test_enabled_persistence_requires_a_postgresql_url():
         _env_file=None,
         persistence_enabled=True,
         persistence_database_url=SecretStr("postgresql://jarvis:password@localhost/jarvis"),
+        local_auth_token=SecretStr(TEST_AUTH_TOKEN),
+        owner_id=TEST_OWNER_ID,
     ).persistence_enabled
+
+
+def test_persistent_configuration_requires_strong_token_and_non_nil_owner():
+    database = SecretStr("postgresql://jarvis@localhost/jarvis")
+    with pytest.raises(ValidationError, match="JARVIS_LOCAL_AUTH_TOKEN"):
+        Settings(_env_file=None, persistence_enabled=True, persistence_database_url=database)
+    with pytest.raises(ValidationError, match="JARVIS_OWNER_ID"):
+        Settings(
+            _env_file=None, persistence_enabled=True, persistence_database_url=database,
+            local_auth_token=SecretStr(TEST_AUTH_TOKEN),
+        )
+    for token in ("", "short", " " + TEST_AUTH_TOKEN, "token with embedded whitespace and length"):
+        with pytest.raises(ValidationError, match="JARVIS_LOCAL_AUTH_TOKEN"):
+            Settings(
+                _env_file=None, persistence_enabled=True, persistence_database_url=database,
+                local_auth_token=SecretStr(token), owner_id=TEST_OWNER_ID,
+            )
+    with pytest.raises(ValidationError, match="nil UUID"):
+        Settings(
+            _env_file=None, persistence_enabled=True, persistence_database_url=database,
+            local_auth_token=SecretStr(TEST_AUTH_TOKEN), owner_id=UUID(int=0),
+        )
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None, persistence_enabled=True, persistence_database_url=database,
+            local_auth_token=SecretStr(TEST_AUTH_TOKEN), owner_id="not-a-uuid",
+        )
 
 
 @pytest.mark.parametrize("timeout", [0, 16])

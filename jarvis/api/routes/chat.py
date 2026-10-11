@@ -1,10 +1,12 @@
 """Chat endpoint that delegates bounded work to the Mother Orchestrator."""
 
 import logging
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from starlette.concurrency import run_in_threadpool
 
+from jarvis.api.dependencies import authenticated_owner
 from jarvis.models.schemas import ChatMemoryContext, ChatRequest, ChatResponse, ErrorResponse
 from jarvis.memory.retrieval import retrieve_context
 from jarvis.orchestration.models import ExpertExecutionError, ExpertTimeoutError, RequestContext
@@ -26,7 +28,12 @@ router = APIRouter(tags=["chat"])
         404: {"model": ErrorResponse, "description": "Conversation not found"},
     },
 )
-async def chat(body: ChatRequest, request: Request, response: Response) -> ChatResponse:
+async def chat(
+    body: ChatRequest,
+    request: Request,
+    response: Response,
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> ChatResponse:
     if len(body.message) > request.app.state.settings.max_message_length:
         raise HTTPException(status_code=413, detail="Message exceeds the configured size limit.")
     context = RequestContext(message=body.message)
@@ -43,6 +50,7 @@ async def chat(body: ChatRequest, request: Request, response: Response) -> ChatR
             retrieve_context,
             request.app.state.memory_repository,
             body.message,
+            owner_id=owner_id,
             limit=request.app.state.settings.memory_retrieval_limit,
             execution_id=context.execution_id,
         )

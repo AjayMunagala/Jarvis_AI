@@ -85,6 +85,15 @@ No migration or dependency is planned. Authentication, per-user ownership, embed
 - Add IDs-only chat retrieval metadata for success, empty, fallback, and disabled outcomes; allow navigation to current records and gracefully report stale IDs without claiming a snapshot.
 - Preserve unauthenticated/local-only warnings, opt-in retrieval, explicit-only memory creation, the five-record bound, untrusted context framing, and offline mock operation. No schema migration or dependency was required.
 
+## Core v1.2 — Single-owner local authentication and memory isolation (implementation in progress)
+
+- Require a validated high-entropy bearer token and stable configured owner UUID when persistence is enabled; keep stateless mock mode available without credentials.
+- Gate persisted chat, conversation history, and every memory route with one shared authentication dependency; scope memory reads, counts, search, updates, deletes, and retrieval by owner.
+- Append migration 0004 with nullable owner ID and an owner listing index. Preserve legacy memories as unowned and inaccessible; no automatic claim or HTTP claim route.
+- Add an in-memory-only frontend unlock/lock lifecycle and clear credentials on 401; retain clear local-only deployment warnings.
+
+Acceptance remains contingent on offline tests, frontend tests/build, and opt-in live PostgreSQL upgrade/isolation checks. SQL predicates are not row-level security, and a local bearer token does not make HTTP safe over untrusted networks.
+
 ## Core v0.9 — Persistent Memory and Retrieval Foundation (implemented; verified locally)
 
 - Add an incremental PostgreSQL memory migration and a separate memory repository protocol/adapter. Memory content is strictly bounded, explicitly created/updated/deleted, and never copied automatically from chat messages.

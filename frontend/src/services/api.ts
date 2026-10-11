@@ -39,12 +39,37 @@ export interface MemoryInput {
 const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, '')
 const apiBaseUrl = configuredBaseUrl || '/api'
 
-async function request<T>(path: string, init?: RequestInit, allowChatValidation = false): Promise<T> {
+export interface ApiAuth {
+  token?: string
+  onUnauthorized?: () => void
+}
+
+async function request<T>(path: string, init?: RequestInit, allowChatValidation = false, auth: ApiAuth = {}): Promise<T> {
   let response: Response
+  let requestUrl: URL
   try {
-    response = await fetch(`${apiBaseUrl}${path}`, init)
+    requestUrl = new URL(`${apiBaseUrl}${path}`, window.location.origin)
+    if (!['http:', 'https:'].includes(requestUrl.protocol)) throw new Error('Unsupported API protocol')
+    const configuredUrl = new URL(apiBaseUrl, window.location.origin)
+    if (configuredUrl.username || configuredUrl.password) throw new Error('API URLs must not contain credentials')
+    const headers = new Headers(init?.headers)
+    if (auth.token) {
+      const loopbackHosts = new Set(['localhost', '127.0.0.1', '[::1]'])
+      if (requestUrl.origin !== configuredUrl.origin
+        || (configuredUrl.protocol === 'http:' && !loopbackHosts.has(configuredUrl.hostname))) {
+        throw new Error('API origin validation failed')
+      }
+      headers.set('Authorization', `Bearer ${auth.token}`)
+    }
+    response = await fetch(configuredBaseUrl ? requestUrl.href : `${apiBaseUrl}${path}`, {
+      ...init, headers, ...(auth.token ? { redirect: 'error' as RequestRedirect } : {}),
+    })
   } catch {
     throw new Error('Could not reach JARVIS. Check that the backend is running and try again.')
+  }
+  if (response.status === 401) {
+    auth.onUnauthorized?.()
+    throw new Error('Workspace locked. Enter your local access token again.')
   }
   if (response.status === 204) return undefined as T
   if (!response.ok) {
@@ -76,8 +101,8 @@ const json = (body: unknown): RequestInit => ({
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 })
 
-export function sendChatMessage(message: string): Promise<ChatResponse> {
-  return request<ChatResponse>('/chat', json({ message } satisfies ChatRequest), true).then((data) => {
+export function sendChatMessage(message: string, auth?: ApiAuth): Promise<ChatResponse> {
+  return request<ChatResponse>('/chat', json({ message } satisfies ChatRequest), true, auth).then((data) => {
     if (!data || typeof data.reply !== 'string' || typeof data.provider !== 'string' || typeof data.demo !== 'boolean') {
       throw new Error('JARVIS returned an unexpected response. Please try again.')
     }
@@ -85,32 +110,32 @@ export function sendChatMessage(message: string): Promise<ChatResponse> {
   })
 }
 
-export function listMemories(options: { limit?: number; offset?: number; category?: string } = {}): Promise<MemoryPage> {
+export function listMemories(options: { limit?: number; offset?: number; category?: string } = {}, auth?: ApiAuth): Promise<MemoryPage> {
   const query = new URLSearchParams()
   query.set('limit', String(options.limit ?? 20))
   query.set('offset', String(options.offset ?? 0))
   if (options.category) query.set('category', options.category)
-  return request<MemoryPage>(`/memories?${query.toString()}`)
+  return request<MemoryPage>(`/memories?${query.toString()}`, undefined, false, auth)
 }
 
-export function searchMemories(query: string, options: { limit?: number; offset?: number } = {}): Promise<MemoryPage> {
-  return request<MemoryPage>('/memories/search', json({ query, limit: options.limit ?? 20, offset: options.offset ?? 0 }))
+export function searchMemories(query: string, options: { limit?: number; offset?: number } = {}, auth?: ApiAuth): Promise<MemoryPage> {
+  return request<MemoryPage>('/memories/search', json({ query, limit: options.limit ?? 20, offset: options.offset ?? 0 }), false, auth)
 }
 
-export function createMemory(input: MemoryInput): Promise<MemoryRecord> {
-  return request<MemoryRecord>('/memories', json(input))
+export function createMemory(input: MemoryInput, auth?: ApiAuth): Promise<MemoryRecord> {
+  return request<MemoryRecord>('/memories', json(input), false, auth)
 }
 
-export function updateMemory(id: string, input: Partial<MemoryInput>): Promise<MemoryRecord> {
+export function updateMemory(id: string, input: Partial<MemoryInput>, auth?: ApiAuth): Promise<MemoryRecord> {
   return request<MemoryRecord>(`/memories/${encodeURIComponent(id)}`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
-  })
+  }, false, auth)
 }
 
-export function deleteMemory(id: string): Promise<void> {
-  return request<void>(`/memories/${encodeURIComponent(id)}`, { method: 'DELETE' })
+export function deleteMemory(id: string, auth?: ApiAuth): Promise<void> {
+  return request<void>(`/memories/${encodeURIComponent(id)}`, { method: 'DELETE' }, false, auth)
 }
 
-export function getMemory(id: string): Promise<MemoryRecord> {
-  return request<MemoryRecord>(`/memories/${encodeURIComponent(id)}`)
+export function getMemory(id: string, auth?: ApiAuth): Promise<MemoryRecord> {
+  return request<MemoryRecord>(`/memories/${encodeURIComponent(id)}`, undefined, false, auth)
 }

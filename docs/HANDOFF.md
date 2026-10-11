@@ -2,7 +2,7 @@
 
 ## Current milestone
 
-JARVIS Core v0.9 adds explicit long-term memory records and optional lexical retrieval to the Core v0.7 conversation API and v0.8 PostgreSQL foundation. Persistence and retrieval remain disabled by default, and mock chat does not need PostgreSQL. Memory records are separate from conversation history and are never automatically extracted from messages. The memory API supports explicit CRUD and full-text search when persistence is enabled; retrieval must also be separately enabled. The API remains unauthenticated and unowned, so it must not be exposed to untrusted/shared deployments. Apply migration 0003 with the existing Windows migration runner; the app does not migrate at startup.
+Core v1.2 adds single-owner authentication and isolation to the existing explicit memory and conversation persistence foundations. Persistence and retrieval remain disabled by default, and mock chat does not need PostgreSQL. Memory records are separate from conversation history and are never automatically extracted from messages. All persisted API routes require configured bearer authentication. Apply migrations 0003 and 0004 with the existing Windows migration runner; the app does not migrate at startup. This remains unsuitable for shared/public deployment.
 
 ## Implemented
 
@@ -47,14 +47,14 @@ npm run build
 ## Current limits
 
 - Intent classification and planning are deterministic, not model-driven. The configured personas share one provider; AnalysisExpert and ValidationExpert have distinct model instructions and structured contracts. In mock mode the instructions are ignored and responses are deterministic demo text with `not_evaluated` structured placeholders, not model reasoning.
-- The only configured tool list is empty. Tool execution, permission/approval gateway, persistent audit storage, authentication, and external integrations are not implemented. Conversation persistence is opt-in; v0.7 can link exchanges by conversation ID and read bounded history pages, but has no user ownership or frontend history UI. Core v0.9 adds explicit memory CRUD and lexical search, but no semantic retrieval, embeddings, pgvector, automatic extraction, retention scheduler, memory audit history, or per-user ownership. Core v1.1 adds a local memory-management interface.
+- The only configured tool list is empty. Tool execution, permission/approval gateway, persistent audit storage, and external integrations are not implemented. Conversation persistence is opt-in and gated by one configured bearer token. Core v1.2 scopes explicit memory CRUD/search to a configured owner; it does not add multi-user accounts, PostgreSQL row-level security, semantic retrieval, embeddings, pgvector, automatic extraction, retention scheduling, or memory audit history. Core v1.1 adds a local memory-management interface, updated in v1.2 with in-memory credential handling.
 - `/ready` confirms successful settings/provider/orchestrator construction; it does not probe external systems.
 - The default provider runs without a GPU, API key, or internet. Frontend conversation state is in-memory only.
 - OpenAI selection requires `JARVIS_OPENAI_API_KEY`; setting it does not fall back to mock if calls fail. Requests send user message content to the configured endpoint and may incur charges. No live provider call was performed during tests.
 - Analysis and validation require an endpoint/model that supports strict Chat Completions JSON Schema output. Unsupported-schema behavior is verified using mocked HTTP responses; live compatibility, model quality, and network connectivity remain unverified.
 - Provider cancellation is performed by `asyncio.wait_for`; future asynchronous adapters must release resources when cancelled.
 - The PostgreSQL foundation and its restore drill are documented in `database/README.md`; operational use still requires confirming the user's local server configuration and restore target.
-- Persistence can link multiple exchanges with a client-supplied conversation ID and expose bounded history pages. Core v0.9 adds explicit global memory CRUD and lexical search. Multi-user ownership, authentication, and frontend conversation-history UI are not implemented. Core v1.1 adds a frontend memory manager.
+- Persistence can link multiple exchanges with a client-supplied conversation ID and expose bounded history pages. A single configured local bearer credential gates all persistent operations; conversation IDs remain identifiers, not authorization. Memory ownership is enforced by application SQL predicates only. Keep deployment local and trusted.
 
 ## Verification on this working tree
 
@@ -97,3 +97,9 @@ When chat retrieval is enabled, `/chat` adds `memory_context` with an outcome (`
 
 
 Core v1.1 verification on this working tree: full offline Python suite 147 passed; focused memory suite 17 passed; compileall passed; frontend suite 25 passed; production build and git diff --check passed. Live PostgreSQL integration tests were not run because opt-in environment variables were unset, and no live OpenAI request was made. The Starlette TestClient deprecation warning recommending httpx2 remains.
+
+## Core v1.2 — Single-owner authentication and memory isolation (implementation in progress)
+
+Persistence-enabled startup now validates `JARVIS_LOCAL_AUTH_TOKEN` (at least 32 visible ASCII characters) and stable, non-nil `JARVIS_OWNER_ID`. One shared Bearer dependency gates all persisted `/chat`, `/conversations/*`, and `/memories/*` requests. Migration 0004 adds nullable ownership without a default or legacy backfill; unowned rows stay inaccessible and no HTTP claim endpoint exists. Memory SQL scopes reads, counts, search, updates and deletes to the configured owner. The React UI keeps credentials in memory, provides Unlock/Lock controls, and clears them on 401. Application predicates are not database row-level security; plain HTTP is unsafe over untrusted networks, XSS may read the active token, and this remains a local single-owner prototype, not safe for public/shared use.
+
+Offline v1.2 verification: the full Python suite passed 157 tests; focused API/memory tests passed 48; compileall passed for `jarvis`, `tests`, and `integration_tests`; 30 frontend tests and the production build passed; and `git diff --check` passed. The integration module's 5 URL-guard tests passed and 10 live database tests skipped because the opt-in flag, password-free admin URL, and `PGPASSFILE` were unavailable; `psql`/`createdb` were not on `PATH`. Migration 0004 upgrade behavior and real PostgreSQL owner isolation remain unverified. No live OpenAI request was made. Do not claim the milestone fully verified until a properly isolated live PostgreSQL run succeeds.

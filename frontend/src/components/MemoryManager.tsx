@@ -1,11 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { createMemory, deleteMemory, getMemory, listMemories, searchMemories, updateMemory, type MemoryInput, type MemoryRecord } from '../services/api'
+import { createMemory, deleteMemory, getMemory, listMemories, searchMemories, updateMemory, type ApiAuth, type MemoryInput, type MemoryRecord } from '../services/api'
 
 const PAGE_SIZE = 20
 const emptyForm = { content: '', category: '', source_reference: '' }
 type FormState = typeof emptyForm
 
-export default function MemoryManager({ inspectIds = [] }: { inspectIds?: string[] }) {
+export default function MemoryManager({ inspectIds = [], auth }: { inspectIds?: string[]; auth?: ApiAuth }) {
   const [items, setItems] = useState<MemoryRecord[]>([])
   const [total, setTotal] = useState(0)
   const [pageCount, setPageCount] = useState(0)
@@ -27,16 +27,16 @@ export default function MemoryManager({ inspectIds = [] }: { inspectIds?: string
   async function load(nextOffset = offset, category = categoryFilter, search = activeSearch) {
     setLoading(true); setError('')
     try {
-      const page = search ? await searchMemories(search, { limit: PAGE_SIZE, offset: nextOffset }) : await listMemories({ limit: PAGE_SIZE, offset: nextOffset, category: category || undefined })
+      const page = search ? await searchMemories(search, { limit: PAGE_SIZE, offset: nextOffset }, auth) : await listMemories({ limit: PAGE_SIZE, offset: nextOffset, category: category || undefined }, auth)
       setItems(page.items); setTotal(page.total); setOffset(nextOffset); setPageCount(page.items.length); setHasMore(page.has_more)
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not load memories. Please try again.') }
     finally { setLoading(false) }
   }
-  useEffect(() => { void load(0) }, [])
+  useEffect(() => { void load(0) }, [auth?.token])
   useEffect(() => {
     let cancelled = false
     if (inspectIds.length) Promise.all(inspectIds.map(async (id) => {
-      try { return { id, record: await getMemory(id), missing: false } }
+      try { return { id, record: await getMemory(id, auth), missing: false } }
       catch (cause) {
         const missing = cause instanceof Error && cause.message.startsWith('That memory is no longer available.')
         return { id, record: null, missing, error: missing ? '' : cause instanceof Error ? cause.message : 'Could not inspect a referenced memory.' }
@@ -50,7 +50,7 @@ export default function MemoryManager({ inspectIds = [] }: { inspectIds?: string
       if (inspectionError) setError(inspectionError)
     })
     return () => { cancelled = true }
-  }, [inspectIds.join('|')])
+  }, [inspectIds.join('|'), auth?.token])
 
   function beginEdit(record: MemoryRecord) { setEditingId(record.id); setForm({ content: record.content, category: record.category ?? '', source_reference: record.source_reference ?? '' }); setNotice('') }
   function beginCreate() { setEditingId(null); setForm(emptyForm); setNotice('') }
@@ -59,14 +59,14 @@ export default function MemoryManager({ inspectIds = [] }: { inspectIds?: string
     if (!form.content.trim()) { setError('Memory content is required.'); return }
     setSaving(true); setError('')
     const payload: MemoryInput = { content: form.content.trim(), category: form.category.trim() || null, source_reference: form.source_reference.trim() || null }
-    try { if (editingId) await updateMemory(editingId, payload); else await createMemory(payload); beginCreate(); setNotice(editingId ? 'Memory updated.' : 'Memory saved.'); await load(0) }
+    try { if (editingId) await updateMemory(editingId, payload, auth); else await createMemory(payload, auth); beginCreate(); setNotice(editingId ? 'Memory updated.' : 'Memory saved.'); await load(0) }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not save memory. Please try again.') }
     finally { setSaving(false) }
   }
   async function confirmDelete() {
     if (!deleteTarget) return
     setSaving(true); setError('')
-    try { await deleteMemory(deleteTarget.id); setDeleteTarget(null); setNotice('Memory permanently deleted.'); await load(Math.max(0, offset - (items.length === 1 ? PAGE_SIZE : 0))) }
+    try { await deleteMemory(deleteTarget.id, auth); setDeleteTarget(null); setNotice('Memory permanently deleted.'); await load(Math.max(0, offset - (items.length === 1 ? PAGE_SIZE : 0))) }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not delete memory. Please try again.') }
     finally { setSaving(false) }
   }
@@ -75,7 +75,7 @@ export default function MemoryManager({ inspectIds = [] }: { inspectIds?: string
 
   return <section className="memory-view" aria-labelledby="memory-heading">
     <header className="memory-header"><div><p className="memory-kicker">EXPLICITLY MANAGED</p><h1 id="memory-heading">Memory</h1><p>Inspect and manage saved reference records. Chat never creates memories automatically.</p></div><button type="button" className="memory-primary" onClick={beginCreate}>Add memory</button></header>
-    <p className="memory-local-note" role="note">Local-only: this memory API has no authentication or per-user ownership. Keep it restricted to a trusted local environment.</p>
+    <p className="memory-local-note" role="note">Single-owner local prototype: authentication is not PostgreSQL row-level security and does not make this safe for shared or public deployment.</p>
     {error && <div className="memory-error" role="alert"><span>{error}</span><button type="button" onClick={() => void load()}>Retry</button></div>}
     {notice && <p className="memory-notice" role="status">{notice}</p>}
     {inspectIds.length > 0 && <p className="memory-stale" role="note">Current records for this response’s memory IDs are shown below when available. Records may have changed since that response; this is not a historical snapshot.</p>}

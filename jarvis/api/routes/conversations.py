@@ -2,9 +2,10 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from starlette.concurrency import run_in_threadpool
 
+from jarvis.api.dependencies import authenticated_owner
 from jarvis.models.schemas import ConversationHistoryResponse, ErrorResponse, HistoryMessage
 from jarvis.persistence.base import ConversationNotFound, PersistenceError
 
@@ -24,6 +25,7 @@ async def conversation_messages(
     request: Request,
     limit: int = Query(default=50, ge=1, le=100),
     before_sequence: int | None = Query(default=None, ge=1),
+    owner_id: UUID | None = Depends(authenticated_owner),
 ) -> ConversationHistoryResponse:
     repository = request.app.state.conversation_repository
     if repository is None:

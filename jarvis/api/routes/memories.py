@@ -2,9 +2,10 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from starlette.concurrency import run_in_threadpool
 
+from jarvis.api.dependencies import authenticated_owner
 from jarvis.memory.base import MemoryPersistenceError, MemoryRepository
 from jarvis.memory.models import (
     MemoryCreate, MemoryPage, MemoryRecord, MemorySearchRequest, MemoryUpdate,
@@ -28,17 +29,27 @@ def _unavailable() -> HTTPException:
     return HTTPException(status_code=503, detail="Memory storage is unavailable.")
 
 
+def _owner(owner_id: UUID | None) -> UUID:
+    if owner_id is None:
+        # Persistence is disabled; no injected repository may bypass this policy.
+        raise _unavailable()
+    return owner_id
+
+
 @router.post(
     "",
     response_model=MemoryRecord,
     status_code=status.HTTP_201_CREATED,
     responses={503: {"model": ErrorResponse, "description": "Memory persistence unavailable"}},
 )
-async def create_memory(body: MemoryCreate, request: Request) -> MemoryRecord:
+async def create_memory(
+    body: MemoryCreate, request: Request, owner_id: UUID | None = Depends(authenticated_owner)
+) -> MemoryRecord:
     repository = _repository(request)
+    owner_id = _owner(owner_id)
     try:
         return await run_in_threadpool(
-            repository.create, body.content, body.category, body.source_reference
+            repository.create, owner_id, body.content, body.category, body.source_reference
         )
     except MemoryPersistenceError as exc:
         raise _unavailable() from exc
@@ -48,11 +59,13 @@ async def create_memory(body: MemoryCreate, request: Request) -> MemoryRecord:
 async def search_memories(
     body: MemorySearchRequest,
     request: Request,
+    owner_id: UUID | None = Depends(authenticated_owner),
 ) -> MemoryPage:
     repository = _repository(request)
+    owner_id = _owner(owner_id)
     try:
         return await run_in_threadpool(
-            repository.search, body.query, limit=body.limit, offset=body.offset
+            repository.search, owner_id, body.query, limit=body.limit, offset=body.offset
         )
     except MemoryPersistenceError as exc:
         raise _unavailable() from exc
@@ -64,12 +77,14 @@ async def list_memories(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=1000000),
     category: str | None = Query(default=None, min_length=1, max_length=80),
+    owner_id: UUID | None = Depends(authenticated_owner),
 ) -> MemoryPage:
     if category is not None and not category.strip():
         raise HTTPException(status_code=422, detail="Category must not be blank.")
     repository = _repository(request)
+    owner_id = _owner(owner_id)
     try:
-        return await run_in_threadpool(repository.list, limit=limit, offset=offset, category=category)
+        return await run_in_threadpool(repository.list, owner_id, limit=limit, offset=offset, category=category)
     except MemoryPersistenceError as exc:
         raise _unavailable() from exc
 
@@ -82,10 +97,13 @@ async def list_memories(
         503: {"model": ErrorResponse, "description": "Memory persistence unavailable"},
     },
 )
-async def get_memory(memory_id: UUID, request: Request) -> MemoryRecord:
+async def get_memory(
+    memory_id: UUID, request: Request, owner_id: UUID | None = Depends(authenticated_owner)
+) -> MemoryRecord:
     repository = _repository(request)
+    owner_id = _owner(owner_id)
     try:
-        memory = await run_in_threadpool(repository.get, memory_id)
+        memory = await run_in_threadpool(repository.get, owner_id, memory_id)
     except MemoryPersistenceError as exc:
         raise _unavailable() from exc
     if memory is None:
@@ -101,10 +119,13 @@ async def get_memory(memory_id: UUID, request: Request) -> MemoryRecord:
         503: {"model": ErrorResponse, "description": "Memory persistence unavailable"},
     },
 )
-async def update_memory(memory_id: UUID, body: MemoryUpdate, request: Request) -> MemoryRecord:
+async def update_memory(
+    memory_id: UUID, body: MemoryUpdate, request: Request, owner_id: UUID | None = Depends(authenticated_owner)
+) -> MemoryRecord:
     repository = _repository(request)
+    owner_id = _owner(owner_id)
     try:
-        memory = await run_in_threadpool(repository.update, memory_id, body)
+        memory = await run_in_threadpool(repository.update, owner_id, memory_id, body)
     except MemoryPersistenceError as exc:
         raise _unavailable() from exc
     if memory is None:
@@ -120,10 +141,13 @@ async def update_memory(memory_id: UUID, body: MemoryUpdate, request: Request) -
         503: {"model": ErrorResponse, "description": "Memory persistence unavailable"},
     },
 )
-async def delete_memory(memory_id: UUID, request: Request) -> Response:
+async def delete_memory(
+    memory_id: UUID, request: Request, owner_id: UUID | None = Depends(authenticated_owner)
+) -> Response:
     repository = _repository(request)
+    owner_id = _owner(owner_id)
     try:
-        deleted = await run_in_threadpool(repository.delete, memory_id)
+        deleted = await run_in_threadpool(repository.delete, owner_id, memory_id)
     except MemoryPersistenceError as exc:
         raise _unavailable() from exc
     if not deleted:

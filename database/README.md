@@ -1,6 +1,6 @@
 # JARVIS PostgreSQL setup
 
-This directory provides optional Windows tooling to prepare PostgreSQL and track schema migrations. Ordinary backend startup and tests do not need a database. Migration `0001` creates the ledger; `0002` adds the optional conversation/message schema; `0003` adds explicitly managed long-term memories. User accounts, agents, tools, audit storage, and other application tables remain out of scope.
+This directory provides optional Windows tooling to prepare PostgreSQL and track schema migrations. Ordinary backend startup and tests do not need a database. Migration `0001` creates the ledger; `0002` adds the optional conversation/message schema; `0003` adds explicitly managed long-term memories; `0004` adds nullable single-owner UUIDs to memories without backfilling old records. User accounts, agents, tools, audit storage, and other application tables remain out of scope.
 
 ## Requirements and configuration
 
@@ -72,10 +72,11 @@ database/
   scripts/0001_migration_metadata.sql
   scripts/0002_conversation_persistence.sql
   scripts/0003_long_term_memories.sql
+  scripts/0004_memory_ownership.sql
   migrations/README.md
 ```
 
-Migration files are sorted by their numeric identifier. `0001_migration_metadata.sql` creates `jarvis_meta.schema_migrations`. `0002_conversation_persistence.sql` creates `jarvis_app.conversations` and `jarvis_app.messages`, with role/content constraints, a foreign key, and ordered-message index. `0003_long_term_memories.sql` creates `jarvis_app.memories` and its listing/full-text indexes. The migrations require schema-creation permission. There are no placeholder SQL files.
+Migration files are sorted by their numeric identifier. `0001_migration_metadata.sql` creates `jarvis_meta.schema_migrations`. `0002_conversation_persistence.sql` creates `jarvis_app.conversations` and `jarvis_app.messages`, with role/content constraints, a foreign key, and ordered-message index. `0003_long_term_memories.sql` creates `jarvis_app.memories` and its listing/full-text indexes. `0004_memory_ownership.sql` adds nullable `owner_id` and a partial listing index. It intentionally has no default or backfill; existing rows remain unowned and unavailable through the API until an operator performs a separately reviewed recovery. The migrations require schema-creation permission. There are no placeholder SQL files.
 
 ## Install or update
 
@@ -103,7 +104,7 @@ Verification checks the configured server and target database, confirms the migr
 
 ## Opt-in PostgreSQL integration tests
 
-The live integration suite is separate from the default offline test suite at `integration_tests/test_postgres_integration.py`. It is skipped unless explicitly enabled. It uses the declared `persistence` extra and the existing migration runner, and creates a uniquely named `jarvis_it_<random hex>` database on a local loopback PostgreSQL server. The generated database is dropped during fixture cleanup. Do not point this suite at production or a database containing user data. The configured bootstrap account must be able to create databases and apply migrations. Tests cover migration checksums and reruns, chat persistence/history paging, unknown conversation IDs, transaction rollback/recovery, concurrent appends, and sanitized connection failures.
+The live integration suite is separate from the default offline test suite at `integration_tests/test_postgres_integration.py`. It is skipped unless explicitly enabled. It uses the declared `persistence` extra and the existing migration runner, and creates uniquely named `jarvis_it_<random hex>` databases on a local loopback PostgreSQL server. Generated databases are dropped during fixture cleanup. Do not point this suite at production or a database containing user data. The configured bootstrap account must be able to create databases and apply migrations. Tests cover fresh/upgrade migrations, migration checksums and reruns, legacy unowned-memory preservation, owner isolation, chat persistence/history paging, unknown conversation IDs, transaction rollback/recovery, concurrent appends, and sanitized connection failures.
 
 From PowerShell at the repository root, install the optional adapter dependency if it is not already installed and configure a protected `PGPASSFILE` with a matching local account entry. Do not put a password in the URL or command line:
 

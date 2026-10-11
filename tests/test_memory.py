@@ -16,6 +16,27 @@ from jarvis.memory.models import (
 from jarvis.memory.retrieval import retrieve_context
 from jarvis.persistence.memory_postgres import PostgresMemoryRepository
 
+TEST_OWNER_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+OTHER_OWNER_ID = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+TEST_AUTH_TOKEN = "test-only-token-with-at-least-32-characters"
+AUTH_HEADERS = {"Authorization": f"Bearer {TEST_AUTH_TOKEN}"}
+
+
+def persistent_settings(**overrides):
+    return Settings(
+        _env_file=None,
+        environment="test",
+        persistence_enabled=True,
+        persistence_database_url=SecretStr("postgresql://user@localhost/jarvis"),
+        local_auth_token=SecretStr(TEST_AUTH_TOKEN),
+        owner_id=TEST_OWNER_ID,
+        **overrides,
+    )
+
+
+def persistent_client(app):
+    return TestClient(app, headers=AUTH_HEADERS)
+
 
 def memory_record(*, content="saved memory", memory_id=None, category="project"):
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -28,29 +49,36 @@ def memory_record(*, content="saved memory", memory_id=None, category="project")
 class FakeMemoryRepository:
     def __init__(self, records=()):
         self.records = {record.id: record for record in records}
+        self.owners = {record.id: TEST_OWNER_ID for record in records}
         self.calls = []
         self.fail_search = False
         self.create_calls = 0
 
-    def create(self, content, category=None, source_reference=None):
+    def create(self, owner_id, content, category=None, source_reference=None):
         self.create_calls += 1
         record = memory_record(content=content, category=category)
         if source_reference is not None:
             record = record.model_copy(update={"source_reference": source_reference})
         self.records[record.id] = record
+        self.owners[record.id] = owner_id
         return record
 
-    def list(self, *, limit=50, offset=0, category=None):
-        items = tuple(sorted(self.records.values(), key=lambda item: (item.created_at, str(item.id)), reverse=True))
+    def list(self, owner_id, *, limit=50, offset=0, category=None):
+        items = tuple(sorted(
+            (item for item in self.records.values() if self.owners[item.id] == owner_id),
+            key=lambda item: (item.created_at, str(item.id)), reverse=True,
+        ))
         if category is not None:
             items = tuple(item for item in items if item.category == category)
         page = items[offset:offset + limit]
         return MemoryPage(items=page, total=len(items), limit=limit, offset=offset, has_more=offset + len(page) < len(items))
 
-    def get(self, memory_id):
-        return self.records.get(memory_id)
+    def get(self, owner_id, memory_id):
+        return self.records.get(memory_id) if self.owners.get(memory_id) == owner_id else None
 
-    def update(self, memory_id, changes):
+    def update(self, owner_id, memory_id, changes):
+        if self.owners.get(memory_id) != owner_id:
+            return None
         current = self.records.get(memory_id)
         if current is None:
             return None
@@ -59,17 +87,20 @@ class FakeMemoryRepository:
         self.records[memory_id] = updated
         return updated
 
-    def delete(self, memory_id):
+    def delete(self, owner_id, memory_id):
+        if self.owners.get(memory_id) != owner_id:
+            return False
+        self.owners.pop(memory_id, None)
         return self.records.pop(memory_id, None) is not None
 
-    def search(self, query, *, limit=10, offset=0):
-        self.calls.append((query, limit, offset))
+    def search(self, owner_id, query, *, limit=10, offset=0):
+        self.calls.append((owner_id, query, limit, offset))
         if self.fail_search:
             raise MemoryPersistenceError()
         terms = query.casefold().split()
         items = tuple(
             record for record in self.records.values()
-            if all(term in record.content.casefold() for term in terms)
+            if self.owners[record.id] == owner_id and all(term in record.content.casefold() for term in terms)
         )
         items = tuple(sorted(items, key=lambda item: (-sum(item.content.casefold().count(t) for t in terms), str(item.id))))
         page = items[offset:offset + limit]
@@ -97,10 +128,10 @@ def test_memory_schemas_enforce_content_and_patch_limits():
 def test_memory_api_crud_search_paging_and_missing_ids():
     original = memory_record(content="project memory about JARVIS")
     repository = FakeMemoryRepository([original])
-    app = create_app(settings=Settings(environment="test"))
+    app = create_app(settings=persistent_settings())
     app.state.memory_repository = repository
 
-    with TestClient(app) as client:
+    with persistent_client(app) as client:
         created = client.post("/memories", json={
             "content": "another project memory", "category": "notes", "source_reference": "ticket-42"
         })
@@ -124,7 +155,7 @@ def test_memory_api_crud_search_paging_and_missing_ids():
         assert searched.status_code == 200
         assert searched.json()["total"] == 2
         assert searched.json()["has_more"] is True
-        assert repository.calls[-1] == ("project memory", 1, 0)
+        assert repository.calls[-1] == (TEST_OWNER_ID, "project memory", 1, 0)
 
         fetched = client.get(f"/memories/{created_id}")
         assert fetched.status_code == 200
@@ -155,10 +186,10 @@ def test_memory_api_crud_search_paging_and_missing_ids():
 
 def test_memory_api_duplicate_patch_and_delete_lifecycle():
     repository = FakeMemoryRepository()
-    app = create_app(settings=Settings(environment="test"))
+    app = create_app(settings=persistent_settings())
     app.state.memory_repository = repository
 
-    with TestClient(app) as client:
+    with persistent_client(app) as client:
         first = client.post("/memories", json={
             "content": "same content", "category": "notes", "source_reference": "source-a"
         })
@@ -188,15 +219,49 @@ def test_memory_api_duplicate_patch_and_delete_lifecycle():
         assert client.get(f"/memories/{second_id}").status_code == 200
 
 
+def test_memory_api_scopes_every_operation_and_hides_unowned_or_foreign_ids():
+    owned = memory_record(content="owner alpha private note", category="notes")
+    foreign = memory_record(content="owner beta private note", category="notes")
+    legacy = memory_record(content="legacy unowned private note", category="notes")
+    repository = FakeMemoryRepository([owned, foreign, legacy])
+    repository.owners[foreign.id] = OTHER_OWNER_ID
+    repository.owners[legacy.id] = None
+    app = create_app(settings=persistent_settings())
+    app.state.memory_repository = repository
+
+    with persistent_client(app) as client:
+        listed = client.get("/memories?category=notes")
+        searched = client.post("/memories/search", json={"query": "private note"})
+        own_record = client.get(f"/memories/{owned.id}")
+        foreign_get = client.get(f"/memories/{foreign.id}")
+        missing_get = client.get(f"/memories/{uuid4()}")
+        foreign_update = client.patch(f"/memories/{foreign.id}", json={"content": "attempted takeover"})
+        missing_update = client.patch(f"/memories/{uuid4()}", json={"content": "attempted takeover"})
+        foreign_delete = client.delete(f"/memories/{foreign.id}")
+        missing_delete = client.delete(f"/memories/{uuid4()}")
+        legacy_get = client.get(f"/memories/{legacy.id}")
+        legacy_delete = client.delete(f"/memories/{legacy.id}")
+
+    assert [item["id"] for item in listed.json()["items"]] == [str(owned.id)]
+    assert listed.json()["total"] == 1
+    assert [item["id"] for item in searched.json()["items"]] == [str(owned.id)]
+    assert own_record.status_code == 200
+    for response in (foreign_get, missing_get, foreign_update, missing_update, foreign_delete, missing_delete, legacy_get, legacy_delete):
+        assert response.status_code == 404
+        assert response.json() == missing_get.json()
+    assert repository.owners[foreign.id] == OTHER_OWNER_ID
+    assert repository.owners[legacy.id] is None
+
+
 def test_memory_category_filter_uses_exact_filtered_totals_and_pagination():
     repository = FakeMemoryRepository([
         memory_record(content="one", category="notes"),
         memory_record(content="two", category="notes"),
         memory_record(content="other case", category="Notes"),
     ])
-    app = create_app(settings=Settings(environment="test"))
+    app = create_app(settings=persistent_settings())
     app.state.memory_repository = repository
-    with TestClient(app) as client:
+    with persistent_client(app) as client:
         first = client.get("/memories?category=notes&limit=1&offset=0")
         second = client.get("/memories?category=notes&limit=1&offset=1")
         exact = client.get("/memories?category=Notes&limit=10")
@@ -233,9 +298,9 @@ def test_memory_api_sanitizes_repository_failures():
 
         create = list = get = update = delete = search = _fail
 
-    app = create_app(settings=Settings(environment="test"))
+    app = create_app(settings=persistent_settings())
     app.state.memory_repository = BrokenRepository()
-    with TestClient(app) as client:
+    with persistent_client(app) as client:
         responses = [
             client.post("/memories", json={"content": "private"}),
             client.get("/memories"),
@@ -258,12 +323,7 @@ def test_memory_retrieval_defaults_offline_and_requires_persistence_when_enabled
     for limit in (0, 6):
         with pytest.raises(ValidationError):
             Settings(_env_file=None, memory_retrieval_limit=limit)
-    enabled = Settings(
-        _env_file=None,
-        persistence_enabled=True,
-        persistence_database_url=SecretStr("postgresql://user@localhost/jarvis"),
-        memory_retrieval_enabled=True,
-    )
+    enabled = persistent_settings(memory_retrieval_enabled=True)
     assert enabled.memory_retrieval_enabled
 
 
@@ -274,8 +334,8 @@ def test_retrieval_diagnostics_are_allowlisted_and_privacy_safe(caplog):
     content_sentinel = "content-secret-sentinel"
 
     class ReturningRepository(FakeMemoryRepository):
-        def search(self, query, *, limit=10, offset=0):
-            self.calls.append((query, limit, offset))
+        def search(self, owner_id, query, *, limit=10, offset=0):
+            self.calls.append((owner_id, query, limit, offset))
             return MemoryPage(
                 items=(memory_record(content=f"{content_sentinel} {query}"),),
                 total=1, limit=limit, offset=offset, has_more=False,
@@ -283,17 +343,17 @@ def test_retrieval_diagnostics_are_allowlisted_and_privacy_safe(caplog):
 
     repository = ReturningRepository()
     records = retrieve_context(
-        repository, query_sentinel, limit=3, execution_id="exec-success"
+        repository, query_sentinel, owner_id=TEST_OWNER_ID, limit=3, execution_id="exec-success"
     )
     assert records.outcome == "success"
     assert len(records.records) == 1
-    assert repository.calls == [(query_sentinel, 3, 0)]
+    assert repository.calls == [(TEST_OWNER_ID, query_sentinel, 3, 0)]
     success = next(record for record in caplog.records if record.execution_id == "exec-success")
     assert success.outcome == "success"
     assert success.record_count == 1
     assert isinstance(success.duration_ms, float)
 
-    empty = retrieve_context(FakeMemoryRepository(), "empty-query", limit=2, execution_id="exec-empty")
+    empty = retrieve_context(FakeMemoryRepository(), "empty-query", owner_id=TEST_OWNER_ID, limit=2, execution_id="exec-empty")
     assert empty.outcome == "empty"
     assert empty.records == ()
     empty_log = next(record for record in caplog.records if record.execution_id == "exec-empty")
@@ -301,11 +361,11 @@ def test_retrieval_diagnostics_are_allowlisted_and_privacy_safe(caplog):
     assert empty_log.record_count == 0
 
     class BrokenRepository(FakeMemoryRepository):
-        def search(self, query, *, limit=10, offset=0):
+        def search(self, owner_id, query, *, limit=10, offset=0):
             raise RuntimeError("exception-secret-sentinel")
 
     fallback = retrieve_context(
-        BrokenRepository(), "error-query-sentinel", limit=3, execution_id="exec-fallback"
+        BrokenRepository(), "error-query-sentinel", owner_id=TEST_OWNER_ID, limit=3, execution_id="exec-fallback"
     )
     assert fallback.outcome == "fallback"
     assert fallback.records == ()
@@ -337,12 +397,12 @@ def test_retrieval_enforces_five_record_maximum_even_for_untrusted_repository():
         def __init__(self):
             self.requested_limit = None
 
-        def search(self, query, *, limit=10, offset=0):
+        def search(self, owner_id, query, *, limit=10, offset=0):
             self.requested_limit = limit
             return MemoryPage(items=records, total=len(records), limit=limit, offset=offset, has_more=True)
 
     repository = OversizedRepository()
-    result = retrieve_context(repository, "memory", limit=20, execution_id="exec-bounded")
+    result = retrieve_context(repository, "memory", owner_id=TEST_OWNER_ID, limit=20, execution_id="exec-bounded")
     assert repository.requested_limit == 5
     assert result.outcome == "success"
     assert len(result.records) == 5
@@ -416,23 +476,19 @@ def test_chat_does_not_automatically_create_memory_and_retrieves_only_when_enabl
             return "answer"
 
     provider = RecordingProvider()
-    settings = Settings(
-        _env_file=None, environment="test", persistence_enabled=True,
-        persistence_database_url=SecretStr("postgresql://user@localhost/jarvis"),
-        memory_retrieval_enabled=True,
-    )
+    settings = persistent_settings(memory_retrieval_enabled=True)
     app = create_app(settings=settings, provider=provider)
     chat_repository = ChatRepository()
     app.state.conversation_repository = chat_repository
     app.state.memory_repository = memory_repository
 
-    with TestClient(app) as client:
+    with persistent_client(app) as client:
         response = client.post("/chat", json={"message": "local preference"})
 
     assert response.status_code == 200
     assert response.json()["memory_context"]["outcome"] == "success"
     assert response.json()["memory_context"]["memory_ids"] == [str(memory.id)]
-    assert memory_repository.calls == [("local preference", 3, 0)]
+    assert memory_repository.calls == [(TEST_OWNER_ID, "local preference", 3, 0)]
     assert memory_repository.create_calls == 0
     assert chat_repository.saved[0] == "local preference"
     assert any("remembered local preference" in message for message in provider.messages)
@@ -466,18 +522,14 @@ def test_chat_does_not_search_memories_when_retrieval_is_disabled():
 
 
 def test_chat_reports_successful_empty_memory_retrieval_separately_from_fallback():
-    settings = Settings(
-        _env_file=None, environment="test", persistence_enabled=True,
-        persistence_database_url=SecretStr("postgresql://user@localhost/jarvis"),
-        memory_retrieval_enabled=True,
-    )
+    settings = persistent_settings(memory_retrieval_enabled=True)
     app = create_app(settings=settings)
     app.state.memory_repository = FakeMemoryRepository()
     app.state.conversation_repository = type(
         "ConversationRepository", (),
         {"save_exchange": lambda self, user, assistant, conversation_id=None: conversation_id},
     )()
-    with TestClient(app) as client:
+    with persistent_client(app) as client:
         response = client.post("/chat", json={"message": "no matching saved memory"})
     assert response.status_code == 200
     assert response.json()["memory_context"] == {"outcome": "empty", "memory_ids": []}
@@ -485,7 +537,7 @@ def test_chat_reports_successful_empty_memory_retrieval_separately_from_fallback
 
 def test_chat_falls_back_without_memory_when_retrieval_fails():
     class BrokenMemoryRepository(FakeMemoryRepository):
-        def search(self, query, *, limit=10, offset=0):
+        def search(self, owner_id, query, *, limit=10, offset=0):
             raise MemoryPersistenceError()
 
     class ChatRepository:
@@ -504,16 +556,12 @@ def test_chat_falls_back_without_memory_when_retrieval_fails():
             return "stateless fallback answer"
 
     provider = RecordingProvider()
-    settings = Settings(
-        _env_file=None, environment="test", persistence_enabled=True,
-        persistence_database_url=SecretStr("postgresql://user@localhost/jarvis"),
-        memory_retrieval_enabled=True,
-    )
+    settings = persistent_settings(memory_retrieval_enabled=True)
     app = create_app(settings=settings, provider=provider)
     app.state.conversation_repository = ChatRepository()
     app.state.memory_repository = BrokenMemoryRepository()
 
-    with TestClient(app) as client:
+    with persistent_client(app) as client:
         response = client.post("/chat", json={"message": "ordinary request"})
 
     assert response.status_code == 200
@@ -543,7 +591,7 @@ class FakeConnection:
             raise RuntimeError("private url, password, and memory content")
         now = datetime(2026, 1, 1, tzinfo=timezone.utc)
         if "INSERT INTO jarvis_app.memories" in query:
-            memory_id, content, category, source = parameters
+            memory_id, owner_id, content, category, source = parameters
             self.rows = [(memory_id, content, category, source, now, now)]
         elif "count(*)" in query:
             self.rows = [(self.count,)]
@@ -552,7 +600,7 @@ class FakeConnection:
         elif query.lstrip().startswith("DELETE"):
             self.rows = [(parameters[0],)] if self.deleted else []
         elif query.lstrip().startswith("UPDATE"):
-            current = memory_record(memory_id=parameters[-1])
+            current = memory_record(memory_id=parameters[-2])
             self.rows = [(current.id, "updated", current.category, None, now, now)]
         return self
 
@@ -570,23 +618,24 @@ def test_postgres_memory_create_and_list_are_parameterized_and_bounded():
     ])
     repository = PostgresMemoryRepository("secret-url", connect=lambda *_args, **_kwargs: connection)
 
-    created = repository.create("new memory", "notes", "source-1")
+    created = repository.create(TEST_OWNER_ID, "new memory", "notes", "source-1")
     assert created.content == "new memory"
     insert_query, insert_parameters = connection.calls[0]
     assert "%s" in insert_query
-    assert insert_parameters[1:] == ("new memory", "notes", "source-1")
+    assert insert_parameters[1:] == (TEST_OWNER_ID, "new memory", "notes", "source-1")
 
-    page = repository.list(limit=1, offset=1)
+    page = repository.list(TEST_OWNER_ID, limit=1, offset=1)
     assert page.total == 2 and page.has_more is False
-    assert connection.calls[-1][1] == (1, 1)
+    assert connection.calls[-1][1] == (TEST_OWNER_ID, 1, 1)
+    assert "owner_id = %s" in connection.calls[-1][0]
     assert "ORDER BY created_at DESC, id ASC" in connection.calls[-1][0]
 
-    filtered = repository.list(limit=1, offset=0, category="notes")
+    filtered = repository.list(TEST_OWNER_ID, limit=1, offset=0, category="notes")
     assert filtered.total == 2 and filtered.has_more is True
     count_query, count_parameters = connection.calls[-2]
     page_query, page_parameters = connection.calls[-1]
-    assert "WHERE category = %s" in count_query and count_parameters == ("notes",)
-    assert "WHERE category = %s" in page_query and page_parameters == ("notes", 1, 0)
+    assert "owner_id = %s AND category = %s" in count_query and count_parameters == (TEST_OWNER_ID, "notes")
+    assert "owner_id = %s AND category = %s" in page_query and page_parameters == (TEST_OWNER_ID, "notes", 1, 0)
 
 
 def test_postgres_memory_search_binds_query_and_uses_deterministic_ranking():
@@ -594,13 +643,14 @@ def test_postgres_memory_search_binds_query_and_uses_deterministic_ranking():
     repository = PostgresMemoryRepository("secret-url", connect=lambda *_args, **_kwargs: connection)
     query = "memory' OR true --"
 
-    page = repository.search(query, limit=5, offset=2)
+    page = repository.search(TEST_OWNER_ID, query, limit=5, offset=2)
 
     assert page.items == ()
     count_query, count_parameters = connection.calls[0]
     search_query, search_parameters = connection.calls[1]
-    assert query not in count_query and count_parameters == (query,)
-    assert query not in search_query and search_parameters == (query, query, 5, 2)
+    assert query not in count_query and count_parameters == (TEST_OWNER_ID, query)
+    assert query not in search_query and search_parameters == (TEST_OWNER_ID, query, query, 5, 2)
+    assert "owner_id = %s" in count_query and "owner_id = %s" in search_query
     assert "ts_rank_cd" in search_query
     assert "updated_at DESC, id ASC" in search_query
 
@@ -610,26 +660,27 @@ def test_postgres_memory_update_and_delete_use_parameters_and_sanitize_errors():
     repository = PostgresMemoryRepository("secret-url", connect=lambda *_args, **_kwargs: connection)
     memory_id = uuid4()
 
-    updated = repository.update(memory_id, MemoryUpdate(content="updated"))
+    updated = repository.update(TEST_OWNER_ID, memory_id, MemoryUpdate(content="updated"))
     assert updated is not None
     query, parameters = connection.calls[-1]
-    assert "content = %s" in query and parameters == ("updated", memory_id)
+    assert "content = %s" in query and parameters == ("updated", memory_id, TEST_OWNER_ID)
+    assert "AND owner_id = %s" in query
     assert "updated_at = CURRENT_TIMESTAMP" in query
     cleared = repository.update(
-        memory_id, MemoryUpdate(category=None, source_reference=None)
+        TEST_OWNER_ID, memory_id, MemoryUpdate(category=None, source_reference=None)
     )
     assert cleared is not None
     clear_query, clear_parameters = connection.calls[-1]
     assert "category = %s" in clear_query and "source_reference = %s" in clear_query
-    assert clear_parameters == (None, None, memory_id)
-    assert repository.delete(memory_id)
-    assert connection.calls[-1][1] == (memory_id,)
+    assert clear_parameters == (None, None, memory_id, TEST_OWNER_ID)
+    assert repository.delete(TEST_OWNER_ID, memory_id)
+    assert connection.calls[-1][1] == (memory_id, TEST_OWNER_ID)
 
     broken = PostgresMemoryRepository(
         "private-db-url", connect=lambda *_args, **_kwargs: FakeConnection(fail=True)
     )
     with pytest.raises(MemoryPersistenceError) as error:
-        broken.create("private memory")
+        broken.create(TEST_OWNER_ID, "private memory")
     assert str(error.value) == "Memory persistence is unavailable."
     assert "private-db-url" not in str(error.value)
     assert "private memory" not in str(error.value)

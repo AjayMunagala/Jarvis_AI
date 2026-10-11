@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import App from './App'
 import './styles.css'
@@ -33,7 +33,7 @@ describe('JARVIS chat', () => {
     await user.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'Hello JARVIS{Enter}')
 
     expect(await screen.findByText('This is the returned mock reply.')).toBeInTheDocument()
-    expect(sendMock).toHaveBeenCalledWith('Hello JARVIS')
+    expect(sendMock).toHaveBeenCalledWith('Hello JARVIS', expect.objectContaining({ token: undefined, onUnauthorized: expect.any(Function) }))
     expect(screen.getAllByText('DEMO · MOCK')).toHaveLength(2)
     expect(screen.getByRole('button', { name: /Hello JARVIS/ })).toBeInTheDocument()
   })
@@ -94,7 +94,7 @@ describe('JARVIS chat', () => {
     fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' })
 
     expect(sendMock).toHaveBeenCalledTimes(1)
-    expect(sendMock).toHaveBeenCalledWith(message)
+    expect(sendMock).toHaveBeenCalledWith(message, expect.objectContaining({ token: undefined, onUnauthorized: expect.any(Function) }))
     expect(await screen.findByText('Boundary accepted.')).toBeInTheDocument()
   })
 
@@ -133,7 +133,55 @@ describe('JARVIS chat', () => {
     expect(sendMock).toHaveBeenCalledTimes(2)
     await act(async () => resolveRetry({ reply: 'Recovered.', provider: 'mock', demo: true }))
     expect(await screen.findByText('Recovered.')).toBeInTheDocument()
-    expect(sendMock).toHaveBeenNthCalledWith(2, 'Retry me')
+    expect(sendMock).toHaveBeenNthCalledWith(2, 'Retry me', expect.objectContaining({ token: undefined, onUnauthorized: expect.any(Function) }))
+  })
+
+  it('keeps the credential in memory, locks it explicitly, and requires re-entry after reload', async () => {
+    sendMock.mockResolvedValue({ reply: 'Authenticated response.', provider: 'mock', demo: true })
+    vi.mocked(listMemories).mockImplementation((_options, auth) => {
+      if (!auth?.token) {
+        auth?.onUnauthorized?.()
+        return Promise.reject(new Error('Workspace locked. Enter your local access token again.'))
+      }
+      return Promise.resolve({ items: [], total: 0, limit: 20, offset: 0, has_more: false })
+    })
+    const { unmount } = render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: 'Memory' }))
+    await waitFor(() => expect(vi.mocked(listMemories)).toHaveBeenCalled())
+    // The protected API rejects the initial empty credential and opens the token prompt.
+    await userEvent.type(screen.getByLabelText('Local access token'), 'a'.repeat(32))
+    await userEvent.click(screen.getByRole('button', { name: 'Unlock' }))
+    await userEvent.click(screen.getByRole('button', { name: /chat/i }))
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'Hello{Enter}')
+    await screen.findByText('Authenticated response.')
+    expect(sendMock).toHaveBeenCalledWith('Hello', expect.objectContaining({ token: 'a'.repeat(32) }))
+    expect(window.localStorage.length).toBe(0)
+    expect(window.sessionStorage.length).toBe(0)
+    await userEvent.click(screen.getByRole('button', { name: 'Lock workspace' }))
+    expect(screen.getByLabelText('Local access token')).toHaveValue('')
+    unmount()
+
+    render(<App />)
+    expect(screen.queryByRole('button', { name: 'Lock workspace' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Local access token')).not.toBeInTheDocument()
+    expect(window.localStorage.length).toBe(0)
+    expect(window.sessionStorage.length).toBe(0)
+  })
+
+  it('clears the entered credential and shows unlock UI after chat receives 401', async () => {
+    sendMock.mockImplementation(async (_message, auth) => {
+      auth?.onUnauthorized?.()
+      throw new Error('Workspace locked. Enter your local access token again.')
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: 'Memory' }))
+    await userEvent.type(screen.getByLabelText('Local access token'), 'b'.repeat(32))
+    await userEvent.click(screen.getByRole('button', { name: 'Unlock' }))
+    await userEvent.click(screen.getByRole('button', { name: /chat/i }))
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'hello{Enter}')
+    expect(await screen.findByLabelText('Local access token')).toHaveValue('')
+    expect(window.localStorage.length).toBe(0)
+    expect(window.sessionStorage.length).toBe(0)
   })
 
   it('uses Shift+Enter for a newline without sending', async () => {

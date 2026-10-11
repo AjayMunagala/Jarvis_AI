@@ -150,6 +150,18 @@ h1 span { color: #91dff2; }
 .composer-footer span { display: inline-flex; align-items: center; gap: 5px; }
 .composer-footer svg { color: #6da995; }
 .mobile-scrim { display: none; }
+.workspace-lock { border: 1px solid var(--line-strong); border-radius: 6px; padding: 6px 9px; background: rgba(255,255,255,.025); color: #c3d0dc; font-size: 10px; cursor: pointer; }
+.credential-backdrop { position: fixed; z-index: 30; inset: 0; display: grid; place-items: center; padding: 18px; background: rgba(2,5,9,.82); backdrop-filter: blur(5px); }
+.credential-dialog { width: min(460px,100%); padding: 24px; border: 1px solid var(--line-strong); border-radius: 12px; background: #111821; box-shadow: 0 18px 70px rgba(0,0,0,.55); color: var(--text); }
+.credential-dialog h2 { margin: 0 0 9px; font-size: 20px; }
+.credential-dialog p { color: #a3b0bd; font-size: 12px; line-height: 1.6; }
+.credential-dialog form { display: grid; gap: 8px; margin-top: 18px; }
+.credential-dialog label { color: #c5d0db; font-size: 12px; }
+.credential-dialog input { width: 100%; min-width: 0; border: 1px solid var(--line-strong); border-radius: 6px; padding: 10px; background: #0a0f15; color: var(--text); font: inherit; }
+.credential-actions { display: flex; justify-content: flex-end; margin-top: 5px; }
+.credential-actions button { border: 1px solid rgba(103,214,242,.28); border-radius: 6px; padding: 9px 14px; background: rgba(47,137,161,.27); color: #d5f5fb; cursor: pointer; }
+.credential-actions button:disabled { opacity: .5; cursor: not-allowed; }
+.credential-dialog .credential-warning { margin: 18px 0 0; padding-top: 13px; border-top: 1px solid var(--line); color: #d8c192; }
 
 @media (min-width: 1400px) { .sidebar { width: 276px; flex-basis: 276px; padding-left: 16px; padding-right: 16px; }.welcome-view { transform: translateY(-11px); } }
 @media (max-height: 760px) and (min-width: 761px) { .welcome-view { transform: none; padding-top: 13px; padding-bottom: 18px; }.welcome-orb { width: 74px; height: 74px; margin-bottom: 12px; }.orb-core { width: 47px; height: 47px; }.suggestion-grid { margin-top: 19px; }.suggestion-card { min-height: 54px; }.composer-dock { padding-bottom: 10px; } }

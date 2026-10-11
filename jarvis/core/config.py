@@ -3,6 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -34,6 +35,8 @@ class Settings(BaseSettings):
     persistence_enabled: bool = False
     persistence_database_url: SecretStr | None = None
     persistence_connect_timeout_seconds: int = Field(default=3, ge=1, le=15)
+    local_auth_token: SecretStr | None = None
+    owner_id: UUID | None = None
     memory_retrieval_enabled: bool = False
     memory_retrieval_limit: int = Field(default=3, ge=1, le=5)
 
@@ -74,6 +77,19 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "JARVIS_PERSISTENCE_DATABASE_URL must include a PostgreSQL host and database name."
                 )
+            token = self.local_auth_token.get_secret_value() if self.local_auth_token else ""
+            if (
+                len(token) < 32
+                or token != token.strip()
+                or any(not 0x21 <= ord(char) <= 0x7E for char in token)
+            ):
+                raise ValueError(
+                    "JARVIS_LOCAL_AUTH_TOKEN must be configured as at least 32 visible ASCII characters when persistence is enabled."
+                )
+            if self.owner_id is None:
+                raise ValueError("JARVIS_OWNER_ID is required when persistence is enabled.")
+            if self.owner_id.int == 0:
+                raise ValueError("JARVIS_OWNER_ID must not be the nil UUID.")
         if self.memory_retrieval_enabled and not self.persistence_enabled:
             raise ValueError(
                 "JARVIS_MEMORY_RETRIEVAL_ENABLED=true requires JARVIS_PERSISTENCE_ENABLED=true."

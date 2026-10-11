@@ -28,7 +28,11 @@ def create_app(
     settings: Settings | None = None,
     provider: IntelligenceProvider | None = None,
 ) -> FastAPI:
-    resolved_settings = settings or get_settings()
+    # Revalidate explicitly supplied Settings too; model_construct/model_copy can
+    # bypass Pydantic validators and must not create a persistence auth bypass.
+    resolved_settings = (
+        Settings.model_validate(settings.__dict__) if settings is not None else get_settings()
+    )
     configure_logging(resolved_settings.log_level)
     resolved_provider = provider if provider is not None else build_provider(
         resolved_settings.provider,

@@ -9,6 +9,23 @@ from fastapi.testclient import TestClient
 from jarvis.core.config import Settings
 from jarvis.main import create_app
 
+TEST_AUTH_TOKEN = "test-only-token-with-at-least-32-characters"
+TEST_OWNER_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+AUTH_HEADERS = {"Authorization": f"Bearer {TEST_AUTH_TOKEN}"}
+
+
+def persistent_settings(**overrides):
+    from pydantic import SecretStr
+    return Settings(
+        _env_file=None, environment="test", persistence_enabled=True,
+        persistence_database_url=SecretStr("postgresql://local/jarvis"),
+        local_auth_token=SecretStr(TEST_AUTH_TOKEN), owner_id=TEST_OWNER_ID, **overrides,
+    )
+
+
+def persistent_client(app, **options):
+    return TestClient(app, headers=AUTH_HEADERS, **options)
+
 
 def client(provider=None, **overrides):
     settings = Settings(environment="test", **overrides)
@@ -47,9 +64,9 @@ def test_optional_persistence_saves_exchange_with_additive_chat_metadata():
             return conversation_id or UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 
     repository = Repository()
-    app = create_app(settings=Settings(environment="test"))
+    app = create_app(settings=persistent_settings())
     app.state.conversation_repository = repository
-    with TestClient(app) as test_client:
+    with persistent_client(app) as test_client:
         response = test_client.post("/chat", json={"message": "persist this request"})
     assert response.status_code == 200
     assert response.json()["conversation_id"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -71,9 +88,9 @@ def test_chat_continues_supplied_conversation_id_and_returns_same_id():
             return supplied_id
 
     repository = Repository()
-    app = create_app(settings=Settings(environment="test"))
+    app = create_app(settings=persistent_settings())
     app.state.conversation_repository = repository
-    with TestClient(app) as test_client:
+    with persistent_client(app) as test_client:
         response = test_client.post(
             "/chat", json={"message": "continue", "conversation_id": str(conversation_id)}
         )
@@ -92,9 +109,9 @@ def test_chat_unknown_conversation_is_not_replaced():
             assert supplied_id == conversation_id
             raise ConversationNotFound()
 
-    app = create_app(settings=Settings(environment="test"))
+    app = create_app(settings=persistent_settings())
     app.state.conversation_repository = Repository()
-    with TestClient(app) as test_client:
+    with persistent_client(app) as test_client:
         response = test_client.post(
             "/chat", json={"message": "continue", "conversation_id": str(conversation_id)}
         )
@@ -124,9 +141,9 @@ def test_history_returns_bounded_chronological_isolated_messages():
 
     from jarvis.persistence.base import ConversationMessage
 
-    app = create_app(settings=Settings(environment="test"))
+    app = create_app(settings=persistent_settings())
     app.state.conversation_repository = Repository()
-    with TestClient(app) as test_client:
+    with persistent_client(app) as test_client:
         response = test_client.get(f"/conversations/{conversation_id}/messages?limit=2")
     assert response.status_code == 200
     data = response.json()
@@ -163,9 +180,9 @@ def test_history_failures_are_sanitized(failure, status, error_code):
                 raise ConversationNotFound()
             raise PersistenceError() from RuntimeError("private database details")
 
-    app = create_app(settings=Settings(environment="test"))
+    app = create_app(settings=persistent_settings())
     app.state.conversation_repository = Repository()
-    with TestClient(app) as test_client:
+    with persistent_client(app) as test_client:
         response = test_client.get(f"/conversations/{uuid4()}/messages")
     assert response.status_code == status
     assert response.json()["error"] == error_code
@@ -203,9 +220,9 @@ def test_persistence_failure_does_not_report_success_or_leak_database_details(ca
             from jarvis.persistence.base import PersistenceError
             raise PersistenceError() from RuntimeError("private database credential")
 
-    app = create_app(settings=Settings(environment="test"))
+    app = create_app(settings=persistent_settings())
     app.state.conversation_repository = UnavailableRepository()
-    with TestClient(app, raise_server_exceptions=False) as test_client:
+    with persistent_client(app, raise_server_exceptions=False) as test_client:
         response = test_client.post("/chat", json={"message": "do not lose this"})
     assert response.status_code == 503
     assert response.json() == {
@@ -232,6 +249,8 @@ def test_enabled_persistence_constructs_adapter_without_connecting(monkeypatch):
         environment="test",
         persistence_enabled=True,
         persistence_database_url=SecretStr("postgresql://local/jarvis"),
+        local_auth_token=SecretStr(TEST_AUTH_TOKEN),
+        owner_id=TEST_OWNER_ID,
     ))
     assert app.state.conversation_repository is sentinel
     assert constructed == {"url": "postgresql://local/jarvis", "timeout": 3}
