@@ -48,7 +48,7 @@ def test_persistence_endpoints_reject_missing_or_malformed_credentials(authoriza
     assert all(response.status_code == 401 for response in responses)
     assert all(response.headers["www-authenticate"] == "Bearer" for response in responses)
     assert all(response.json() == {
-        "error": "http_error", "detail": "A valid bearer credential is required."
+        "error": "unauthorized", "detail": "A valid bearer credential is required."
     } for response in responses)
 
 

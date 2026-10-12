@@ -103,6 +103,7 @@ def create_app(
     async def http_error_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
         error_codes = {
             413: "request_too_large",
+            401: "unauthorized",
             502: "provider_error",
             504: "provider_timeout",
             503: "persistence_unavailable",
