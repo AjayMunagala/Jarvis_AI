@@ -34,10 +34,10 @@ from jarvis.orchestration.service import OrchestrationService
 
 def configured_registry(*, parallel: bool = False) -> ExpertRegistry:
     config = ExpertRegistryConfig.model_validate({
-        "version": 1,
+        "version": 2,
         "experts": [
-            {"id": "analysis", "persona": "AnalysisExpert", "description": "Analyzes requests."},
-            {"id": "validation", "persona": "ValidationExpert", "description": "Checks results."},
+            {"id": "analysis", "persona": "AnalysisExpert", "description": "Analyzes requests.", "output_contract": "analysis_v1"},
+            {"id": "validation", "persona": "ValidationExpert", "description": "Checks results.", "output_contract": "validation_v1"},
         ],
         "intent_experts": {
             "general_inquiry": ["analysis"],
@@ -48,6 +48,14 @@ def configured_registry(*, parallel: bool = False) -> ExpertRegistry:
             "compliance": ["analysis"],
             "architecture": ["analysis"],
         },
+        "classification_rules": [
+            {"intent": "recommendation", "phrases": ["recommend", "suggest", "what should i", "which should"]},
+            {"intent": "validation", "phrases": ["validate", "verify", "check whether", "is this correct"]},
+            {"intent": "risk_assessment", "phrases": ["risk", "threat", "danger", "what could go wrong"]},
+            {"intent": "compliance", "phrases": ["compliance", "regulation", "policy requirement"]},
+            {"intent": "architecture", "phrases": ["architecture", "design a system", "module boundary"]},
+            {"intent": "analysis", "phrases": ["analyze", "analyse", "compare", "break down"]},
+        ],
         "parallel_intents": ["analysis"] if parallel else [],
     })
     return ExpertRegistry(config)
@@ -90,8 +98,24 @@ def service(provider=None, *, settings=None, classifier=None, registry=None):
 
 
 def test_rule_classifier_routes_known_intents_and_general_fallback():
-    classifier = RuleBasedIntentClassifier()
-    assert classifier.classify(RequestContext(message="Please recommend a laptop")).intent == "recommendation"
+    classifier = RuleBasedIntentClassifier(ExpertRegistry.load().config.classification_rules)
+    expected = {
+        "recommendation": ("recommend", "suggest", "what should i", "which should"),
+        "validation": ("validate", "verify", "check whether", "is this correct"),
+        "risk_assessment": ("risk", "threat", "danger", "what could go wrong"),
+        "compliance": ("compliance", "regulation", "policy requirement"),
+        "architecture": ("architecture", "design a system", "module boundary"),
+        "analysis": ("analyze", "analyse", "compare", "break down"),
+    }
+    for intent, phrases in expected.items():
+        for phrase in phrases:
+            assert classifier.classify(RequestContext(message=f"Please {phrase} this")).intent == intent
+    assert classifier.classify(RequestContext(message="validate this and recommend an option")).intent == "recommendation"
+    assert classifier.classify(RequestContext(message="Please verify whether the architecture has risk and compliance issues")).intent == "validation"
+    assert classifier.classify(RequestContext(message="What is the danger here?")).intent == "risk_assessment"
+    assert classifier.classify(RequestContext(message="Check the regulation requirements")).intent == "compliance"
+    assert classifier.classify(RequestContext(message="Design a system module boundary")).intent == "architecture"
+    assert classifier.classify(RequestContext(message="Break down the comparison")).intent == "analysis"
     result = classifier.classify(RequestContext(message="Hello there"))
     assert result.intent == "general_inquiry"
     assert result.confidence > 0
@@ -114,22 +138,116 @@ def test_registry_loads_configured_personas_and_selects_by_intent():
     }
     assert registry.select("general_inquiry")[0].id == "knowledge"
     assert registry.select("architecture")[0].persona == "ArchitectureExpert"
+    assert [rule.intent for rule in registry.config.classification_rules] == [
+        "recommendation", "validation", "risk_assessment", "compliance", "architecture", "analysis"
+    ]
+    assert registry.select("analysis")[0].output_contract == "analysis_v1"
+    assert registry.select("validation")[0].output_contract == "validation_v1"
 
 
 def test_registry_rejects_invalid_and_unavailable_expert_config(tmp_path):
     config_path = tmp_path / "experts.json"
-    config_path.write_text(json.dumps({"version": 1, "experts": [], "intent_experts": {}}), encoding="utf-8")
+    config_path.write_text(json.dumps({"version": 2, "experts": [], "intent_experts": {}}), encoding="utf-8")
     with pytest.raises(ValueError, match="Invalid expert registry"):
         ExpertRegistry.load(config_path)
 
     with pytest.raises(ValueError, match="unavailable expert"):
         ExpertRegistry(ExpertRegistryConfig.model_validate({
-            "version": 1,
+            "version": 2,
             "experts": [{"id": "analysis", "persona": "AnalysisExpert", "description": "Analyze."}],
             "intent_experts": {key: ["missing"] for key in (
                 "general_inquiry", "recommendation", "analysis", "validation", "risk_assessment", "compliance", "architecture"
             )},
+            "classification_rules": [
+                {"intent": intent, "phrases": [f"phrase {intent}"]}
+                for intent in ("recommendation", "validation", "risk_assessment", "compliance", "architecture", "analysis")
+            ],
         }))
+
+
+def test_registry_file_rejects_duplicate_json_keys(tmp_path):
+    config_path = tmp_path / "experts.json"
+    config_path.write_text('{"version": 2, "version": 2}', encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate key"):
+        ExpertRegistry.load(config_path)
+
+
+def test_registry_requires_classification_rules_and_rejects_malformed_phrases():
+    data = ExpertRegistry.load().config.model_dump(mode="json")
+    data.pop("classification_rules")
+    with pytest.raises(ValidationError):
+        ExpertRegistryConfig.model_validate(data)
+
+    data = ExpertRegistry.load().config.model_dump(mode="json")
+    data["classification_rules"][0]["phrases"][0] = "  "
+    with pytest.raises(ValidationError):
+        ExpertRegistryConfig.model_validate(data)
+
+
+def test_registry_rejects_duplicate_expert_ids_and_classification_phrases():
+    registry = configured_registry()
+    data = registry.config.model_dump(mode="json")
+    data["experts"].append(dict(data["experts"][0]))
+    with pytest.raises(ValueError, match="identifiers must be unique"):
+        ExpertRegistry(ExpertRegistryConfig.model_validate(data))
+
+    data = registry.config.model_dump(mode="json")
+    data["classification_rules"][1]["phrases"][0] = data["classification_rules"][0]["phrases"][0]
+    with pytest.raises(ValueError, match="phrases must be unique"):
+        ExpertRegistry(ExpertRegistryConfig.model_validate(data))
+
+
+def test_registry_rejects_unknown_intent_references_and_duplicate_rule_intents():
+    registry = configured_registry()
+    data = registry.config.model_dump(mode="json")
+    data["intent_experts"]["unknown_intent"] = ["analysis"]
+    with pytest.raises(ValidationError):
+        ExpertRegistryConfig.model_validate(data)
+
+    data = registry.config.model_dump(mode="json")
+    data["classification_rules"][1]["intent"] = data["classification_rules"][0]["intent"]
+    with pytest.raises(ValueError, match="exactly one phrase rule"):
+        ExpertRegistry(ExpertRegistryConfig.model_validate(data))
+
+
+def test_registry_requires_compatible_allowlisted_output_contracts():
+    registry = configured_registry()
+    data = registry.config.model_dump(mode="json")
+    data["experts"][0]["output_contract"] = "not_a_contract"
+    with pytest.raises(ValidationError):
+        ExpertRegistryConfig.model_validate(data)
+
+    data = registry.config.model_dump(mode="json")
+    data["experts"][0].pop("output_contract")
+    with pytest.raises(ValueError, match="requires output contract"):
+        ExpertRegistry(ExpertRegistryConfig.model_validate(data))
+
+    data = registry.config.model_dump(mode="json")
+    data["experts"][0]["output_contract"] = "validation_v1"
+    with pytest.raises(ValueError, match="incompatible with persona"):
+        ExpertRegistry(ExpertRegistryConfig.model_validate(data))
+
+
+def test_output_contract_resolution_uses_only_fixed_model_allowlist():
+    from jarvis.orchestration.experts import OUTPUT_CONTRACTS, _resolve_output_contract
+    from jarvis.orchestration.models import AnalysisExpertOutput, ValidationExpertOutput
+
+    assert OUTPUT_CONTRACTS == {
+        "analysis_v1": AnalysisExpertOutput,
+        "validation_v1": ValidationExpertOutput,
+    }
+    assert _resolve_output_contract("analysis_v1") is AnalysisExpertOutput
+    assert _resolve_output_contract("validation_v1") is ValidationExpertOutput
+    assert _resolve_output_contract(None) is None
+
+
+def test_expert_protocol_declares_narrow_supported_output_types():
+    from typing import get_type_hints
+
+    from jarvis.orchestration.experts import Expert
+    from jarvis.orchestration.models import ExpertExecutionOutput
+
+    assert get_type_hints(Expert.execute)["return"] is ExpertExecutionOutput
 
 
 def test_planner_outputs_valid_sequential_registered_plan():
@@ -148,16 +266,20 @@ def test_planner_outputs_valid_sequential_registered_plan():
 
 def test_planner_stays_within_five_rounds_and_respects_a_smaller_budget():
     definitions = [
-        {"id": f"expert_{i}", "persona": "AnalysisExpert", "description": "Analyzes."}
+        {"id": f"expert_{i}", "persona": "AnalysisExpert", "description": "Analyzes.", "output_contract": "analysis_v1"}
         for i in range(5)
     ]
     ids = [definition["id"] for definition in definitions]
     registry = ExpertRegistry(ExpertRegistryConfig.model_validate({
-        "version": 1,
+        "version": 2,
         "experts": definitions,
         "intent_experts": {intent: ids for intent in (
             "general_inquiry", "recommendation", "analysis", "validation", "risk_assessment", "compliance", "architecture"
         )},
+        "classification_rules": [
+            {"intent": intent, "phrases": [f"phrase {intent}"]}
+            for intent in ("recommendation", "validation", "risk_assessment", "compliance", "architecture", "analysis")
+        ],
     }))
     planner = Planner()
     context = RequestContext(message="analyze")

@@ -1,9 +1,9 @@
 {
-  "version": 1,
+  "version": 2,
   "experts": [
     {"id": "recommendation", "persona": "RecommendationExpert", "description": "Provides advisory recommendations.", "enabled": true, "tool_ids": []},
-    {"id": "analysis", "persona": "AnalysisExpert", "description": "Explains relevant factors, trade-offs, and evidence-supported conclusions.", "enabled": true, "tool_ids": [], "system_instruction": "Act as an analytical reviewer. Organize the answer around the relevant factors, explain trade-offs, and draw conclusions only when supported by the supplied information. State uncertainty where evidence is limited. Provide advisory text only; do not claim to execute actions."},
-    {"id": "validation", "persona": "ValidationExpert", "description": "Checks completeness, consistency, assumptions, and missing information.", "enabled": true, "tool_ids": [], "system_instruction": "Act as a cautious validation reviewer. Check whether the request or claims are complete and internally consistent. Separate supported claims from assumptions, identify missing information and uncertainty, and do not invent evidence. Provide advisory text only; do not claim to execute actions."},
+    {"id": "analysis", "persona": "AnalysisExpert", "description": "Explains relevant factors, trade-offs, and evidence-supported conclusions.", "enabled": true, "tool_ids": [], "system_instruction": "Act as an analytical reviewer. Organize the answer around the relevant factors, explain trade-offs, and draw conclusions only when supported by the supplied information. State uncertainty where evidence is limited. Provide advisory text only; do not claim to execute actions.", "output_contract": "analysis_v1"},
+    {"id": "validation", "persona": "ValidationExpert", "description": "Checks completeness, consistency, assumptions, and missing information.", "enabled": true, "tool_ids": [], "system_instruction": "Act as a cautious validation reviewer. Check whether the request or claims are complete and internally consistent. Separate supported claims from assumptions, identify missing information and uncertainty, and do not invent evidence. Provide advisory text only; do not claim to execute actions.", "output_contract": "validation_v1"},
     {"id": "risk", "persona": "RiskExpert", "description": "Identifies potential risks and uncertainty.", "enabled": true, "tool_ids": []},
     {"id": "compliance", "persona": "ComplianceExpert", "description": "Provides non-legal compliance-oriented analysis.", "enabled": true, "tool_ids": []},
     {"id": "architecture", "persona": "ArchitectureExpert", "description": "Reviews architecture and module boundaries.", "enabled": true, "tool_ids": []},
@@ -18,5 +18,13 @@
     "architecture": ["architecture"],
     "general_inquiry": ["knowledge"]
   },
+  "classification_rules": [
+    {"intent": "recommendation", "phrases": ["recommend", "suggest", "what should i", "which should"]},
+    {"intent": "validation", "phrases": ["validate", "verify", "check whether", "is this correct"]},
+    {"intent": "risk_assessment", "phrases": ["risk", "threat", "danger", "what could go wrong"]},
+    {"intent": "compliance", "phrases": ["compliance", "regulation", "policy requirement"]},
+    {"intent": "architecture", "phrases": ["architecture", "design a system", "module boundary"]},
+    {"intent": "analysis", "phrases": ["analyze", "analyse", "compare", "break down"]}
+  ],
   "parallel_intents": []
 }

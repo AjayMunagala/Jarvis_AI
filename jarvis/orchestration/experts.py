@@ -7,13 +7,14 @@ import re
 from time import monotonic
 from typing import Protocol
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from jarvis.intelligence.base import IntelligenceProvider, TransientProviderError
 from jarvis.orchestration.models import (
     AnalysisExpertOutput,
     AuditEvent,
     ExpertExecutionError,
+    ExpertExecutionOutput,
     ExpertOutput,
     ExpertResult,
     ExpertTimeoutError,
@@ -22,10 +23,14 @@ from jarvis.orchestration.models import (
     TransientExpertError,
     ValidationExpertOutput,
 )
-from jarvis.orchestration.registry import ExpertDefinition, ExpertRegistry
+from jarvis.orchestration.registry import ExpertDefinition, ExpertRegistry, OutputContractId
 
 logger = logging.getLogger(__name__)
 SAFE_EXCEPTION_TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,79}$")
+OUTPUT_CONTRACTS: dict[OutputContractId, type[BaseModel]] = {
+    "analysis_v1": AnalysisExpertOutput,
+    "validation_v1": ValidationExpertOutput,
+}
 
 
 def _safe_exception_type(exc: Exception) -> str:
@@ -36,8 +41,8 @@ def _safe_exception_type(exc: Exception) -> str:
 class Expert(Protocol):
     definition: ExpertDefinition
 
-    async def execute(self, context: RequestContext) -> object:
-        """Return an untrusted provider result for validation by the executor."""
+    async def execute(self, context: RequestContext) -> ExpertExecutionOutput:
+        """Return provider text or a supported structured output for validation."""
 
 
 class ConfiguredExpert:
@@ -45,11 +50,8 @@ class ConfiguredExpert:
         self.definition = definition
         self._provider = provider
 
-    async def execute(self, context: RequestContext) -> object:
-        response_model = {
-            "AnalysisExpert": AnalysisExpertOutput,
-            "ValidationExpert": ValidationExpertOutput,
-        }.get(self.definition.persona)
+    async def execute(self, context: RequestContext) -> ExpertExecutionOutput:
+        response_model = _resolve_output_contract(self.definition.output_contract)
         kwargs = {}
         message = context.message
         system_instruction = self.definition.system_instruction
@@ -95,6 +97,17 @@ class ConfiguredExpert:
             )
             return response_model.model_validate(payload)
         return response_model.model_validate_json(raw)
+
+
+def _resolve_output_contract(contract_id: OutputContractId | None) -> type[BaseModel] | None:
+    if contract_id is None:
+        return None
+    # Fixed allowlist: configuration selects a known model but cannot import or
+    # execute arbitrary Python code.
+    model = OUTPUT_CONTRACTS.get(contract_id)
+    if model is None:
+        raise ValueError("The configured expert output contract is unsupported.")
+    return model
 
 
 class ExpertExecutor:

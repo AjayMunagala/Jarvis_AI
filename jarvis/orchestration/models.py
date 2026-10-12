@@ -1,7 +1,7 @@
 """Validated contracts for bounded, advisory orchestration."""
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, TypeAlias
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator, model_validator
@@ -123,6 +123,9 @@ class ValidationExpertOutput(Contract):
         if any(not item.strip() for item in values):
             raise ValueError("validation output strings must not be blank")
         return value
+
+
+ExpertExecutionOutput: TypeAlias = str | AnalysisExpertOutput | ValidationExpertOutput
 
 
 class PlanStep(Contract):

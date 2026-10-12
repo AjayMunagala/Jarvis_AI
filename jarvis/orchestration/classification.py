@@ -2,7 +2,8 @@
 
 from typing import Protocol
 
-from jarvis.orchestration.models import IntentClassification, IntentName, RequestContext
+from jarvis.orchestration.models import IntentClassification, RequestContext
+from jarvis.orchestration.registry import IntentPhraseRule
 
 
 class IntentClassifier(Protocol):
@@ -13,20 +14,14 @@ class IntentClassifier(Protocol):
 class RuleBasedIntentClassifier:
     """Deterministic keyword classifier; not a language model."""
 
-    _rules: tuple[tuple[IntentName, tuple[str, ...]], ...] = (
-        ("recommendation", ("recommend", "suggest", "what should i", "which should")),
-        ("validation", ("validate", "verify", "check whether", "is this correct")),
-        ("risk_assessment", ("risk", "threat", "danger", "what could go wrong")),
-        ("compliance", ("compliance", "regulation", "policy requirement")),
-        ("architecture", ("architecture", "design a system", "module boundary")),
-        ("analysis", ("analyze", "analyse", "compare", "break down")),
-    )
+    def __init__(self, rules: tuple[IntentPhraseRule, ...]):
+        self._rules = rules
 
     def classify(self, context: RequestContext) -> IntentClassification:
         normalized = context.message.casefold()
-        for intent, phrases in self._rules:
-            if any(phrase in normalized for phrase in phrases):
-                return IntentClassification(intent=intent, confidence=0.75)
+        for rule in self._rules:
+            if any(phrase.casefold() in normalized for phrase in rule.phrases):
+                return IntentClassification(intent=rule.intent, confidence=0.75)
         return IntentClassification(intent="general_inquiry", confidence=0.5, rationale_code="default")
 
 

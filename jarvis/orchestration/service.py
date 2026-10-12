@@ -69,9 +69,11 @@ class OrchestrationService:
     ):
         self._provider = provider
         self._settings = settings
-        self._classifier = classifier or RuleBasedIntentClassifier()
-        self._planner = planner or Planner()
         self.expert_registry = expert_registry or ExpertRegistry.load()
+        self._classifier = classifier or RuleBasedIntentClassifier(
+            self.expert_registry.config.classification_rules
+        )
+        self._planner = planner or Planner()
         self.tool_registry = tool_registry or ToolRegistry.load()
         registered_tools = {tool.id for tool in self.tool_registry.config.tools}
         for definition in self.expert_registry.config.experts:

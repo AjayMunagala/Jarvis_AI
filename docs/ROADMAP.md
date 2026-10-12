@@ -85,14 +85,23 @@ No migration or dependency is planned. Authentication, per-user ownership, embed
 - Add IDs-only chat retrieval metadata for success, empty, fallback, and disabled outcomes; allow navigation to current records and gracefully report stale IDs without claiming a snapshot.
 - Preserve unauthenticated/local-only warnings, opt-in retrieval, explicit-only memory creation, the five-record bound, untrusted context framing, and offline mock operation. No schema migration or dependency was required.
 
-## Core v1.2 — Single-owner local authentication and memory isolation (implementation in progress)
+## Core v1.2 — Single-owner local authentication and memory isolation (implemented)
 
 - Require a validated high-entropy bearer token and stable configured owner UUID when persistence is enabled; keep stateless mock mode available without credentials.
 - Gate persisted chat, conversation history, and every memory route with one shared authentication dependency; scope memory reads, counts, search, updates, deletes, and retrieval by owner.
 - Append migration 0004 with nullable owner ID and an owner listing index. Preserve legacy memories as unowned and inaccessible; no automatic claim or HTTP claim route.
 - Add an in-memory-only frontend unlock/lock lifecycle and clear credentials on 401; retain clear local-only deployment warnings.
 
-Acceptance remains contingent on offline tests, frontend tests/build, and opt-in live PostgreSQL upgrade/isolation checks. SQL predicates are not row-level security, and a local bearer token does not make HTTP safe over untrusted networks.
+Persistence-enabled routes use the configured single-owner bearer token and memory SQL owner predicates; legacy memories remain unowned and inaccessible. One independent Gemini audit reported 15 PostgreSQL integration tests passed against isolated PostgreSQL 18 databases. A later offline verification recorded 5 URL-guard cases passing while 10 live database cases skipped because that run lacked opt-in configuration. These are separate historical runs; live PostgreSQL tests were not rerun during v1.3. SQL predicates are not row-level security, and a local bearer token does not make HTTP safe over untrusted networks.
+
+## Core v1.3 — Registry consistency and orchestration contracts (implemented)
+
+- Version the validated expert registry configuration and move deterministic phrase classification rules into it, preserving phrase matching order, current supported phrases, general-inquiry behavior, and classifier-failure fallback.
+- Declare Analysis and Validation output contracts by allowlisted IDs in configuration. Resolve IDs only through a fixed Python mapping to existing Pydantic models; reject unknown, missing, duplicate, or persona-incompatible configuration at startup.
+- Narrow the expert execution protocol to text or the two existing structured output models while retaining runtime Pydantic validation.
+- Preserve the public API, provider selection, planner semantics, retry/timeout/partial behavior, memory, and empty non-executable tool registry. No migration or dependency was added.
+
+Verification in this v1.3 worktree: `.venv-dev\Scripts\python.exe -m pytest -v tests/test_orchestration.py tests/test_api.py` passed 64 tests; `.venv-dev\Scripts\python.exe -m pytest -v` passed 164 tests; `.venv-dev\Scripts\python.exe -m compileall -q jarvis tests integration_tests` passed; and `git diff --check` passed. No live PostgreSQL or OpenAI request was run during v1.3. One Starlette TestClient deprecation warning remains.
 
 ## Core v0.9 — Persistent Memory and Retrieval Foundation (implemented; verified locally)
 
