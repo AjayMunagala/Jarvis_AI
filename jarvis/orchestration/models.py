@@ -13,6 +13,8 @@ IntentName = Literal[
     "risk_assessment", "compliance", "architecture",
 ]
 AuditEventType = Literal["execution_started", "expert_completed", "expert_failed", "execution_completed"]
+EvidenceVerificationOutcome = Literal["source_match", "unverified", "not_evaluated"]
+EvidenceSourceKind = Literal["user_request", "expert_output"]
 MAX_SYNTHESIZED_REPLY_LENGTH = 40000
 
 
@@ -217,6 +219,30 @@ class ExpertResult(Contract):
         return self
 
 
+class EvidenceProvenance(Contract):
+    """Internal evidence-location result; deliberately stores no source text."""
+
+    step_id: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9_-]+$")
+    expert_id: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9_-]+$")
+    evidence_index: int = Field(ge=0)
+    outcome: EvidenceVerificationOutcome
+    source_kind: EvidenceSourceKind | None = None
+    source_expert_id: str | None = Field(default=None, min_length=1, max_length=80, pattern=r"^[a-z0-9_-]+$")
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "EvidenceProvenance":
+        if self.outcome == "source_match":
+            if self.source_kind is None:
+                raise ValueError("source matches require a source kind")
+            if self.source_kind == "expert_output" and self.source_expert_id is None:
+                raise ValueError("expert output matches require a source expert")
+            if self.source_kind == "user_request" and self.source_expert_id is not None:
+                raise ValueError("user request matches cannot name an expert")
+        elif self.source_kind is not None or self.source_expert_id is not None:
+            raise ValueError("unmatched evidence cannot identify a source")
+        return self
+
+
 class AuditEvent(Contract):
     execution_id: str
     event_type: AuditEventType
@@ -231,6 +257,7 @@ class OrchestrationResponse(Contract):
     intent: IntentClassification
     plan: ExecutionPlan
     expert_results: tuple[ExpertResult, ...]
+    evidence_provenance: tuple[EvidenceProvenance, ...] = ()
     reply: StrictStr = Field(min_length=1, max_length=MAX_SYNTHESIZED_REPLY_LENGTH)
     partial: bool = False
     audit_events: tuple[AuditEvent, ...]

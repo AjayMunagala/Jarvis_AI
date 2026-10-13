@@ -103,6 +103,13 @@ Persistence-enabled routes use the configured single-owner bearer token and memo
 
 Verification in this v1.3 worktree: `.venv-dev\Scripts\python.exe -m pytest -v tests/test_orchestration.py tests/test_api.py` passed 64 tests; `.venv-dev\Scripts\python.exe -m pytest -v` passed 164 tests; `.venv-dev\Scripts\python.exe -m compileall -q jarvis tests integration_tests` passed; and `git diff --check` passed. No live PostgreSQL or OpenAI request was run during v1.3. One Starlette TestClient deprecation warning remains.
 
+## Core v1.4 — Deterministic evidence provenance (implemented)
+
+- Keep Pydantic schema validation as the structural check. Add a separate deterministic checker for whether structured evidence text can be located in the original user request or another successful expert's summary.
+- Normalize with Unicode NFKC, case-folding, and whitespace collapsing; retain punctuation and use normalized substring matching only. Exclude the target expert's own output, nested evidence, retrieved memories, failed output, and provider prompts as sources.
+- Record internal outcomes as `source_match`, `unverified`, or `not_evaluated`; the internal response contains source identifiers/indexes only, and logs contain outcome counts only. Mock mode skips evaluation deterministically.
+- Provenance does not establish that a source supports a claim, detect logical contradictions, or establish factual truth. No verifier persona, provider call, public API change, frontend work, migration, dependency, or external action is added.
+
 ## Core v0.9 — Persistent Memory and Retrieval Foundation (implemented; verified locally)
 
 - Add an incremental PostgreSQL memory migration and a separate memory repository protocol/adapter. Memory content is strictly bounded, explicitly created/updated/deleted, and never copied automatically from chat messages.

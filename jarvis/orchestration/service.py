@@ -14,6 +14,10 @@ from jarvis.orchestration.models import (
 )
 from jarvis.orchestration.planner import Planner
 from jarvis.orchestration.registry import ExpertRegistry, ToolRegistry
+from jarvis.orchestration.verification import (
+    not_evaluated_evidence_provenance,
+    verify_evidence_provenance,
+)
 
 logger = logging.getLogger(__name__)
 _TRUNCATION_MARKER = "\n\n[Response truncated because combined expert output exceeded the 40,000-character limit.]"
@@ -97,6 +101,25 @@ class OrchestrationService:
             max_concurrency=self._settings.max_parallel_experts,
         )
         results, expert_events = await self._executor.execute_plan(plan, context)
+        try:
+            evidence_provenance = verify_evidence_provenance(
+                context,
+                results,
+                enabled=not self._provider.is_demo,
+            )
+        except Exception:
+            # Provenance diagnostics are best-effort and cannot invalidate
+            # already validated expert results or prevent useful synthesis.
+            try:
+                evidence_provenance = not_evaluated_evidence_provenance(results)
+            except Exception:
+                # Even malformed model_construct-created data must not turn a
+                # useful synthesis response into an orchestration failure.
+                evidence_provenance = ()
+            logger.warning(
+                "Evidence provenance check failed",
+                extra={"execution_id": context.execution_id},
+            )
         successful = [
             _render_expert_result(result)
             for result in results if result.status == "succeeded" and result.output
@@ -121,6 +144,9 @@ class OrchestrationService:
                 "failed_experts": len(results) - len(successful),
                 "partial": partial,
                 "rounds": plan.max_rounds,
+                "source_match_count": sum(item.outcome == "source_match" for item in evidence_provenance),
+                "unverified_count": sum(item.outcome == "unverified" for item in evidence_provenance),
+                "not_evaluated_count": sum(item.outcome == "not_evaluated" for item in evidence_provenance),
                 "expert_outcomes": [
                     {"expert_id": result.expert_id, "status": result.status, "attempts": result.attempts, "error_code": result.error_code}
                     for result in results
@@ -133,6 +159,7 @@ class OrchestrationService:
             intent=intent,
             plan=plan,
             expert_results=results,
+            evidence_provenance=evidence_provenance,
             reply=reply,
             partial=partial,
             audit_events=(*expert_events, completion),
