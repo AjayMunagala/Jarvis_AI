@@ -240,8 +240,12 @@ def test_enabled_persistence_constructs_adapter_without_connecting(monkeypatch):
     constructed = {}
     sentinel = object()
 
-    def adapter(database_url, *, connect_timeout_seconds):
-        constructed.update(url=database_url, timeout=connect_timeout_seconds)
+    def adapter(database_url, *, connect_timeout_seconds, operation_timeout_seconds):
+        constructed.update(
+            url=database_url,
+            timeout=connect_timeout_seconds,
+            operation_timeout=operation_timeout_seconds,
+        )
         return sentinel
 
     monkeypatch.setattr("jarvis.main.PostgresConversationRepository", adapter)
@@ -253,7 +257,9 @@ def test_enabled_persistence_constructs_adapter_without_connecting(monkeypatch):
         owner_id=TEST_OWNER_ID,
     ))
     assert app.state.conversation_repository is sentinel
-    assert constructed == {"url": "postgresql://local/jarvis", "timeout": 3}
+    assert constructed == {
+        "url": "postgresql://local/jarvis", "timeout": 3, "operation_timeout": 5
+    }
 
 
 def test_chat_returns_partial_status_with_useful_expert_output():

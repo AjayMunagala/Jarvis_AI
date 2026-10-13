@@ -570,6 +570,68 @@ def test_chat_falls_back_without_memory_when_retrieval_fails():
     assert provider.messages == ["ordinary request"]
 
 
+def test_memory_operation_timeout_with_remaining_request_budget_falls_back_without_chat_504(
+    monkeypatch,
+):
+    import time
+
+    import jarvis.persistence.memory_postgres as memory_postgres
+
+    real_monotonic = time.monotonic
+    simulated_time = [None]
+    observed_errors = []
+
+    def controlled_monotonic():
+        return simulated_time[0] if simulated_time[0] is not None else real_monotonic()
+
+    monkeypatch.setattr(memory_postgres, "monotonic", controlled_monotonic)
+
+    class AdvancingConnection(FakeConnection):
+        def execute(self, query, parameters=()):
+            result = super().execute(query, parameters)
+            if "set_config('statement_timeout'" in query:
+                # Expire the repository's one-second operation budget while
+                # leaving the chat's 30-second request budget available.
+                simulated_time[0] += 2
+            return result
+
+    connection = AdvancingConnection()
+
+    def connect(*_args, **_kwargs):
+        simulated_time[0] = real_monotonic()
+        return connection
+
+    class ObservedRepository(PostgresMemoryRepository):
+        def search_with_deadline(self, owner_id, query, *, deadline, limit=10, offset=0):
+            try:
+                return super().search_with_deadline(
+                    owner_id, query, deadline=deadline, limit=limit, offset=offset
+                )
+            except MemoryPersistenceError as exc:
+                observed_errors.append(type(exc))
+                raise
+
+    repository = ObservedRepository(
+        "private-url", operation_timeout_seconds=1, connect=connect
+    )
+    app = create_app(
+        settings=persistent_settings(
+            memory_retrieval_enabled=True,
+            request_timeout_seconds=30,
+        )
+    )
+    app.state.memory_repository = repository
+    app.state.conversation_repository = None
+
+    with persistent_client(app) as client:
+        response = client.post("/chat", json={"message": "ordinary request"})
+
+    assert observed_errors == [MemoryPersistenceError]
+    assert response.status_code == 200
+    assert response.json()["memory_context"] == {"outcome": "fallback", "memory_ids": []}
+    assert response.json()["reply"]
+
+
 class FakeConnection:
     def __init__(self, *, rows=(), count=0, fail=False, deleted=True):
         self.rows = list(rows)
@@ -620,20 +682,23 @@ def test_postgres_memory_create_and_list_are_parameterized_and_bounded():
 
     created = repository.create(TEST_OWNER_ID, "new memory", "notes", "source-1")
     assert created.content == "new memory"
-    insert_query, insert_parameters = connection.calls[0]
+    sql_calls = [item for item in connection.calls if "set_config('statement_timeout'" not in item[0]]
+    insert_query, insert_parameters = sql_calls[0]
     assert "%s" in insert_query
     assert insert_parameters[1:] == (TEST_OWNER_ID, "new memory", "notes", "source-1")
 
     page = repository.list(TEST_OWNER_ID, limit=1, offset=1)
     assert page.total == 2 and page.has_more is False
-    assert connection.calls[-1][1] == (TEST_OWNER_ID, 1, 1)
-    assert "owner_id = %s" in connection.calls[-1][0]
-    assert "ORDER BY created_at DESC, id ASC" in connection.calls[-1][0]
+    sql_calls = [item for item in connection.calls if "set_config('statement_timeout'" not in item[0]]
+    assert sql_calls[-1][1] == (TEST_OWNER_ID, 1, 1)
+    assert "owner_id = %s" in sql_calls[-1][0]
+    assert "ORDER BY created_at DESC, id ASC" in sql_calls[-1][0]
 
     filtered = repository.list(TEST_OWNER_ID, limit=1, offset=0, category="notes")
     assert filtered.total == 2 and filtered.has_more is True
-    count_query, count_parameters = connection.calls[-2]
-    page_query, page_parameters = connection.calls[-1]
+    sql_calls = [item for item in connection.calls if "set_config('statement_timeout'" not in item[0]]
+    count_query, count_parameters = sql_calls[-2]
+    page_query, page_parameters = sql_calls[-1]
     assert "owner_id = %s AND category = %s" in count_query and count_parameters == (TEST_OWNER_ID, "notes")
     assert "owner_id = %s AND category = %s" in page_query and page_parameters == (TEST_OWNER_ID, "notes", 1, 0)
 
@@ -646,8 +711,9 @@ def test_postgres_memory_search_binds_query_and_uses_deterministic_ranking():
     page = repository.search(TEST_OWNER_ID, query, limit=5, offset=2)
 
     assert page.items == ()
-    count_query, count_parameters = connection.calls[0]
-    search_query, search_parameters = connection.calls[1]
+    sql_calls = [item for item in connection.calls if "set_config('statement_timeout'" not in item[0]]
+    count_query, count_parameters = sql_calls[0]
+    search_query, search_parameters = sql_calls[1]
     assert query not in count_query and count_parameters == (TEST_OWNER_ID, query)
     assert query not in search_query and search_parameters == (TEST_OWNER_ID, query, query, 5, 2)
     assert "owner_id = %s" in count_query and "owner_id = %s" in search_query
@@ -655,10 +721,37 @@ def test_postgres_memory_search_binds_query_and_uses_deterministic_ranking():
     assert "updated_at DESC, id ASC" in search_query
 
 
+def test_memory_crud_and_search_apply_statement_timeout_before_each_query():
+    connections = []
+
+    def connect(*_args, **_kwargs):
+        connection = FakeConnection()
+        connections.append(connection)
+        return connection
+
+    repository = PostgresMemoryRepository("private-url", connect=connect)
+    memory_id = uuid4()
+    repository.create(TEST_OWNER_ID, "created")
+    repository.list(TEST_OWNER_ID, limit=2)
+    repository.get(TEST_OWNER_ID, memory_id)
+    repository.update(TEST_OWNER_ID, memory_id, MemoryUpdate(content="changed"))
+    repository.delete(TEST_OWNER_ID, memory_id)
+    repository.search(TEST_OWNER_ID, "query")
+
+    for connection in connections:
+        assert len(connection.calls) % 2 == 0
+        for timeout_call, query_call in zip(connection.calls[::2], connection.calls[1::2]):
+            timeout_query, timeout_parameters = timeout_call
+            assert timeout_query == "SELECT set_config('statement_timeout', %s, true)"
+            assert timeout_parameters[0].endswith("ms")
+            assert int(timeout_parameters[0][:-2]) > 0
+            assert "set_config('statement_timeout'" not in query_call[0]
+
+
 def test_postgres_deadline_search_uses_positive_connection_timeout_and_bound_transaction_local_timeouts(monkeypatch):
     import jarvis.persistence.memory_postgres as memory_postgres
 
-    clock = iter([100.0, 100.0, 100.0, 101.25])
+    clock = iter([100.0, 100.0, 100.0, 100.0, 101.25, 101.25])
     monkeypatch.setattr(memory_postgres, "monotonic", lambda: next(clock))
     connection = FakeConnection(count=0, rows=[])
     connect_calls = []
@@ -683,7 +776,7 @@ def test_postgres_deadline_search_uses_positive_connection_timeout_and_bound_tra
 def test_postgres_deadline_search_stops_before_second_query_when_budget_expires(monkeypatch):
     import jarvis.persistence.memory_postgres as memory_postgres
 
-    clock = iter([100.0, 100.0, 100.0, 101.1])
+    clock = iter([100.0, 100.0, 100.0, 100.0, 101.1, 101.1])
     monkeypatch.setattr(memory_postgres, "monotonic", lambda: next(clock))
     connection = FakeConnection(count=1, rows=[])
     repository = PostgresMemoryRepository(
@@ -773,7 +866,9 @@ def test_postgres_memory_update_and_delete_use_parameters_and_sanitize_errors():
 
     updated = repository.update(TEST_OWNER_ID, memory_id, MemoryUpdate(content="updated"))
     assert updated is not None
-    query, parameters = connection.calls[-1]
+    query, parameters = [
+        item for item in connection.calls if "set_config('statement_timeout'" not in item[0]
+    ][-1]
     assert "content = %s" in query and parameters == ("updated", memory_id, TEST_OWNER_ID)
     assert "AND owner_id = %s" in query
     assert "updated_at = CURRENT_TIMESTAMP" in query
@@ -781,11 +876,15 @@ def test_postgres_memory_update_and_delete_use_parameters_and_sanitize_errors():
         TEST_OWNER_ID, memory_id, MemoryUpdate(category=None, source_reference=None)
     )
     assert cleared is not None
-    clear_query, clear_parameters = connection.calls[-1]
+    clear_query, clear_parameters = [
+        item for item in connection.calls if "set_config('statement_timeout'" not in item[0]
+    ][-1]
     assert "category = %s" in clear_query and "source_reference = %s" in clear_query
     assert clear_parameters == (None, None, memory_id, TEST_OWNER_ID)
     assert repository.delete(TEST_OWNER_ID, memory_id)
-    assert connection.calls[-1][1] == (memory_id, TEST_OWNER_ID)
+    assert [
+        item for item in connection.calls if "set_config('statement_timeout'" not in item[0]
+    ][-1][1] == (memory_id, TEST_OWNER_ID)
 
     broken = PostgresMemoryRepository(
         "private-db-url", connect=lambda *_args, **_kwargs: FakeConnection(fail=True)

@@ -561,6 +561,63 @@ def test_memory_statement_timeout_rolls_back_and_connection_recovers(isolated_po
         connection.commit()
 
 
+def test_conversation_statement_timeout_rolls_back_and_connection_recovers(isolated_postgres):
+    import psycopg
+
+    conversation_repository = isolated_postgres.repository()
+    conversation_id = conversation_repository.save_exchange("seed user", "seed assistant")
+
+    class SlowMessageInsertConnection:
+        def __init__(self, connection):
+            self.connection = connection
+            self.timeout_values = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            if exc_type is None:
+                self.connection.commit()
+            else:
+                self.connection.rollback()
+            return False
+
+        def execute(self, query, parameters=()):
+            if "set_config('statement_timeout'" in query:
+                self.timeout_values.append(parameters[0])
+            if "INSERT INTO jarvis_app.messages" in query:
+                return self.connection.execute("SELECT pg_sleep(3.0)")
+            return self.connection.execute(query, parameters)
+
+    with psycopg.connect(isolated_postgres.database_url) as connection:
+        baseline = connection.execute("SHOW statement_timeout").fetchone()[0]
+        connection.commit()
+        wrapped_connection = SlowMessageInsertConnection(connection)
+        timeout_repository = PostgresConversationRepository(
+            isolated_postgres.database_url,
+            connect_timeout_seconds=3,
+            operation_timeout_seconds=2,
+            connect=lambda *_args, **_kwargs: wrapped_connection,
+        )
+
+        with pytest.raises(PersistenceError):
+            timeout_repository.save_exchange("must roll back", "must also roll back", conversation_id)
+
+        assert wrapped_connection.timeout_values
+        assert all(value.endswith("ms") and int(value[:-2]) > 0 for value in wrapped_connection.timeout_values)
+        assert connection.execute("SELECT 1").fetchone() == (1,)
+        assert connection.execute("SHOW statement_timeout").fetchone()[0] == baseline
+        connection.commit()
+
+    stored = conversation_repository.get_messages(conversation_id, limit=10)
+    assert [item.content for item in stored] == ["seed user", "seed assistant"]
+    conversation_repository.save_exchange("recovered user", "recovered assistant", conversation_id)
+    recovered = conversation_repository.get_messages(conversation_id, limit=10)
+    assert [item.content for item in recovered] == [
+        "seed user", "seed assistant", "recovered user", "recovered assistant"
+    ]
+
+
 def test_unknown_conversation_is_not_created(isolated_postgres):
     import psycopg
 

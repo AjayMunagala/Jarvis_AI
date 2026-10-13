@@ -76,6 +76,13 @@ def test_database_connect_timeout_is_bounded(timeout):
         Settings(_env_file=None, persistence_connect_timeout_seconds=timeout)
 
 
+def test_persistence_operation_timeout_rejects_values_outside_one_to_sixty_seconds():
+    assert Settings(_env_file=None).persistence_operation_timeout_seconds == 5
+    for timeout in (0, 61):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, persistence_operation_timeout_seconds=timeout)
+
+
 @pytest.mark.parametrize("role", ["system", "tool", "provider"])
 def test_message_contract_rejects_unsupported_roles(role):
     with pytest.raises(ValidationError):
@@ -139,6 +146,59 @@ class FakeConnection(AbstractContextManager):
         return self.rows
 
 
+def test_expired_conversation_operation_budget_is_rejected_before_connect(monkeypatch):
+    import jarvis.persistence.postgres as postgres
+
+    clock = iter((10.0, 11.0))
+    monkeypatch.setattr(postgres, "monotonic", lambda: next(clock))
+    connect_calls = []
+    repository = PostgresConversationRepository(
+        "private-url",
+        operation_timeout_seconds=1,
+        connect=lambda *args, **kwargs: connect_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(PersistenceError):
+        repository.create_conversation()
+
+    assert connect_calls == []
+
+
+def test_expiry_mid_exchange_rolls_back_without_a_partial_message_pair(monkeypatch):
+    import jarvis.persistence.postgres as postgres
+
+    clock = iter((10.0, 10.0, 10.0, 10.0, 15.0))
+    monkeypatch.setattr(postgres, "monotonic", lambda: next(clock))
+    connection = FakeConnection()
+    repository = PostgresConversationRepository(
+        "private-url", operation_timeout_seconds=5,
+        connect=lambda *args, **kwargs: connection,
+    )
+
+    with pytest.raises(PersistenceError):
+        repository.save_exchange("private user content", "private assistant content")
+
+    sql_calls = [item for item in connection.calls if "set_config('statement_timeout'" not in item[0]]
+    assert len(sql_calls) == 1 and "INSERT INTO jarvis_app.conversations" in sql_calls[0][0]
+    assert connection.rolled_back and not connection.committed
+
+
+def test_statement_timeout_is_positive_and_recalculated_for_each_statement():
+    from jarvis.persistence.operation_timeout import execute_with_deadline
+
+    clock = iter((10.0, 10.0, 11.0, 11.0))
+    connection = FakeConnection()
+    execute_with_deadline(connection, 15.0, "SELECT 1", clock=lambda: next(clock))
+    execute_with_deadline(connection, 15.0, "SELECT 2", clock=lambda: next(clock))
+
+    assert connection.calls == [
+        ("SELECT set_config('statement_timeout', %s, true)", ("5000ms",)),
+        ("SELECT 1", ()),
+        ("SELECT set_config('statement_timeout', %s, true)", ("4000ms",)),
+        ("SELECT 2", ()),
+    ]
+
+
 def test_save_exchange_is_transactional_and_parameterized():
     connection = FakeConnection()
     supplied_urls = []
@@ -154,16 +214,19 @@ def test_save_exchange_is_transactional_and_parameterized():
     assert connection.committed
     assert not connection.rolled_back
     assert supplied_urls == [("postgresql://secret", {"connect_timeout": 3})]
-    assert len(connection.calls) == 2
-    assert connection.calls[0][1] == (conversation_id,)
-    message_query, parameters = connection.calls[1]
+    timeout_calls = [item for item in connection.calls if "set_config('statement_timeout'" in item[0]]
+    sql_calls = [item for item in connection.calls if "set_config('statement_timeout'" not in item[0]]
+    assert len(timeout_calls) == len(sql_calls) == 2
+    assert all(int(params[0][:-2]) > 0 and params[0].endswith("ms") for _, params in timeout_calls)
+    assert sql_calls[0][1] == (conversation_id,)
+    message_query, parameters = sql_calls[1]
     assert "%s" in message_query and "sequence_number" in message_query
     assert parameters[1] == conversation_id and parameters[2] == 0 and parameters[3] == "question"
     assert parameters[5] == conversation_id and parameters[6] == 1 and parameters[7] == "answer"
 
 
 def test_save_exchange_rolls_back_and_sanitizes_database_failure():
-    connection = FakeConnection(fail_on_call=2)
+    connection = FakeConnection(fail_on_call=4)
     repository = PostgresConversationRepository("do-not-log-secret", connect=lambda _, **__: connection)
 
     with pytest.raises(PersistenceError) as error:
@@ -190,7 +253,8 @@ def test_save_exchange_appends_to_existing_conversation_atomically():
     assert "INSERT INTO jarvis_app.conversations" not in " ".join(
         query for query, _ in connection.calls
     )
-    insert_query, params = connection.calls[2]
+    sql_calls = [item for item in connection.calls if "set_config('statement_timeout'" not in item[0]]
+    insert_query, params = sql_calls[2]
     assert "sequence_number" in insert_query
     assert params[1:4] == (conversation_id, 2, "next question")
     assert params[5:8] == (conversation_id, 3, "next answer")
@@ -230,7 +294,8 @@ def test_message_retrieval_uses_stable_insertion_order():
     messages = repository.get_messages(conversation_id)
 
     assert [message.content for message in messages] == ["first", "second"]
-    query, params = connection.calls[1]
+    sql_calls = [item for item in connection.calls if "set_config('statement_timeout'" not in item[0]]
+    query, params = sql_calls[1]
     assert "WHERE conversation_id = %s" in query
     assert "ORDER BY sequence_number DESC" in query
     assert params == (conversation_id, 51)
@@ -246,7 +311,8 @@ def test_message_retrieval_cursor_filters_to_older_sequence_numbers():
 
     assert repository.get_messages(conversation_id, before_sequence=9, limit=21) == ()
 
-    query, params = connection.calls[1]
+    sql_calls = [item for item in connection.calls if "set_config('statement_timeout'" not in item[0]]
+    query, params = sql_calls[1]
     assert "sequence_number < %s" in query
     assert params == (conversation_id, 9, 21)
 
@@ -261,7 +327,8 @@ def test_append_message_assigns_next_conversation_sequence_and_checks_parent():
     assert message.conversation_id == conversation_id
     assert message.role == "assistant"
     assert message.content == "third"
-    insert_query, params = connection.calls[2]
+    sql_calls = [item for item in connection.calls if "set_config('statement_timeout'" not in item[0]]
+    insert_query, params = sql_calls[2]
     assert "sequence_number" in insert_query
     assert params[2] == 2
     assert connection.committed

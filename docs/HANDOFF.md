@@ -2,7 +2,7 @@
 
 ## Current milestone
 
-Core v1.4 adds deterministic evidence provenance checks on top of Core v1.3 registry consistency and Core v1.2 single-owner authentication. Persistence and retrieval remain disabled by default, and mock chat does not need PostgreSQL. Memory records are separate from conversation history and are never automatically extracted from messages. All persisted API routes require configured bearer authentication. Apply migrations 0003 and 0004 with the existing Windows migration runner; the app does not migrate at startup. This remains unsuitable for shared/public deployment.
+Core v1.6 bounds synchronous PostgreSQL persistence operations with a separate monotonic operation budget. The v1.5 shared deadline still covers memory retrieval and expert execution only; persistence after synthesis has its own bound. Persistence and retrieval remain disabled by default, and mock chat does not need PostgreSQL. Memory records are separate from conversation history and are never automatically extracted from messages. All persisted API routes require configured bearer authentication. Apply migrations explicitly with the existing Windows migration runner; the app does not migrate at startup. This remains unsuitable for shared/public deployment.
 
 ## Implemented
 
@@ -24,6 +24,7 @@ Core v1.4 adds deterministic evidence provenance checks on top of Core v1.3 regi
 - Tool configuration is currently empty, the registry has no executor, and no shell command or external/state-changing action can be invoked.
 - Standalone Windows PostgreSQL provisioning scripts remain optional and outside application startup.
 - Optional `jarvis.persistence` provides a small repository protocol and PostgreSQL adapter. The `persistence` extra declares `psycopg[binary]`; set `JARVIS_PERSISTENCE_ENABLED=true` and a secret `JARVIS_PERSISTENCE_DATABASE_URL` only in a local environment. `/chat` returns sanitized HTTP 503 if saving fails. The same response shape is retained on success.
+- `JARVIS_PERSISTENCE_OPERATION_TIMEOUT_SECONDS` defaults to 5 seconds and accepts 1–60. It separately bounds conversation and memory adapter calls. SQL statements use transaction-local timeouts recalculated from the remaining budget; libpq connection timeout is whole-second granularity and cannot guarantee an exact wall-clock deadline. SQL failures roll back before translation to the existing sanitized 503 behavior.
 - `/chat` accepts an optional UUID `conversation_id`. Persistent responses return the created or continued ID; non-persistent responses return `null`. `GET /conversations/{conversation_id}/messages` accepts `limit` (1–100, default 50) and `before_sequence` for older pages. Malformed IDs return sanitized 422, unknown IDs return sanitized 404, and unavailable persistence returns sanitized 503.
 
 ## Commands
@@ -123,3 +124,17 @@ Initial v1.4 implementation verification: focused provenance/orchestration/API t
 `/chat` establishes one absolute monotonic deadline and passes it through optional memory retrieval, orchestration, and expert execution. Expiry during retrieval returns sanitized HTTP 504 `request_timeout` with the existing execution-ID header and does not call a provider. Retrieval failures before expiry remain best-effort `fallback`; provider/expert timeouts remain `provider_timeout`. The public success response contract, authentication/owner scoping, expert retry and partial-result rules, and v1.4 provenance boundaries are unchanged. Persistence after synthesis is outside this deadline.
 
 PostgreSQL memory search checks the budget before opening a connection and refuses to connect with less than one whole second remaining. libpq connection timeouts have whole-second granularity; the positive timeout is `min(configured_timeout, floor(remaining_seconds))`. Flooring can shorten or reject an attempt and cannot guarantee an exact sub-second wall-clock deadline. Before both search queries the adapter recalculates remaining time and uses bound `SELECT set_config('statement_timeout', %s, true)` inside the transaction. Transaction commit/rollback resets the setting. The route does not rely on cancelling a threadpool await to stop synchronous database work; PostgreSQL statement/connection timeouts bound those operations. Live PostgreSQL verification is opt-in and must be reported separately from offline tests.
+
+## Core v1.6 — Bounded PostgreSQL persistence operations
+
+All synchronous conversation and memory repository operations use a separate `JARVIS_PERSISTENCE_OPERATION_TIMEOUT_SECONDS` budget (default 5 seconds, range 1–60). PostgreSQL statements receive transaction-local timeouts based on remaining operation time; transaction completion resets the setting, and timeout failures roll back before sanitized translation. The v1.5 retrieval/expert budget, API response contracts, authentication, owner scoping, and mock/offline mode remain unchanged. No schema migration or dependency was added. Operation budgets are not exact end-to-end wall-clock guarantees because libpq connection timeouts use whole seconds and database/client overhead remains.
+
+The following v1.6 verification results were supplied as completed terminal output by the repository operator; they were not rerun during this documentation and commit task. Earlier milestone notes above are historical snapshots and do not describe the current v1.6 verification state.
+
+## Current v1.6 verification
+
+- Full Python suite: 219 passed, 1 existing Starlette/httpx TestClient deprecation warning.
+- Opt-in PostgreSQL integration suite: 18 passed in 18.47 seconds, with 1 existing Starlette/httpx TestClient deprecation warning. The run included `test_conversation_statement_timeout_rolls_back_and_connection_recovers` against the configured live PostgreSQL test environment.
+- Frontend suite: 30 passed; frontend production build, Python compilation, and `git diff --check` passed.
+- Gemini independent audit: APPROVE WITH CONDITIONS; the required live PostgreSQL verification condition was subsequently satisfied.
+- No live OpenAI request was made. These are operator-supplied results, not commands rerun during this documentation/commit task.

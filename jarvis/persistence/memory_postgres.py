@@ -6,6 +6,12 @@ from uuid import UUID, uuid4
 
 from jarvis.memory.base import MemoryDeadlineExceeded, MemoryPersistenceError
 from jarvis.memory.models import MemoryPage, MemoryRecord, MemoryUpdate
+from jarvis.persistence.operation_timeout import (
+    OperationBudgetExceeded,
+    bounded_connect_timeout,
+    execute_with_deadline,
+    operation_deadline,
+)
 
 
 _RETURNING = "id, content, category, source_reference, created_at, updated_at"
@@ -17,6 +23,7 @@ class PostgresMemoryRepository:
         database_url: str,
         *,
         connect_timeout_seconds: int = 3,
+        operation_timeout_seconds: int = 5,
         connect: Callable | None = None,
     ) -> None:
         if connect is None:
@@ -30,32 +37,28 @@ class PostgresMemoryRepository:
         self._database_url = database_url
         self._connect = connect
         self._connect_timeout_seconds = connect_timeout_seconds
+        self._operation_timeout_seconds = operation_timeout_seconds
 
-    def _open_connection(self, deadline: float | None = None):
-        connect_timeout = self._connect_timeout_seconds
-        if deadline is not None:
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                raise MemoryDeadlineExceeded()
-            # libpq accepts whole seconds only. Flooring avoids knowingly
-            # requesting a wait longer than the remaining budget; it is not an
-            # exact wall-clock guarantee because connection timeout is coarse.
-            connect_timeout = min(connect_timeout, int(remaining))
-            if connect_timeout < 1:
-                raise MemoryDeadlineExceeded()
+    def _open_connection(self, deadline: float):
+        connect_timeout = bounded_connect_timeout(
+            self._connect_timeout_seconds, deadline, clock=monotonic
+        )
         return self._connect(
             self._database_url,
             connect_timeout=connect_timeout,
         )
 
+    def _deadline(self, outer_deadline: float | None = None) -> float:
+        return operation_deadline(
+            self._operation_timeout_seconds,
+            outer_deadline=outer_deadline,
+            clock=monotonic,
+        )
+
     @staticmethod
-    def _set_statement_timeout(connection, deadline: float) -> None:
-        remaining_ms = int((deadline - monotonic()) * 1000)
-        if remaining_ms <= 0:
-            raise MemoryDeadlineExceeded()
-        connection.execute(
-            "SELECT set_config('statement_timeout', %s, true)",
-            (f"{remaining_ms}ms",),
+    def _execute(connection, deadline: float, query: str, parameters=()):
+        return execute_with_deadline(
+            connection, deadline, query, parameters, clock=monotonic
         )
 
     @staticmethod
@@ -68,9 +71,11 @@ class PostgresMemoryRepository:
     def create(
         self, owner_id: UUID, content: str, category: str | None = None, source_reference: str | None = None
     ) -> MemoryRecord:
+        deadline = self._deadline()
         try:
-            with self._open_connection() as connection:
-                row = connection.execute(
+            with self._open_connection(deadline) as connection:
+                row = self._execute(
+                    connection, deadline,
                     f"""INSERT INTO jarvis_app.memories
                         (id, owner_id, content, category, source_reference)
                         VALUES (%s, %s, %s, %s, %s) RETURNING {_RETURNING}""",
@@ -83,22 +88,27 @@ class PostgresMemoryRepository:
     def list(
         self, owner_id: UUID, *, limit: int = 50, offset: int = 0, category: str | None = None
     ) -> MemoryPage:
+        deadline = self._deadline()
         try:
-            with self._open_connection() as connection:
+            with self._open_connection(deadline) as connection:
                 if category is None:
-                    total = connection.execute(
+                    total = self._execute(
+                        connection, deadline,
                         "SELECT count(*) FROM jarvis_app.memories WHERE owner_id = %s", (owner_id,)
                     ).fetchone()[0]
-                    rows = connection.execute(
+                    rows = self._execute(
+                        connection, deadline,
                         f"""SELECT {_RETURNING} FROM jarvis_app.memories WHERE owner_id = %s
                             ORDER BY created_at DESC, id ASC LIMIT %s OFFSET %s""", (owner_id, limit, offset),
                     ).fetchall()
                 else:
-                    total = connection.execute(
+                    total = self._execute(
+                        connection, deadline,
                         "SELECT count(*) FROM jarvis_app.memories WHERE owner_id = %s AND category = %s",
                         (owner_id, category),
                     ).fetchone()[0]
-                    rows = connection.execute(
+                    rows = self._execute(
+                        connection, deadline,
                         f"""SELECT {_RETURNING} FROM jarvis_app.memories
                             WHERE owner_id = %s AND category = %s
                             ORDER BY created_at DESC, id ASC LIMIT %s OFFSET %s""",
@@ -113,9 +123,11 @@ class PostgresMemoryRepository:
             raise MemoryPersistenceError() from exc
 
     def get(self, owner_id: UUID, memory_id: UUID) -> MemoryRecord | None:
+        deadline = self._deadline()
         try:
-            with self._open_connection() as connection:
-                row = connection.execute(
+            with self._open_connection(deadline) as connection:
+                row = self._execute(
+                    connection, deadline,
                     f"SELECT {_RETURNING} FROM jarvis_app.memories WHERE id = %s AND owner_id = %s",
                     (memory_id, owner_id),
                 ).fetchone()
@@ -136,9 +148,11 @@ class PostgresMemoryRepository:
         assignments.append("updated_at = CURRENT_TIMESTAMP")
         parameters = [getattr(changes, name) for name in supplied]
         parameters.extend((memory_id, owner_id))
+        deadline = self._deadline()
         try:
-            with self._open_connection() as connection:
-                row = connection.execute(
+            with self._open_connection(deadline) as connection:
+                row = self._execute(
+                    connection, deadline,
                     f"""UPDATE jarvis_app.memories SET {', '.join(assignments)}
                         WHERE id = %s AND owner_id = %s RETURNING {_RETURNING}""",
                     tuple(parameters),
@@ -148,9 +162,11 @@ class PostgresMemoryRepository:
             raise MemoryPersistenceError() from exc
 
     def delete(self, owner_id: UUID, memory_id: UUID) -> bool:
+        deadline = self._deadline()
         try:
-            with self._open_connection() as connection:
-                row = connection.execute(
+            with self._open_connection(deadline) as connection:
+                row = self._execute(
+                    connection, deadline,
                     "DELETE FROM jarvis_app.memories WHERE id = %s AND owner_id = %s RETURNING id",
                     (memory_id, owner_id),
                 ).fetchone()
@@ -169,21 +185,19 @@ class PostgresMemoryRepository:
     def _search(
         self, owner_id: UUID, query: str, *, limit: int, offset: int, deadline: float | None
     ) -> MemoryPage:
+        request_deadline = deadline
+        operation_deadline_value = self._deadline(deadline)
         try:
-            with self._open_connection(deadline) as connection:
-                if deadline is not None and deadline - monotonic() <= 0:
-                    raise MemoryDeadlineExceeded()
-                if deadline is not None:
-                    self._set_statement_timeout(connection, deadline)
-                total = connection.execute(
+            with self._open_connection(operation_deadline_value) as connection:
+                total = self._execute(
+                    connection, operation_deadline_value,
                     """SELECT count(*) FROM jarvis_app.memories
                        WHERE owner_id = %s
                          AND to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)""",
                     (owner_id, query),
                 ).fetchone()[0]
-                if deadline is not None:
-                    self._set_statement_timeout(connection, deadline)
-                rows = connection.execute(
+                rows = self._execute(
+                    connection, operation_deadline_value,
                     f"""SELECT {_RETURNING} FROM jarvis_app.memories
                         WHERE owner_id = %s
                           AND to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)
@@ -200,7 +214,14 @@ class PostgresMemoryRepository:
             )
         except MemoryDeadlineExceeded:
             raise
+        except OperationBudgetExceeded as exc:
+            # A sub-second libpq connect window is not representable. The v1.5
+            # shared request budget treats that case as exhausted rather than
+            # allowing retrieval to consume a longer rounded-up connection.
+            if request_deadline is not None and request_deadline - monotonic() < 1:
+                raise MemoryDeadlineExceeded() from None
+            raise MemoryPersistenceError() from exc
         except Exception as exc:
-            if deadline is not None and deadline - monotonic() <= 0:
+            if request_deadline is not None and request_deadline - monotonic() <= 0:
                 raise MemoryDeadlineExceeded() from None
             raise MemoryPersistenceError() from exc

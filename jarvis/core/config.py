@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     persistence_enabled: bool = False
     persistence_database_url: SecretStr | None = None
     persistence_connect_timeout_seconds: int = Field(default=3, ge=1, le=15)
+    persistence_operation_timeout_seconds: int = Field(default=5, ge=1, le=60)
     local_auth_token: SecretStr | None = None
     owner_id: UUID | None = None
     memory_retrieval_enabled: bool = False

@@ -48,10 +48,12 @@ def create_app(
         conversation_repository = PostgresConversationRepository(
             database_url.get_secret_value(),
             connect_timeout_seconds=resolved_settings.persistence_connect_timeout_seconds,
+            operation_timeout_seconds=resolved_settings.persistence_operation_timeout_seconds,
         )
         memory_repository = PostgresMemoryRepository(
             database_url.get_secret_value(),
             connect_timeout_seconds=resolved_settings.persistence_connect_timeout_seconds,
+            operation_timeout_seconds=resolved_settings.persistence_operation_timeout_seconds,
         )
 
     @asynccontextmanager

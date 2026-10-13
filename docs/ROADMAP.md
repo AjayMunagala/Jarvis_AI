@@ -117,6 +117,15 @@ Verification in this v1.3 worktree: `.venv-dev\Scripts\python.exe -m pytest -v t
 - Preserve best-effort retrieval fallback while time remains, provider non-invocation after expiry, owner scoping, privacy-safe logs, retries, partial results, v1.4 provenance boundaries, and the public chat success schema. Persistence after synthesis remains outside the shared deadline.
 - No migration, dependency, provider, frontend change, automatic memory behavior, or external action is introduced.
 
+## Core v1.6 — Bounded PostgreSQL persistence operations (implemented and verified)
+
+- Add a dedicated `JARVIS_PERSISTENCE_OPERATION_TIMEOUT_SECONDS` budget (default 5 seconds, range 1–60) across synchronous conversation and memory repository operations.
+- Check the budget before connecting and before each SQL statement; use parameterized transaction-local PostgreSQL `statement_timeout` values based on remaining operation time. Preserve atomic exchange writes and rollback/recovery behavior.
+- Keep the v1.5 shared deadline for retrieval and expert execution separate. Memory search honors the earlier of the two deadlines; post-synthesis conversation persistence retains existing sanitized HTTP 503 behavior under its own budget.
+- Preserve mock/offline mode, authentication, owner predicates, API schemas, and privacy-safe error/log behavior. No migration or dependency is introduced.
+
+Verification results supplied by the repository operator (not rerun during the documentation and commit task): 219 Python tests passed; all 18 opt-in PostgreSQL integration tests passed in 18.47 seconds, including the conversation statement-timeout rollback/recovery case against the configured live test environment; 30 frontend tests passed; frontend production build, Python compilation, and `git diff --check` passed. The Python and PostgreSQL suites each reported one existing Starlette/httpx TestClient deprecation warning. Gemini's APPROVE WITH CONDITIONS audit required live PostgreSQL verification, which was subsequently completed. No live OpenAI request was made.
+
 ## Core v0.9 — Persistent Memory and Retrieval Foundation (implemented; verified locally)
 
 - Add an incremental PostgreSQL memory migration and a separate memory repository protocol/adapter. Memory content is strictly bounded, explicitly created/updated/deleted, and never copied automatically from chat messages.
