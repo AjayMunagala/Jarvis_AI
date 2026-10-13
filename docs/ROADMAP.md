@@ -110,6 +110,13 @@ Verification in this v1.3 worktree: `.venv-dev\Scripts\python.exe -m pytest -v t
 - Record internal outcomes as `source_match`, `unverified`, or `not_evaluated`; the internal response contains source identifiers/indexes only, and logs contain outcome counts only. Mock mode skips evaluation deterministically.
 - Provenance does not establish that a source supports a claim, detect logical contradictions, or establish factual truth. No verifier persona, provider call, public API change, frontend work, migration, dependency, or external action is added.
 
+## Core v1.5 — Shared retrieval and expert deadline (implemented)
+
+- Establish one monotonic deadline at the chat route and propagate the same absolute value through optional memory retrieval, orchestration, and expert execution. Return `request_timeout` if it expires before expert execution; retain `provider_timeout` for expert/provider execution timeouts.
+- Enforce PostgreSQL memory search budgets before connection and before each of its count/page queries with transaction-local, parameter-bound `set_config('statement_timeout', ..., true)`. Require at least one whole second for a connection attempt because libpq timeout granularity is seconds; this is not an exact total wall-clock guarantee.
+- Preserve best-effort retrieval fallback while time remains, provider non-invocation after expiry, owner scoping, privacy-safe logs, retries, partial results, v1.4 provenance boundaries, and the public chat success schema. Persistence after synthesis remains outside the shared deadline.
+- No migration, dependency, provider, frontend change, automatic memory behavior, or external action is introduced.
+
 ## Core v0.9 — Persistent Memory and Retrieval Foundation (implemented; verified locally)
 
 - Add an incremental PostgreSQL memory migration and a separate memory repository protocol/adapter. Memory content is strictly bounded, explicitly created/updated/deleted, and never copied automatically from chat messages.

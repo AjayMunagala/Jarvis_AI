@@ -20,8 +20,20 @@ class MemoryRepository(Protocol):
     def search(self, owner_id: UUID, query: str, *, limit: int = 10, offset: int = 0) -> MemoryPage: ...
 
 
+class DeadlineAwareMemorySearch(Protocol):
+    """Optional retrieval capability for repositories that can enforce deadlines."""
+
+    def search_with_deadline(
+        self, owner_id: UUID, query: str, *, deadline: float, limit: int = 10, offset: int = 0
+    ) -> MemoryPage: ...
+
+
 class MemoryPersistenceError(Exception):
     """Sanitized memory repository failure safe to cross the API boundary."""
 
     def __init__(self) -> None:
         super().__init__("Memory persistence is unavailable.")
+
+
+class MemoryDeadlineExceeded(TimeoutError):
+    """The shared request deadline expired during memory retrieval."""

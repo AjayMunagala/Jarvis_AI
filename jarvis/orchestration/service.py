@@ -1,6 +1,7 @@
 """Mother Orchestrator service boundary used by HTTP routes."""
 
 import logging
+from time import monotonic
 
 from jarvis.core.config import Settings
 from jarvis.intelligence.base import IntelligenceProvider
@@ -10,6 +11,7 @@ from jarvis.orchestration.models import (
     MAX_SYNTHESIZED_REPLY_LENGTH,
     AuditEvent,
     OrchestrationResponse,
+    RequestDeadlineExceeded,
     RequestContext,
 )
 from jarvis.orchestration.planner import Planner
@@ -91,7 +93,9 @@ class OrchestrationService:
             max_concurrency=settings.max_parallel_experts,
         )
 
-    async def run(self, context: RequestContext) -> OrchestrationResponse:
+    async def run(
+        self, context: RequestContext, *, deadline: float | None = None
+    ) -> OrchestrationResponse:
         intent = classify_safely(self._classifier, context)
         plan = self._planner.create_plan(
             context,
@@ -100,7 +104,9 @@ class OrchestrationService:
             max_rounds=self._settings.max_tool_rounds,
             max_concurrency=self._settings.max_parallel_experts,
         )
-        results, expert_events = await self._executor.execute_plan(plan, context)
+        if deadline is not None and monotonic() >= deadline:
+            raise RequestDeadlineExceeded()
+        results, expert_events = await self._executor.execute_plan(plan, context, deadline=deadline)
         try:
             evidence_provenance = verify_evidence_provenance(
                 context,

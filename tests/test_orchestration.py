@@ -18,6 +18,7 @@ from jarvis.orchestration.models import (
     IntentClassification,
     PlanStep,
     RequestContext,
+    RequestDeadlineExceeded,
     TransientExpertError,
 )
 from jarvis.intelligence.base import TransientProviderError
@@ -389,6 +390,34 @@ def test_provider_timeout_is_reported_as_sanitized_orchestration_timeout():
     orchestrator = service(SlowProvider(), settings=Settings(environment="test", request_timeout_seconds=0.01))
     with pytest.raises(ExpertTimeoutError):
         asyncio.run(orchestrator.run(RequestContext(message="hello")))
+
+
+def test_orchestration_forwards_the_absolute_request_deadline_to_expert_execution():
+    orchestrator = service(TrackingProvider())
+    captured = {}
+    from time import monotonic
+    deadline = monotonic() + 5
+    delegate = orchestrator._executor
+
+    class CapturingExecutor:
+        async def execute_plan(self, plan, context, *, deadline=None):
+            captured["deadline"] = deadline
+            return await delegate.execute_plan(plan, context, deadline=deadline)
+
+    orchestrator._executor = CapturingExecutor()
+    asyncio.run(orchestrator.run(RequestContext(message="hello"), deadline=deadline))
+    assert captured["deadline"] == deadline
+
+
+def test_expired_request_deadline_is_rejected_before_expert_execution(monkeypatch):
+    import jarvis.orchestration.service as service_module
+
+    provider = TrackingProvider()
+    orchestrator = service(provider)
+    monkeypatch.setattr(service_module, "monotonic", lambda: 10.0)
+    with pytest.raises(RequestDeadlineExceeded):
+        asyncio.run(orchestrator.run(RequestContext(message="hello"), deadline=9.0))
+    assert provider.calls == 0
 
 
 def test_parallel_timeout_cancels_active_provider_coroutines():

@@ -393,6 +393,49 @@ def test_provider_timeout_is_sanitized(caplog):
     )
 
 
+def test_overall_deadline_expiring_during_memory_retrieval_returns_request_timeout(monkeypatch):
+    import time
+
+    from jarvis.api.routes import chat as chat_route
+    from jarvis.memory.models import MemoryRetrievalResult
+
+    class RecordingProvider:
+        name = "recording"
+        is_demo = True
+
+        def __init__(self):
+            self.calls = 0
+
+        async def generate_reply(self, message, *, system_instruction=None):
+            self.calls += 1
+            return "should not execute"
+
+    provider = RecordingProvider()
+    settings = persistent_settings(
+        memory_retrieval_enabled=True,
+        request_timeout_seconds=0.02,
+    )
+    app = create_app(settings=settings, provider=provider)
+    app.state.memory_repository = object()
+
+    def slow_retrieval(*args, **kwargs):
+        time.sleep(0.05)
+        return MemoryRetrievalResult(records=(), outcome="empty")
+
+    monkeypatch.setattr(chat_route, "retrieve_context", slow_retrieval)
+    with persistent_client(app) as test_client:
+        response = test_client.post("/chat", json={"message": "request"})
+
+    assert response.status_code == 504
+    assert response.json() == {
+        "error": "request_timeout",
+        "detail": "The overall chat request timed out.",
+    }
+    execution_id = response.headers["x-jarvis-execution-id"]
+    assert len(execution_id) == 32
+    assert provider.calls == 0
+
+
 def test_message_limit_uses_validated_configuration():
     with client(max_message_length=3) as test_client:
         response = test_client.post("/chat", json={"message": "four"})

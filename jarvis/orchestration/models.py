@@ -271,6 +271,10 @@ class ExpertExecutionError(Exception):
         super().__init__("Configured experts failed.")
 
 
+class RequestDeadlineExceeded(TimeoutError):
+    """The overall chat deadline expired before expert execution began."""
+
+
 class ExpertTimeoutError(ExpertExecutionError):
     """The orchestration deadline expired before useful output was available."""
 

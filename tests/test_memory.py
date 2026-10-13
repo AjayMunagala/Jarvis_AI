@@ -9,7 +9,7 @@ from pydantic import SecretStr, ValidationError
 
 from jarvis.core.config import Settings
 from jarvis.main import create_app
-from jarvis.memory.base import MemoryPersistenceError
+from jarvis.memory.base import MemoryDeadlineExceeded, MemoryPersistenceError
 from jarvis.memory.models import (
     MemoryCreate, MemoryPage, MemoryRecord, MemoryRetrievalResult, MemoryUpdate, RetrievedMemory,
 )
@@ -653,6 +653,117 @@ def test_postgres_memory_search_binds_query_and_uses_deterministic_ranking():
     assert "owner_id = %s" in count_query and "owner_id = %s" in search_query
     assert "ts_rank_cd" in search_query
     assert "updated_at DESC, id ASC" in search_query
+
+
+def test_postgres_deadline_search_uses_positive_connection_timeout_and_bound_transaction_local_timeouts(monkeypatch):
+    import jarvis.persistence.memory_postgres as memory_postgres
+
+    clock = iter([100.0, 100.0, 100.0, 101.25])
+    monkeypatch.setattr(memory_postgres, "monotonic", lambda: next(clock))
+    connection = FakeConnection(count=0, rows=[])
+    connect_calls = []
+
+    def connect(url, **kwargs):
+        connect_calls.append((url, kwargs))
+        return connection
+
+    repository = PostgresMemoryRepository("secret-url", connect_timeout_seconds=3, connect=connect)
+    result = repository.search_with_deadline(TEST_OWNER_ID, "query", deadline=102.5)
+
+    assert result.items == ()
+    assert connect_calls == [("secret-url", {"connect_timeout": 2})]
+    assert "set_config('statement_timeout', %s, true)" in connection.calls[0][0]
+    assert "count(*)" in connection.calls[1][0]
+    assert "set_config('statement_timeout', %s, true)" in connection.calls[2][0]
+    assert "ts_rank_cd" in connection.calls[3][0]
+    assert connection.calls[0][1] == ("2500ms",)
+    assert connection.calls[2][1] == ("1250ms",)
+
+
+def test_postgres_deadline_search_stops_before_second_query_when_budget_expires(monkeypatch):
+    import jarvis.persistence.memory_postgres as memory_postgres
+
+    clock = iter([100.0, 100.0, 100.0, 101.1])
+    monkeypatch.setattr(memory_postgres, "monotonic", lambda: next(clock))
+    connection = FakeConnection(count=1, rows=[])
+    repository = PostgresMemoryRepository(
+        "secret-url", connect=lambda *_args, **_kwargs: connection
+    )
+
+    with pytest.raises(MemoryDeadlineExceeded):
+        repository.search_with_deadline(TEST_OWNER_ID, "query", deadline=101.0)
+
+    assert len(connection.calls) == 2
+    assert "set_config('statement_timeout', %s, true)" in connection.calls[0][0]
+    assert "count(*)" in connection.calls[1][0]
+
+
+@pytest.mark.parametrize("deadline", [99.0, 100.999])
+def test_postgres_deadline_search_rejects_expired_or_subsecond_budget_before_connect(monkeypatch, deadline):
+    import jarvis.persistence.memory_postgres as memory_postgres
+
+    monkeypatch.setattr(memory_postgres, "monotonic", lambda: 100.0)
+    called = False
+
+    def connect(*args, **kwargs):
+        nonlocal called
+        called = True
+        return FakeConnection()
+
+    repository = PostgresMemoryRepository("secret-url", connect=connect)
+    with pytest.raises(MemoryDeadlineExceeded):
+        repository.search_with_deadline(TEST_OWNER_ID, "query", deadline=deadline)
+    assert called is False
+
+
+def test_retrieval_uses_optional_deadline_search_and_preserves_legacy_repository_callers():
+    class DeadlineRepository(FakeMemoryRepository):
+        def __init__(self):
+            super().__init__()
+            self.deadline_seen = None
+
+        def search_with_deadline(self, owner_id, query, *, deadline, limit=10, offset=0):
+            self.deadline_seen = deadline
+            return super().search(owner_id, query, limit=limit, offset=offset)
+
+    deadline_repository = DeadlineRepository()
+    result = retrieve_context(
+        deadline_repository, "query", owner_id=TEST_OWNER_ID, limit=3,
+        execution_id="deadline-aware", deadline=monotonic_for_test() + 30,
+    )
+    assert result.outcome == "empty"
+    assert deadline_repository.deadline_seen is not None
+
+    legacy = FakeMemoryRepository()
+    result = retrieve_context(
+        legacy, "query", owner_id=TEST_OWNER_ID, limit=3,
+        execution_id="legacy", deadline=monotonic_for_test() + 30,
+    )
+    assert result.outcome == "empty"
+    assert legacy.calls == [(TEST_OWNER_ID, "query", 3, 0)]
+
+
+def monotonic_for_test():
+    from time import monotonic
+    return monotonic()
+
+
+def test_retrieval_failure_with_remaining_budget_falls_back_but_expiry_is_distinct():
+    class Broken(FakeMemoryRepository):
+        def search(self, owner_id, query, *, limit=10, offset=0):
+            raise MemoryPersistenceError()
+
+    fallback = retrieve_context(
+        Broken(), "query", owner_id=TEST_OWNER_ID, limit=2,
+        execution_id="remaining", deadline=monotonic_for_test() + 10,
+    )
+    assert fallback.outcome == "fallback"
+
+    with pytest.raises(MemoryDeadlineExceeded):
+        retrieve_context(
+            FakeMemoryRepository(), "query", owner_id=TEST_OWNER_ID, limit=2,
+            execution_id="expired", deadline=monotonic_for_test() - 1,
+        )
 
 
 def test_postgres_memory_update_and_delete_use_parameters_and_sanitize_errors():

@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import tempfile
+from time import monotonic
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,7 @@ from jarvis.main import create_app
 from jarvis.persistence.base import ConversationNotFound, PersistenceError
 from jarvis.persistence.postgres import PostgresConversationRepository
 from jarvis.persistence.memory_postgres import PostgresMemoryRepository
+from jarvis.memory.base import MemoryDeadlineExceeded
 
 
 RUN_INTEGRATION = "JARVIS_RUN_POSTGRES_INTEGRATION"
@@ -477,6 +479,86 @@ def test_memory_category_filter_is_exact_and_paginates_filtered_results(isolated
     assert len(set(page_ids)) == 2
     assert wrong_case.json()["total"] == 1
     assert blank.status_code == 422
+
+
+def test_memory_search_uses_psycopg_set_config_and_resets_timeout_after_commit(isolated_postgres):
+    import psycopg
+
+    class ReusableConnection:
+        def __init__(self, connection):
+            self.connection = connection
+            self.statements = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            if exc_type is None:
+                self.connection.commit()
+            else:
+                self.connection.rollback()
+            return False
+
+        def execute(self, query, parameters=()):
+            self.statements.append((query, parameters))
+            return self.connection.execute(query, parameters)
+
+    with psycopg.connect(isolated_postgres.database_url) as connection:
+        baseline = connection.execute("SHOW statement_timeout").fetchone()[0]
+        connection.commit()
+        wrapper = ReusableConnection(connection)
+        repository = PostgresMemoryRepository(
+            isolated_postgres.database_url,
+            connect=lambda *_args, **_kwargs: wrapper,
+        )
+        repository.search_with_deadline(
+            TEST_OWNER_ID, "timeout integration absent phrase", deadline=monotonic() + 3, limit=5
+        )
+        timeout_statements = [item for item in wrapper.statements if "set_config('statement_timeout'" in item[0]]
+        assert len(timeout_statements) == 2
+        assert all("%s" in statement and "true" in statement for statement, _ in timeout_statements)
+        assert all(parameters[0].endswith("ms") and int(parameters[0][:-2]) > 0 for _, parameters in timeout_statements)
+        assert connection.execute("SHOW statement_timeout").fetchone()[0] == baseline
+        connection.commit()
+
+
+def test_memory_statement_timeout_rolls_back_and_connection_recovers(isolated_postgres):
+    import psycopg
+
+    class SleepOnCountConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            if exc_type is None:
+                self.connection.commit()
+            else:
+                self.connection.rollback()
+            return False
+
+        def execute(self, query, parameters=()):
+            if "SELECT count(*) FROM jarvis_app.memories" in query:
+                return self.connection.execute("SELECT pg_sleep(2.0)")
+            return self.connection.execute(query, parameters)
+
+    with psycopg.connect(isolated_postgres.database_url) as connection:
+        baseline = connection.execute("SHOW statement_timeout").fetchone()[0]
+        connection.commit()
+        wrapper = SleepOnCountConnection(connection)
+        repository = PostgresMemoryRepository(
+            isolated_postgres.database_url,
+            connect=lambda *_args, **_kwargs: wrapper,
+        )
+        with pytest.raises(MemoryDeadlineExceeded):
+            repository.search_with_deadline(
+                TEST_OWNER_ID, "timeout integration", deadline=monotonic() + 1.5, limit=5
+            )
+        assert connection.execute("SELECT 1").fetchone() == (1,)
+        assert connection.execute("SHOW statement_timeout").fetchone()[0] == baseline
+        connection.commit()
 
 
 def test_unknown_conversation_is_not_created(isolated_postgres):

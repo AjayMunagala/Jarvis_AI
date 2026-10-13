@@ -109,7 +109,9 @@ def create_app(
             503: "persistence_unavailable",
         }
         error_code = (
-            "conversation_not_found"
+            "request_timeout"
+            if exc.status_code == 504 and exc.detail == "The overall chat request timed out."
+            else "conversation_not_found"
             if exc.status_code == 404 and exc.detail == "The requested conversation was not found."
             else "memory_not_found"
             if exc.status_code == 404 and exc.detail == "The requested memory was not found."

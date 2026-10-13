@@ -20,6 +20,7 @@ from jarvis.orchestration.models import (
     ExpertTimeoutError,
     ExecutionPlan,
     RequestContext,
+    RequestDeadlineExceeded,
     TransientExpertError,
     ValidationExpertOutput,
 )
@@ -129,8 +130,13 @@ class ExpertExecutor:
         self._max_retries = max_retries
         self._max_concurrency = max_concurrency
 
-    async def execute_plan(self, plan: ExecutionPlan, context: RequestContext) -> tuple[tuple[ExpertResult, ...], tuple[AuditEvent, ...]]:
-        deadline = monotonic() + self._timeout_seconds
+    async def execute_plan(
+        self, plan: ExecutionPlan, context: RequestContext, *, deadline: float | None = None
+    ) -> tuple[tuple[ExpertResult, ...], tuple[AuditEvent, ...]]:
+        if deadline is None:
+            deadline = monotonic() + self._timeout_seconds
+        elif monotonic() >= deadline:
+            raise RequestDeadlineExceeded()
         results: list[ExpertResult] = []
         events: list[AuditEvent] = [AuditEvent(execution_id=plan.execution_id, event_type="execution_started", outcome="started")]
         semaphore = asyncio.Semaphore(min(plan.max_concurrency, self._max_concurrency))
