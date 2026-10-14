@@ -552,6 +552,38 @@ def test_memory_lexical_retrieval_evaluation(isolated_postgres):
     assert limited["has_more"] is True
     assert len(limited["actual"]) == 5
 
+    stage1_candidate_diagnostics = []
+    for case_name, query, expected_labels, limit in cases:
+        with psycopg.connect(isolated_postgres.database_url) as connection:
+            candidate_rows = connection.execute(
+                """SELECT id::text,
+                          ts_rank_cd(to_tsvector('simple', content),
+                                     plainto_tsquery('simple', %s), 1) AS score
+                   FROM jarvis_app.memories
+                   WHERE owner_id = %s
+                     AND to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)
+                   ORDER BY score DESC, updated_at DESC, id ASC
+                   LIMIT %s""",
+                (query, owner_id, query, limit),
+            ).fetchall()
+        candidate_labels = [labels_by_id[memory_id] for memory_id, _ in candidate_rows]
+        stage1_candidate_diagnostics.append(
+            {
+                "case": case_name,
+                "query": query,
+                "expected": list(expected_labels),
+                "candidate_normalization_1": candidate_labels,
+                "candidate_scores": [
+                    {"record": labels_by_id[memory_id], "ts_rank_cd": float(score)}
+                    for memory_id, score in candidate_rows
+                ],
+                "matches_stage_1_expected_ranking": candidate_labels == list(expected_labels),
+            }
+        )
+    stage1_candidate_has_no_regressions = all(
+        item["matches_stage_1_expected_ranking"] for item in stage1_candidate_diagnostics
+    )
+
     print(
         "LEXICAL_RETRIEVAL_BASELINE="
         + json.dumps(
@@ -561,6 +593,211 @@ def test_memory_lexical_retrieval_evaluation(isolated_postgres):
                 "foreign_control_count": len(foreign_ids),
                 "unowned_control_count": len(unowned_ids),
                 "cases": diagnostics,
+            },
+            sort_keys=True,
+        )
+    )
+
+    # Keep the Stage 1 corpus and its 12 expected rankings unchanged. Add a
+    # separate length-sensitive corpus only after those regression gates have
+    # completed. Each query has one concise relevant record and two longer
+    # records that also satisfy plainto_tsquery's AND matching predicate.
+    length_cases = (
+        {
+            "case": "length_sensitivity_cobalt_orbit",
+            "query": "cobalt orbit",
+            "relevant": "cobalt_orbit_short",
+            "repeated": "cobalt_orbit_repeated_long",
+            "single": "cobalt_orbit_single_long",
+        },
+        {
+            "case": "length_sensitivity_amber_valley",
+            "query": "amber valley",
+            "relevant": "amber_valley_short",
+            "repeated": "amber_valley_repeated_long",
+            "single": "amber_valley_single_long",
+        },
+        {
+            "case": "length_sensitivity_silver_meadow",
+            "query": "silver meadow",
+            "relevant": "silver_meadow_short",
+            "repeated": "silver_meadow_repeated_long",
+            "single": "silver_meadow_single_long",
+        },
+    )
+    length_identifiers = {
+        label: UUID(int=0x17000000000000000000000000001000 + index)
+        for index, label in enumerate(
+            (
+                "cobalt_orbit_short", "cobalt_orbit_repeated_long", "cobalt_orbit_single_long",
+                "amber_valley_short", "amber_valley_repeated_long", "amber_valley_single_long",
+                "silver_meadow_short", "silver_meadow_repeated_long", "silver_meadow_single_long",
+            ),
+            start=1,
+        )
+    }
+
+    def alphabetic_token(index: int) -> str:
+        """Return a unique alphabet-only lexeme for predictable simple FTS."""
+        suffix = ""
+        while index:
+            index, remainder = divmod(index, 26)
+            suffix = chr(ord("a") + remainder) + suffix
+        return "padding" + (suffix or "a")
+
+    length_rows = []
+    for case_index, case in enumerate(length_cases):
+        first, second = case["query"].split()
+        # Hundreds of distinct alphabetic terms make these documents long in
+        # the tsvector lexeme-count sense used by ts_rank_cd normalization 1,
+        # while staying under the memory content bound. Noise never overlaps
+        # the Stage 1 query vocabulary or another length-sensitive query.
+        padding = " ".join(
+            alphabetic_token(case_index * 400 + token_index + 1)
+            for token_index in range(300)
+        )
+        timestamp_base = first_timestamp + timedelta(days=case_index + 1)
+        contents = (
+            (case["relevant"], f"{first} {second}", 1),
+            (case["repeated"], f"{first} {second} {first} {second} {padding}", 3),
+            (case["single"], f"{first} {second} {padding}", 2),
+        )
+        for label, content, minute in contents:
+            assert len(content) <= 4000, f"{label} exceeds the memory content limit"
+            timestamp = timestamp_base + timedelta(minutes=minute)
+            length_rows.append(
+                (length_identifiers[label], owner_id, content, "evaluation", None, timestamp, timestamp)
+            )
+
+    with psycopg.connect(isolated_postgres.database_url) as connection:
+        connection.cursor().executemany(
+            """INSERT INTO jarvis_app.memories
+               (id, owner_id, content, category, source_reference, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            length_rows,
+        )
+
+    length_labels = {str(memory_id): label for label, memory_id in length_identifiers.items()}
+    length_diagnostics = []
+
+    def scored_ranking(query: str, normalization: int):
+        # Both candidates use the same vector, query, owner predicate,
+        # matching predicate, stable tie-breakers, and result limit. Only the
+        # ts_rank_cd normalization argument differs (0=current, 1=candidate).
+        with psycopg.connect(isolated_postgres.database_url) as connection:
+            return connection.execute(
+                """SELECT id::text,
+                          ts_rank_cd(to_tsvector('simple', content),
+                                     plainto_tsquery('simple', %s), %s) AS score
+                   FROM jarvis_app.memories
+                   WHERE owner_id = %s
+                     AND to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)
+                   ORDER BY score DESC, updated_at DESC, id ASC
+                   LIMIT 5""",
+                (query, normalization, owner_id, query),
+            ).fetchall()
+
+    def metrics(labels: list[str], relevant: set[str]) -> dict[str, float]:
+        top_five = labels[:5]
+        relevant_count = sum(label in relevant for label in top_five)
+        first_relevant_rank = next(
+            (rank for rank, label in enumerate(top_five, start=1) if label in relevant),
+            None,
+        )
+        return {
+            "precision_at_5": relevant_count / 5,
+            "recall_at_5": relevant_count / len(relevant),
+            "mrr_at_5": 0.0 if first_relevant_rank is None else 1 / first_relevant_rank,
+        }
+
+    for case in length_cases:
+        query = case["query"]
+        relevant = {case["relevant"]}
+        expected_current = [case["repeated"], case["single"], case["relevant"]]
+        expected_candidate = [case["relevant"], case["repeated"], case["single"]]
+
+        current_page = repository.search(owner_id, query, limit=5)
+        current_ids = [str(item.id) for item in current_page.items]
+        current_labels = [length_labels[memory_id] for memory_id in current_ids]
+        current_scored_rows = scored_ranking(query, 0)
+        current_scored_ids = [row[0] for row in current_scored_rows]
+        # Verify the diagnostic query exactly reproduces the production
+        # repository's current ranking before comparing the candidate.
+        assert current_ids == current_scored_ids
+        assert current_labels == expected_current, f"current ranking: {case['case']}"
+
+        candidate_rows = scored_ranking(query, 1)
+        candidate_ids = [row[0] for row in candidate_rows]
+        candidate_labels = [length_labels[memory_id] for memory_id in candidate_ids]
+        assert candidate_labels == expected_candidate, f"normalized candidate: {case['case']}"
+        repeated_candidate_rows = scored_ranking(query, 1)
+        assert repeated_candidate_rows == candidate_rows
+        assert len(current_ids) <= 5 and len(candidate_ids) <= 5
+        assert set(current_ids) <= {str(value) for value in length_identifiers.values()}
+        assert set(candidate_ids) <= {str(value) for value in length_identifiers.values()}
+
+        repeated_page = repository.search(owner_id, query, limit=5)
+        assert [str(item.id) for item in repeated_page.items] == current_ids
+        assert repeated_page.total == current_page.total == 3
+
+        current_metrics = metrics(current_labels, relevant)
+        candidate_metrics = metrics(candidate_labels, relevant)
+        length_diagnostics.append(
+            {
+                "case": case["case"],
+                "query": query,
+                "relevant_records": sorted(relevant),
+                "expected_current": expected_current,
+                "actual_current": current_labels,
+                "current_scores": [
+                    {"record": length_labels[memory_id], "ts_rank_cd": float(score)}
+                    for memory_id, score in current_scored_rows
+                ],
+                "expected_candidate_normalization_1": expected_candidate,
+                "actual_candidate_normalization_1": candidate_labels,
+                "candidate_scores": [
+                    {"record": length_labels[memory_id], "ts_rank_cd": float(score)}
+                    for memory_id, score in candidate_rows
+                ],
+                "current_metrics_at_5": current_metrics,
+                "candidate_metrics_at_5": candidate_metrics,
+                "repeat_query_deterministic": True,
+                "repeat_candidate_query_deterministic": True,
+            }
+        )
+
+    aggregate = {
+        f"{candidate}_{metric}": sum(
+            item[f"{candidate}_metrics_at_5"][metric] for item in length_diagnostics
+        )
+        / len(length_diagnostics)
+        for candidate in ("current", "candidate")
+        for metric in ("precision_at_5", "recall_at_5", "mrr_at_5")
+    }
+    aggregate["mean_mrr_at_5_improvement"] = (
+        aggregate["candidate_mrr_at_5"] - aggregate["current_mrr_at_5"]
+    )
+    assert aggregate["mean_mrr_at_5_improvement"] >= 0.10
+    print(
+        "LENGTH_SENSITIVE_RETRIEVAL_EVALUATION="
+        + json.dumps(
+            {
+                "postgres_database": isolated_postgres.database_name,
+                "ranking_change": "ts_rank_cd normalization 0 (current) versus 1 (candidate)",
+                "metric_definition": {
+                    "precision_at_5": "relevant returned in first 5 divided by 5",
+                    "recall_at_5": "relevant returned in first 5 divided by known relevant count",
+                    "mrr_at_5": "reciprocal rank of first relevant record in first 5, else 0",
+                },
+                "cases": length_diagnostics,
+                "aggregate_mean_metrics": aggregate,
+                "candidate_threshold_met": aggregate["mean_mrr_at_5_improvement"] >= 0.10,
+                "stage_1_candidate_rankings": stage1_candidate_diagnostics,
+                "stage_1_expected_rankings_regressed": not stage1_candidate_has_no_regressions,
+                "candidate_adoption_recommended": (
+                    aggregate["mean_mrr_at_5_improvement"] >= 0.10
+                    and stage1_candidate_has_no_regressions
+                ),
             },
             sort_keys=True,
         )

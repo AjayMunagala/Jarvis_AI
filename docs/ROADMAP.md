@@ -126,6 +126,13 @@ Verification in this v1.3 worktree: `.venv-dev\Scripts\python.exe -m pytest -v t
 
 Verification results supplied by the repository operator (not rerun during the documentation and commit task): 219 Python tests passed; all 18 opt-in PostgreSQL integration tests passed in 18.47 seconds, including the conversation statement-timeout rollback/recovery case against the configured live test environment; 30 frontend tests passed; frontend production build, Python compilation, and `git diff --check` passed. The Python and PostgreSQL suites each reported one existing Starlette/httpx TestClient deprecation warning. Gemini's APPROVE WITH CONDITIONS audit required live PostgreSQL verification, which was subsequently completed. No live OpenAI request was made.
 
+## Core v1.7 Stage 2 — Evaluation-first retrieval quality (evaluation complete; ranking unchanged)
+
+- Extend the opt-in PostgreSQL lexical retrieval evaluation with three deterministic, owner-scoped synthetic length-sensitivity queries. Compare current `ts_rank_cd` normalization 0 with candidate normalization 1 while keeping matching, owner filtering, limit, tie-breakers, and corpus relevance labels fixed. Preserve the 12 Stage 1 expected rankings as regression checks.
+- Measured across the three synthetic queries: current mean Precision@5 0.2, Recall@5 1.0, and MRR@5 0.3333; candidate mean Precision@5 0.2, Recall@5 1.0, and MRR@5 1.0. The mean MRR@5 gain was 0.6667.
+- The candidate regressed the Stage 1 `common` query's expected top-five order. It is therefore not adopted, despite clearing the length-sensitive MRR threshold. Production ranking SQL remains unchanged.
+- These controlled synthetic results demonstrate behavior only for the defined corpus and queries; they do not establish general retrieval quality or justify semantic search. No schema, migration, dependency, API, frontend, or production ranking change is included.
+
 ## Core v0.9 — Persistent Memory and Retrieval Foundation (implemented; verified locally)
 
 - Add an incremental PostgreSQL memory migration and a separate memory repository protocol/adapter. Memory content is strictly bounded, explicitly created/updated/deleted, and never copied automatically from chat messages.

@@ -138,3 +138,11 @@ The following v1.6 verification results were supplied as completed terminal outp
 - Frontend suite: 30 passed; frontend production build, Python compilation, and `git diff --check` passed.
 - Gemini independent audit: APPROVE WITH CONDITIONS; the required live PostgreSQL verification condition was subsequently satisfied.
 - No live OpenAI request was made. These are operator-supplied results, not commands rerun during this documentation/commit task.
+
+## Core v1.7 Stage 2 — Retrieval evaluation handoff
+
+The current uncommitted Stage 2 change is test and documentation only. `integration_tests/test_postgres_integration.py::test_memory_lexical_retrieval_evaluation` retains the 12 Stage 1 current-ranking assertions and measures three deterministic synthetic length-sensitive queries against current `ts_rank_cd` normalization 0 and a normalization 1 candidate. Stable UUIDs/timestamps and owner predicates are used; both rankings are repeated to check determinism, and structured output records per-query order, rank scores, and Precision@5, Recall@5, and MRR@5.
+
+The observed synthetic means were Precision@5 0.2 and Recall@5 1.0 for both candidates; mean MRR@5 was 0.3333 current versus 1.0 candidate, a 0.6667 gain. The candidate nevertheless reordered the Stage 1 `common` query's expected top five, so it is rejected under the no-regression criterion. Do not apply normalization 1 to production ranking based on this evaluation. Results are limited to the synthetic test corpus and do not establish general retrieval quality. Production SQL, API behavior, schema, migrations, dependencies, frontend, retrieval defaults, ownership, deadlines, and untrusted-context handling are unchanged.
+
+Verification observed for this Stage 2 working tree: the targeted opt-in PostgreSQL test passed against the fixture-generated disposable database; the focused offline memory suite passed 26 tests; compileall for `jarvis`, `tests`, and `integration_tests` passed; and `git diff --check` passed. The test run reported one existing Starlette/httpx TestClient deprecation warning. A read-only post-run metadata query confirmed the generated database had been removed. No live OpenAI request was made. The work remains uncommitted.
