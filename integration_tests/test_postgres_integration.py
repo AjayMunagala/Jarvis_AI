@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import tempfile
+from datetime import datetime, timedelta, timezone
 from time import monotonic
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -397,6 +399,172 @@ def test_memory_crud_search_ranking_and_delete(isolated_postgres):
     fetched = repository.get(owner_id, top_relevant.id)
     assert fetched is not None
     assert fetched.category == "project"
+
+
+def test_memory_lexical_retrieval_evaluation(isolated_postgres):
+    """Record deterministic PostgreSQL simple-config lexical-search baselines."""
+    import psycopg
+
+    repository = isolated_postgres.memory_repository()
+    owner_id = TEST_OWNER_ID
+    foreign_owner_id = UUID("72b0c38d-c014-486b-82db-360f95e0ab31")
+    first_timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    # Fixed UUIDs and timestamps make ranking tie-breaks reproducible. The shared
+    # final token supports a result-limit case without changing other query terms.
+    owner_corpus = (
+        ("alpha_adjacent", "alpha beta common"),
+        ("alpha_near", "alpha x beta common"),
+        ("alpha_far", "alpha one two three beta common"),
+        ("alpha_repeated", "alpha beta alpha beta common"),
+        ("alpha_only", "alpha only common"),
+        ("beta_only", "beta only common"),
+        ("violet_single", "violet common"),
+        ("violet_double", "violet violet common"),
+        ("violet_triple", "violet violet violet common"),
+        ("signal_single", "signal common"),
+        ("signal_double", "signal signal common"),
+        ("signal_triple", "signal signal signal common"),
+        ("red_adjacent", "red blue common"),
+        ("red_far", "red one two blue common"),
+        ("red_repeated", "red blue red blue common"),
+        ("cache_plain", "cache key common"),
+        ("cache_punctuation", "CACHE, KEY! common"),
+        ("prefix_only", "alphabeta common"),
+        ("tie_a", "tie breaker common"),
+        ("tie_b", "tie breaker common"),
+        ("owner_isolation", "orchid sentinel common"),
+    )
+    identifiers = {
+        name: UUID(int=0x17000000000000000000000000000000 + index)
+        for index, (name, _) in enumerate(owner_corpus, start=1)
+    }
+    foreign_ids = (
+        UUID(int=0x17000000000000000000000000000101),
+        UUID(int=0x17000000000000000000000000000102),
+    )
+    unowned_ids = (
+        UUID(int=0x17000000000000000000000000000201),
+        UUID(int=0x17000000000000000000000000000202),
+    )
+    labels_by_id = {str(memory_id): label for label, memory_id in identifiers.items()}
+    labels_by_id.update(
+        {str(memory_id): f"foreign_{index}" for index, memory_id in enumerate(foreign_ids, 1)}
+    )
+    labels_by_id.update(
+        {str(memory_id): f"unowned_{index}" for index, memory_id in enumerate(unowned_ids, 1)}
+    )
+
+    rows = []
+    for index, (label, content) in enumerate(owner_corpus, start=1):
+        timestamp_index = 19 if label in {"tie_a", "tie_b"} else index
+        timestamp = first_timestamp + timedelta(minutes=timestamp_index)
+        rows.append((identifiers[label], owner_id, content, "evaluation", None, timestamp, timestamp))
+    for index, memory_id in enumerate(foreign_ids, start=1):
+        content = "orchid sentinel common foreign control" if index == 1 else "alpha beta common foreign control"
+        timestamp = first_timestamp + timedelta(minutes=100 + index)
+        rows.append((memory_id, foreign_owner_id, content, "evaluation", None, timestamp, timestamp))
+    for index, memory_id in enumerate(unowned_ids, start=1):
+        content = "orchid sentinel common unowned control" if index == 1 else "alpha beta common unowned control"
+        timestamp = first_timestamp + timedelta(minutes=110 + index)
+        rows.append((memory_id, None, content, "evaluation", None, timestamp, timestamp))
+
+    with psycopg.connect(isolated_postgres.database_url) as connection:
+        connection.cursor().executemany(
+            """INSERT INTO jarvis_app.memories
+               (id, owner_id, content, category, source_reference, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            rows,
+        )
+
+    cases = (
+        ("single_term_violet", "violet", ("violet_triple", "violet_double", "violet_single"), 100),
+        ("term_frequency_signal", "signal", ("signal_triple", "signal_double", "signal_single"), 100),
+        (
+            "multi_term_and_cover_density", "alpha beta",
+            ("alpha_repeated", "alpha_adjacent", "alpha_near", "alpha_far"), 100,
+        ),
+        ("proximity_red_blue", "red blue", ("red_repeated", "red_adjacent", "red_far"), 100),
+        ("punctuation_in_document", "cache key", ("cache_punctuation", "cache_plain"), 100),
+        ("case_and_punctuation_in_query", "CACHE, KEY!", ("cache_punctuation", "cache_plain"), 100),
+        ("prefix_is_not_prefix_search", "alph", (), 100),
+        ("zero_match", "unfindablequartz", (), 100),
+        ("equal_score_uuid_tie_break", "tie breaker", ("tie_a", "tie_b"), 100),
+        ("owner_isolation", "orchid sentinel", ("owner_isolation",), 100),
+        (
+            "five_result_limit_and_timestamps", "common",
+            ("owner_isolation", "tie_a", "tie_b", "prefix_only", "cache_punctuation"), 5,
+        ),
+        (
+            "repeat_query_determinism", "alpha beta",
+            ("alpha_repeated", "alpha_adjacent", "alpha_near", "alpha_far"), 100,
+        ),
+    )
+    assert len(cases) == 12
+
+    diagnostics = []
+    actual_by_case = {}
+    allowed_ids = set(identifiers.values())
+    for case_name, query, expected_labels, limit in cases:
+        page = repository.search(owner_id, query, limit=limit)
+        actual_ids = tuple(item.id for item in page.items)
+        expected_ids = tuple(identifiers[label] for label in expected_labels)
+        assert actual_ids == expected_ids, f"{case_name}: query={query!r}"
+        assert set(actual_ids) <= allowed_ids
+        assert len(page.items) <= limit
+        actual_by_case[case_name] = actual_ids
+
+        with psycopg.connect(isolated_postgres.database_url) as connection:
+            scored_rows = connection.execute(
+                """SELECT id::text,
+                          ts_rank_cd(to_tsvector('simple', content),
+                                     plainto_tsquery('simple', %s)) AS score
+                   FROM jarvis_app.memories
+                   WHERE owner_id = %s
+                     AND to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)
+                   ORDER BY score DESC, updated_at DESC, id ASC
+                   LIMIT %s""",
+                (query, owner_id, query, limit),
+            ).fetchall()
+        diagnostics.append({
+            "case": case_name,
+            "query": query,
+            "expected": list(expected_labels),
+            "actual": [labels_by_id[str(memory_id)] for memory_id in actual_ids],
+            "total": page.total,
+            "limit": page.limit,
+            "has_more": page.has_more,
+            "rank_scores": [
+                {"record": labels_by_id[memory_id], "ts_rank_cd": float(score)}
+                for memory_id, score in scored_rows
+            ],
+        })
+
+    assert (
+        actual_by_case["repeat_query_determinism"]
+        == actual_by_case["multi_term_and_cover_density"]
+    )
+    assert diagnostics[8]["rank_scores"][0]["ts_rank_cd"] == pytest.approx(
+        diagnostics[8]["rank_scores"][1]["ts_rank_cd"]
+    )
+    limited = next(item for item in diagnostics if item["case"] == "five_result_limit_and_timestamps")
+    assert limited["total"] == len(owner_corpus)
+    assert limited["has_more"] is True
+    assert len(limited["actual"]) == 5
+
+    print(
+        "LEXICAL_RETRIEVAL_BASELINE="
+        + json.dumps(
+            {
+                "postgres_database": isolated_postgres.database_name,
+                "owner_record_count": len(owner_corpus),
+                "foreign_control_count": len(foreign_ids),
+                "unowned_control_count": len(unowned_ids),
+                "cases": diagnostics,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def test_chat_creates_continues_and_reads_history_across_pages(isolated_postgres):
