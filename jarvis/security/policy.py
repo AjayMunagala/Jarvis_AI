@@ -44,6 +44,9 @@ class Capability(StrEnum):
     HEALTH_READ = "health.read"
     HEALTH_DIAGNOSTIC_RUN = "health.diagnostic.run"
     SECURITY_QUARANTINE_FILE = "security.quarantine.file"
+    # Finance & external data intelligence (v3.7): analytical personal finance intelligence.
+    FINANCE_READ = "finance.read"
+    FINANCE_WRITE = "finance.write"
     EXTERNAL_ACTION_EXECUTE = "external_action.execute"
 
 
@@ -75,6 +78,8 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.HEALTH_READ,
     Capability.HEALTH_DIAGNOSTIC_RUN,
     Capability.SECURITY_QUARANTINE_FILE,
+    Capability.FINANCE_READ,
+    Capability.FINANCE_WRITE,
 })
 
 

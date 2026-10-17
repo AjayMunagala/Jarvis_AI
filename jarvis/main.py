@@ -25,6 +25,7 @@ from jarvis.api.routes.knowledge import router as knowledge_router
 from jarvis.api.routes.research import router as research_router
 from jarvis.api.routes.scheduler import router as scheduler_router
 from jarvis.api.routes.health_diagnostic import router as health_diagnostic_router
+from jarvis.api.routes.finance import router as finance_router
 from jarvis.assistant.service import AssistantService
 from jarvis.assistant.stores import MemoryAssistantStore, PostgresAssistantStore
 from jarvis.workflow.service import WorkflowService
@@ -37,6 +38,8 @@ from jarvis.scheduler.service import SchedulerService
 from jarvis.scheduler.stores import MemorySchedulerStore, PostgresSchedulerStore
 from jarvis.health.service import HealthService
 from jarvis.health.stores import MemoryHealthStore, PostgresHealthStore
+from jarvis.finance.service import FinanceService
+from jarvis.finance.stores import MemoryFinanceStore, PostgresFinanceStore
 from jarvis.audit.service import ApprovalService, AuditService
 from jarvis.audit.stores import (
     MemoryApprovalStore, MemoryAuditStore, PostgresApprovalStore, PostgresAuditStore,
@@ -149,6 +152,7 @@ def create_app(
         research_store = PostgresResearchStore(url, **timeouts)
         scheduler_store = PostgresSchedulerStore(url, **timeouts)
         health_store = PostgresHealthStore(url, **timeouts)
+        finance_store = PostgresFinanceStore(url, **timeouts)
     else:
         assistant_store = MemoryAssistantStore()
         workflow_store = MemoryWorkflowStore()
@@ -156,6 +160,7 @@ def create_app(
         research_store = MemoryResearchStore()
         scheduler_store = MemorySchedulerStore()
         health_store = MemoryHealthStore()
+        finance_store = MemoryFinanceStore()
     app.state.assistant_service = AssistantService(assistant_store, audit_service=app.state.audit_service)
     app.state.workflow_service = WorkflowService(
         workflow_store,
@@ -177,6 +182,10 @@ def create_app(
     app.state.health_service = HealthService(
         health_store,
         repo_root=repo_service.repo_root,
+        audit_service=app.state.audit_service,
+    )
+    app.state.finance_service = FinanceService(
+        finance_store,
         audit_service=app.state.audit_service,
     )
 
@@ -201,6 +210,7 @@ def create_app(
     app.include_router(knowledge_router)
     app.include_router(research_router)
     app.include_router(scheduler_router)
+    app.include_router(finance_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
