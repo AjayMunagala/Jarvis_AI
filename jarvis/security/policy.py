@@ -34,6 +34,9 @@ class Capability(StrEnum):
     # Knowledge intelligence & context continuity (v3.3): hybrid retrieval and context budgeting.
     KNOWLEDGE_READ = "knowledge.read"
     KNOWLEDGE_WRITE = "knowledge.write"
+    # Research & document intelligence (v3.4): document parsing and synthesis.
+    RESEARCH_READ = "research.read"
+    RESEARCH_WRITE = "research.write"
     EXTERNAL_ACTION_EXECUTE = "external_action.execute"
 
 
@@ -58,6 +61,8 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.WORKFLOW_WRITE,
     Capability.KNOWLEDGE_READ,
     Capability.KNOWLEDGE_WRITE,
+    Capability.RESEARCH_READ,
+    Capability.RESEARCH_WRITE,
 })
 
 
