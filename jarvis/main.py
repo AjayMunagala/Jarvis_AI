@@ -162,11 +162,6 @@ def create_app(
         health_store = MemoryHealthStore()
         finance_store = MemoryFinanceStore()
     app.state.assistant_service = AssistantService(assistant_store, audit_service=app.state.audit_service)
-    app.state.workflow_service = WorkflowService(
-        workflow_store,
-        audit_service=app.state.audit_service,
-        assistant_service=app.state.assistant_service,
-    )
     app.state.knowledge_service = KnowledgeService(
         knowledge_store,
         audit_service=app.state.audit_service,
@@ -187,6 +182,16 @@ def create_app(
     app.state.finance_service = FinanceService(
         finance_store,
         audit_service=app.state.audit_service,
+    )
+    app.state.workflow_service = WorkflowService(
+        workflow_store,
+        audit_service=app.state.audit_service,
+        assistant_service=app.state.assistant_service,
+        knowledge_service=app.state.knowledge_service,
+        research_service=app.state.research_service,
+        scheduler_service=app.state.scheduler_service,
+        health_service=app.state.health_service,
+        finance_service=app.state.finance_service,
     )
 
     app.add_middleware(

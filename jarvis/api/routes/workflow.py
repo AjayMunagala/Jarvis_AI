@@ -4,6 +4,7 @@ Provides DAG workflow definitions, runs, step inspection, and cancellation.
 Owner-isolated and capability-checked.
 """
 
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -209,3 +210,38 @@ async def cancel_workflow_run(
             detail="The requested workflow run was not found.",
         )
     return detail
+
+
+@router.post(
+    "/runs/{run_id}/compensate",
+    response_model=dict[str, Any],
+    responses=_ERRORS,
+)
+async def compensate_workflow_run(
+    request: Request,
+    run_id: UUID,
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> dict[str, Any]:
+    owner = _owner(owner_id)
+    enforce_capability(request, owner, Capability.WORKFLOW_WRITE)
+    try:
+        return await run_in_threadpool(_service(request).compensate_run, owner, run_id)
+    except WorkflowExecutionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/recovery/dead-letters",
+    response_model=list[dict[str, Any]],
+    responses=_ERRORS,
+)
+async def list_dead_letters(
+    request: Request,
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> list[dict[str, Any]]:
+    owner = _owner(owner_id)
+    enforce_capability(request, owner, Capability.WORKFLOW_READ)
+    return await run_in_threadpool(_service(request).get_dead_letters, owner)
