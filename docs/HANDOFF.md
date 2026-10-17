@@ -505,3 +505,37 @@ Notes on test evidence:
 2. **In-Memory Patch Validation Only:** Patch validation evaluates preimages and performs simulated postimage AST syntax parsing in-memory. Patches are never applied automatically (`repository_modified = False`).
 3. **Single-Owner Scope:** Verification routes are gated by single-owner bearer token authentication and server-side capability policies (`Capability.VERIFY_READ`, `Capability.VERIFY_EXECUTE`).
 4. **Git State:** All changes reside in the working directory on branch `antigravity/jarvis-v2.5-verification`. No commits, merges, or pushes were performed.
+
+## Core v2.6 — Browser Intelligence & Web Automation (implemented; uncommitted; owner acceptance pending)
+
+### Baseline and working copy
+
+- Started from `jarvis/integration-acceptance-v25` at `5d615fcbbae7665ed10c868ae5fa54f68b5a3dc4` (clean). Work is on `claude/jarvis-v2.6-browser-intelligence` in the separate worktree `D:\Project_Jarvis_worktrees\browser-v26`; the shared checkout was not modified. Nothing is committed, pushed, or merged.
+- v2.4 advisory-only patches and v2.5 `verification_execution_enabled=False` are unchanged; the v2.5 contracts are reused, not modified.
+
+### Implemented
+
+See `docs/BROWSER_INTELLIGENCE.md` for the design, configuration, API, security boundaries, manual testing, and deferred work. Shared files touched minimally: `jarvis/core/config.py` (browser settings and validation), `jarvis/security/policy.py` (`browser.read`, `browser.interact`), `jarvis/main.py` (service and router wiring, shutdown cleanup), `frontend/src/App.tsx` (Browser navigation item), `frontend/src/services/api.ts` (browser client and safe error details), docs, `.env.example`.
+
+### Verification performed (Windows, Python 3.12.10, Node 24)
+
+- `.venv-dev\Scripts\python.exe -m pytest tests`: **621 passed, 17 skipped**, exit 0 (baseline 537 passed, 17 skipped; the 17 skips are pre-existing Windows symlink-privilege skips). New: `tests/test_browser_core.py` (55) and `tests/test_browser_api.py` (29), including one real-network test of the HTTP provider against a local loopback HTTP server started by the test.
+- v2.4/v2.5/v2.3 regression subset (`test_verification_service.py`, coding and repository suites): 174 passed, 17 skipped.
+- `pytest integration_tests` without opt-in: 11 passed, 22 skipped (PostgreSQL not exercised).
+- `compileall` and `git diff --check`: exit 0.
+- Frontend: `tsc --noEmit` exit 0; `npx vitest run` **90 passed** (baseline 77; new `BrowserPanel.test.tsx` and `browser-api.test.ts`); `npm run build` exit 0; `npx playwright test` **10 passed** (existing scenarios; no browser-workspace E2E scenario was added because the E2E harness runs without an owner token).
+- Live process: a real Uvicorn server with the mock browser provider answered `/health` 200, rejected anonymous `/browser/sessions` with 401, returned `approval_required` for a submit control, and blocked navigation to its own loopback API.
+- **Not verified (initial run):** the Playwright adapter against a real Chromium; any external website; PostgreSQL; live LLM providers. Real Chromium was verified in the follow-up below.
+
+### Decisions requiring owner authorization
+
+1. Adding the optional `browser = ["playwright==1.64.0"]` extra and installing it into `.venv-dev` (and possibly `python -m playwright install chromium`).
+2. Whether a future phase should add an approval-and-execute path for consequential actions (none exists in v2.6).
+3. Whether to enable `JARVIS_BROWSER_CHECKS_ENABLED` in any environment.
+
+### v2.6 follow-up — real Chromium and DNS-rebinding validation (owner-authorized)
+
+- Dependency: `pyproject.toml` optional extra `browser = ["playwright==1.64.0"]`; installed into `.venv-dev` only (`playwright-1.64.0`, `greenlet-3.5.6`, `pyee-14.0.0`). No browser binaries were downloaded: the required `chromium-1248`/headless shell 1248 were already present.
+- Real Chromium: `tests/test_browser_chromium.py` (8 tests) drives headless Chromium 156.0.8078.4 against a local loopback server: startup/shutdown, JavaScript-rendered DOM and accessible labels, redirect allowed/blocked, type/select/click/scroll, PNG screenshot, consequential submit never sent (server saw no POST), subresource blocking (metadata image and disallowed script aborted before reaching the server), navigation timeout, browser disconnect, and per-session cookie isolation. The Playwright adapter now reports a policy-blocked redirect hop as `blocked` rather than a generic failure.
+- DNS rebinding: the HTTP provider's default transport validates and connects to the same resolved address (`jarvis/browser/guarded_transport.py`); `URLPolicy.allowed_addresses` is shared by URL checks and connection-time checks. `tests/test_browser_rebinding.py` (10 tests; fake network backend plus real loopback server) covers rebinding after check, mixed answers, redirects to rebinding and internal hosts, legitimate redirect chains, Host/SNI preservation, literal private addresses, and Unix sockets. A negative control showed the unguarded pool connecting where the guarded transport refuses.
+- Remaining: Chromium performs its own DNS resolution, so the Playwright provider applies the policy per request URL but does not pin the connected address. Consequential actions remain unexecuted; no approval-and-execute path exists.

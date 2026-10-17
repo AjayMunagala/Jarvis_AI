@@ -49,6 +49,21 @@ class Settings(BaseSettings):
     verification_execution_enabled: bool = False
     verification_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
     verification_max_output_bytes: int = Field(default=32768, ge=1024, le=131072)
+    # Browser intelligence (v2.6). Off by default; consequential actions are never executed.
+    browser_enabled: bool = False
+    browser_provider: Literal["mock", "http", "playwright"] = "http"
+    browser_allow_private_network: bool = False
+    browser_allowed_domains: str = Field(default="", max_length=2000)
+    browser_blocked_domains: str = Field(default="", max_length=2000)
+    browser_max_sessions: int = Field(default=2, ge=1, le=4)
+    browser_session_ttl_seconds: int = Field(default=600, ge=60, le=3600)
+    browser_max_navigations: int = Field(default=15, ge=1, le=50)
+    browser_max_actions: int = Field(default=40, ge=1, le=100)
+    browser_navigation_timeout_seconds: float = Field(default=15.0, ge=1.0, le=60.0)
+    browser_max_page_bytes: int = Field(default=2_000_000, ge=65_536, le=5_000_000)
+    browser_max_text_chars: int = Field(default=20_000, ge=1_000, le=50_000)
+    browser_max_elements: int = Field(default=150, ge=10, le=300)
+    browser_checks_enabled: bool = False
 
     @model_validator(mode="after")
     def validate_provider_configuration(self) -> "Settings":
@@ -108,6 +123,18 @@ class Settings(BaseSettings):
             raise ValueError(
                 "JARVIS_MEMORY_RETRIEVAL_ENABLED=true requires JARVIS_PERSISTENCE_ENABLED=true."
             )
+        if self.browser_enabled:
+            # The browser makes outbound requests on the owner's behalf, so it is
+            # never available anonymously.
+            token = self.local_auth_token.get_secret_value() if self.local_auth_token else ""
+            if len(token) < 32 or self.owner_id is None or self.owner_id.int == 0:
+                raise ValueError(
+                    "JARVIS_BROWSER_ENABLED=true requires JARVIS_LOCAL_AUTH_TOKEN and JARVIS_OWNER_ID."
+                )
+        if self.browser_allow_private_network and self.environment == "production":
+            raise ValueError("JARVIS_BROWSER_ALLOW_PRIVATE_NETWORK must not be enabled in production.")
+        if self.browser_checks_enabled and not self.browser_enabled:
+            raise ValueError("JARVIS_BROWSER_CHECKS_ENABLED=true requires JARVIS_BROWSER_ENABLED=true.")
         return self
 
 

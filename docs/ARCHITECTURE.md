@@ -213,3 +213,7 @@ The React Coding workspace integrates one-click in-memory validation for propose
 - Preimage hash validation facts and in-memory simulated AST parsing results.
 - Honest reporting of blocked unit tests and explicit limitation disclosures.
 - Confirmation that repository files were not modified (`repository_modified = False`).
+
+## Core v2.6 — Browser intelligence
+
+`jarvis/browser/` keeps responsibilities separate: `url_policy.py` (destination checks), `providers.py` (mock, HTTP, optional Playwright behind one `BrowserProvider` interface), `extraction.py` (bounded standard-library DOM extraction; values of fields are never captured), `actions.py` (deterministic classification), `service.py` (sessions, limits, enforcement, observation, audit), `research.py` (sources vs. verbatim observations vs. labelled model interpretation), and `checks.py` (v2.5 verification contracts). `jarvis/api/routes/browser.py` exposes authenticated routes guarded by `browser.read`, `browser.interact`, and `verify.read`. Permission and safety decisions run in trusted code before any provider call; page content never influences policy. Consequential actions are never executed. The service is constructed at startup without opening a browser and all sessions are closed on shutdown. Full design, configuration, and limitations: `docs/BROWSER_INTELLIGENCE.md`.

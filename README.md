@@ -75,6 +75,10 @@ When persistence is enabled, `/chat` assembles a bounded, attributed context for
 
 Apply migration `0005_memory_source_kind.sql` (`database\install_db.bat` applies pending migrations) before running this version against an existing database. Tests: `.venv-dev\Scripts\python.exe -m pytest tests/test_memory_context.py tests/test_memory_retrieval_evaluation.py -v` (in-process doubles only). Live checks are in the opt-in PostgreSQL integration suite.
 
+## Core v2.6 — Browser intelligence (implemented; owner acceptance pending)
+
+`JARVIS_BROWSER_ENABLED=true` (with the owner token configured) enables a bounded browser workspace: open and observe pages as untrusted evidence, follow links, type into non-sensitive fields, select options, capture screenshots (mock/Playwright), run evidence-backed browser checks, and research supplied URLs. Submissions, payments, deletions, and other consequential actions are never performed; they are reported as `approval_required`. Providers: `mock` (offline demo pages), `http` (default when enabled; no JavaScript; connection-time DNS-rebinding protection), and `playwright` (optional `browser` extra, verified against real headless Chromium). See `docs/BROWSER_INTELLIGENCE.md`.
+
 ## Prerequisites
 
 - Windows 10/11 and Python 3.11 or newer (developed with Python 3.12.10).

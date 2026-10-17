@@ -237,6 +237,13 @@ Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remain
 - Integrate one-click patch verification into the React Coding workspace (`CodingPanel.tsx`) with accessible report cards, fact lists, and distinct visual badges for all 9 states.
 - Verification evidence: full Python test suite passed (537 passed, 17 skipped, 0 failed), frontend Vitest suite passed (77 passed, 0 failed), Playwright E2E passed (10 passed, 0 failed), `compileall` passed with 0 errors, and frontend production build succeeded.
 
+## Core v2.6 — Browser Intelligence & Web Automation (implemented; owner acceptance pending)
+
+- Add `jarvis/browser/`: replaceable providers (deterministic mock, `httpx` HTTP provider without JavaScript, optional lazily imported Playwright adapter), bounded owner-scoped sessions, standard-library DOM extraction with server-assigned element ids, deterministic action classification, and an audit trail.
+- Enforce URL policy (http/https only, no credentials, public addresses only, redirect re-checks; Playwright subresource interception), element/observation staleness checks, sensitive-field protection, limits, loop detection, and redaction. Consequential actions are never executed: they are recorded as `approval_required`.
+- Add `/browser` routes with new `browser.read` / `browser.interact` capabilities, evidence-first research over supplied URLs, and browser checks using the accepted v2.5 `VerificationReport` contracts (execution gated by `JARVIS_BROWSER_CHECKS_ENABLED`, default false). Add a frontend Browser workspace.
+- Follow-up: optional `browser` extra (`playwright==1.64.0`, owner-authorized) verified against real headless Chromium; HTTP-provider DNS-rebinding protection enforces the policy at connection time. Details: `docs/BROWSER_INTELLIGENCE.md`.
+
 ## Later milestones
 
 1. Identity and memory governance: authenticated users, explicit ownership, access controls, retention/export/revocation, and user-visible memory controls before exposing memory in shared deployments.

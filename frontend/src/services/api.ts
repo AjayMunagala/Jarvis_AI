@@ -145,6 +145,15 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
     throw new Error('Workspace locked. Enter your local access token again.')
   }
   if (response.status === 204) return undefined as T
+  if (!response.ok && path.startsWith('/browser')) {
+    // Browser routes return short, sanitized policy messages that explain blocks.
+    let detail = ''
+    try {
+      const data = await response.clone().json() as { detail?: unknown }
+      if (typeof data.detail === 'string') detail = data.detail.slice(0, 300)
+    } catch { /* fall through to the generic message */ }
+    throw new Error(detail || 'The browser request failed.')
+  }
   if (!response.ok) {
     if (path === '/coding/analyze') {
       const messages: Record<number, string> = {
@@ -202,6 +211,7 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
     throw new Error('JARVIS could not complete that request. Please try again.')
   }
   try {
+    if (path.startsWith('/browser/') && path.includes('/screenshots/')) return await response.blob() as T
     return await response.json() as T
   } catch {
     throw new Error('JARVIS returned an unreadable response. Please try again.')
@@ -454,4 +464,160 @@ export function verifyPatch(body: VerifyPatchRequest, auth?: ApiAuth): Promise<V
 
 export function getVerificationProfiles(auth?: ApiAuth): Promise<VerificationProfilesResponse> {
   return request<VerificationProfilesResponse>('/verification/profiles', undefined, false, auth)
+}
+
+// ------------------------------------------------------------ browser (v2.6)
+
+export type BrowserActionName = 'navigate' | 'back' | 'reload' | 'observe' | 'click' | 'type' | 'select' | 'scroll' | 'screenshot'
+export type BrowserActionOutcome = 'performed' | 'blocked' | 'approval_required' | 'failed' | 'unsupported' | 'timed_out'
+export interface BrowserCapabilities { javascript: boolean; interaction: boolean; screenshots: boolean; console: boolean; network_diagnostics: boolean }
+export interface BrowserLimits { max_navigations: number; max_actions: number; navigation_timeout_seconds: number; session_ttl_seconds: number; max_text_chars: number; max_elements: number }
+export interface BrowserElement {
+  element_id: string
+  kind: 'link' | 'button' | 'submit' | 'text_input' | 'textarea' | 'select' | 'checkbox' | 'radio' | 'other'
+  tag: string
+  label: string
+  text: string
+  href: string | null
+  input_type: string | null
+  name: string | null
+  form_id: string | null
+  required: boolean
+  disabled: boolean
+  sensitive: boolean
+  options: { value: string; label: string; selected: boolean }[]
+}
+export interface BrowserObservation {
+  observation_id: string
+  session_id: string | null
+  sequence: number
+  url: string
+  title: string
+  retrieved_at: string
+  http_status: number | null
+  content_sha256: string
+  text: string
+  text_truncated: boolean
+  headings: string[]
+  elements: BrowserElement[]
+  elements_truncated: boolean
+  forms: { form_id: string; action: string | null; method: 'get' | 'post'; label: string; element_ids: string[] }[]
+  console_errors: { level: 'error' | 'warning'; message: string }[]
+  network_failures: { url: string; method: string; status: number | null; error: string; resource_type: string }[]
+  provider: 'mock' | 'http' | 'playwright'
+  javascript_executed: boolean
+  redaction_count: number
+  limitations: string[]
+  untrusted: true
+}
+export interface BrowserActionRecord {
+  action_id: string
+  sequence: number
+  action: BrowserActionName
+  classification: 'observe' | 'navigate' | 'interact' | 'consequential' | 'blocked'
+  outcome: BrowserActionOutcome
+  reason: string
+  element_id: string | null
+  element_label: string
+  started_at: string
+  duration_ms: number
+  url_before: string | null
+  url_after: string | null
+  transition: 'none' | 'same_page' | 'navigated' | 'unexpected_navigation'
+  resulting_observation_id: string | null
+  screenshot_id: string | null
+}
+export interface BrowserSession {
+  session_id: string
+  state: 'active' | 'closed' | 'expired' | 'failed'
+  provider: 'mock' | 'http' | 'playwright'
+  capabilities: BrowserCapabilities
+  created_at: string
+  expires_at: string
+  current_url: string | null
+  navigations_used: number
+  actions_used: number
+  limits: BrowserLimits
+  last_observation: BrowserObservation | null
+  actions: BrowserActionRecord[]
+  screenshots: { screenshot_id: string; observation_id: string | null; captured_at: string; mime_type: 'image/png'; byte_size: number; sha256: string }[]
+  pending_approvals: BrowserActionRecord[]
+  failure_reason: string | null
+  execution_of_consequential_actions: 'disabled'
+}
+export interface BrowserStatus {
+  enabled: boolean
+  provider: 'mock' | 'http' | 'playwright'
+  provider_available: boolean
+  provider_detail: string
+  capabilities: BrowserCapabilities
+  limits: BrowserLimits
+  private_network_allowed: boolean
+  allowed_domains: string[]
+  consequential_actions: 'approval_required'
+}
+export interface BrowserActionInput {
+  action: BrowserActionName
+  element_id?: string
+  observation_id?: string
+  text?: string
+  option?: string
+  direction?: 'up' | 'down'
+  url?: string
+}
+export interface BrowserActionResponse { record: BrowserActionRecord; session: BrowserSession }
+export interface ResearchSource {
+  source_id: string
+  requested_url: string
+  final_url: string | null
+  title: string
+  status: 'retrieved' | 'failed' | 'blocked' | 'timed_out'
+  failure_reason: string | null
+  retrieved_at: string
+  http_status: number | null
+  content_sha256: string | null
+  excerpt: string
+  excerpt_truncated: boolean
+  matched_terms: string[]
+  javascript_executed: boolean
+  provider: string
+}
+export interface ResearchReport {
+  research_id: string
+  question: string
+  started_at: string
+  completed_at: string
+  sources: ResearchSource[]
+  observations: { source_id: string; quote: string; origin: 'page_text' }[]
+  interpretation: { text: string; origin: 'model'; provider: string; demo: boolean; cited_source_ids: string[]; unknown_citation_count: number; verified: false } | null
+  limitations: string[]
+  content_untrusted: true
+}
+
+export function getBrowserStatus(auth?: ApiAuth): Promise<BrowserStatus> {
+  return request<BrowserStatus>('/browser/status', undefined, false, auth)
+}
+
+export function createBrowserSession(url: string | undefined, auth?: ApiAuth): Promise<BrowserSession> {
+  return request<BrowserSession>('/browser/sessions', json(url ? { url } : {}), false, auth)
+}
+
+export function getBrowserSession(sessionId: string, auth?: ApiAuth): Promise<BrowserSession> {
+  return request<BrowserSession>(`/browser/sessions/${encodeURIComponent(sessionId)}`, undefined, false, auth)
+}
+
+export function closeBrowserSession(sessionId: string, auth?: ApiAuth): Promise<BrowserSession> {
+  return request<BrowserSession>(`/browser/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' }, false, auth)
+}
+
+export function browserAction(sessionId: string, input: BrowserActionInput, auth?: ApiAuth): Promise<BrowserActionResponse> {
+  return request<BrowserActionResponse>(`/browser/sessions/${encodeURIComponent(sessionId)}/actions`, json(input), false, auth)
+}
+
+export function getBrowserScreenshot(sessionId: string, screenshotId: string, auth?: ApiAuth): Promise<Blob> {
+  return request<Blob>(`/browser/sessions/${encodeURIComponent(sessionId)}/screenshots/${encodeURIComponent(screenshotId)}`, undefined, false, auth)
+}
+
+export function runBrowserResearch(body: { question: string; urls: string[]; include_model_interpretation: boolean }, auth?: ApiAuth): Promise<ResearchReport> {
+  return request<ResearchReport>('/browser/research', json(body), false, auth)
 }

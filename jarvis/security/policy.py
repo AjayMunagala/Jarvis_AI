@@ -15,6 +15,9 @@ class Capability(StrEnum):
     REPO_READ = "repo.read"
     VERIFY_READ = "verify.read"
     VERIFY_EXECUTE = "verify.execute"
+    # Browser reading (observe, navigate, research) and non-consequential interaction.
+    BROWSER_READ = "browser.read"
+    BROWSER_INTERACT = "browser.interact"
     EXTERNAL_ACTION_EXECUTE = "external_action.execute"
 
 
@@ -26,6 +29,8 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.CONVERSATION_WRITE,
     Capability.REPO_READ,
     Capability.VERIFY_READ,
+    Capability.BROWSER_READ,
+    Capability.BROWSER_INTERACT,
 })
 
 
