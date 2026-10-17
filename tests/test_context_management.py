@@ -179,7 +179,8 @@ def test_update_proposals_require_owner_decision_and_never_write_automatically()
         service.decide(OWNER, proposal.proposal_id, accept=True)
     assert raised.value.status_code == 503 and service.list(OWNER, status="proposed")
     accepted = service.decide(OWNER, proposal.proposal_id, accept=True, applier=written.append)
-    assert accepted.status == "accepted" and written == [proposal.model_copy(update={})]
+    assert accepted.status == "accepted" and [item.proposal_id for item in written] == [proposal.proposal_id]
+    assert written[0].status == "applying"  # the applier only ever sees a claimed proposal
     with pytest.raises(UpdateError) as raised:
         service.decide(OWNER, proposal.proposal_id, accept=False)
     assert raised.value.status_code == 409

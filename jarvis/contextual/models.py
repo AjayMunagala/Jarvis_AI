@@ -131,8 +131,13 @@ class MemoryUpdateProposal(Frozen):
     fact: Fact | None = None
     source_ref: StrictStr = Field(min_length=1, max_length=300)
     reliability: Reliability
-    status: Literal["proposed", "accepted", "rejected"] = "proposed"
+    # "applying" = the owner accepted an ``add`` and the memory write is in
+    # progress (or was interrupted); it is never reported as accepted until the
+    # write is confirmed.
+    status: Literal["proposed", "applying", "accepted", "rejected"] = "proposed"
     reason: StrictStr = Field(max_length=500)
     conflicts_with: tuple[StrictStr, ...] = ()
     created_at: StrictStr
     decided_at: StrictStr | None = None
+    applied_ref: StrictStr | None = Field(default=None, max_length=300)
+    last_error: StrictStr | None = Field(default=None, max_length=200)
