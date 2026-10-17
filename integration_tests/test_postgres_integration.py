@@ -1409,6 +1409,105 @@ def test_unreachable_postgres_connection_is_sanitized(isolated_postgres):
 # --- Memory/context phase: source kinds, document de-duplication, context search ---
 
 
+def test_memory_source_kind_upgrade_preserves_pre_0005_rows(isolated_postgres):
+    """Exercise 0005 against rows stored before the source-kind column exists."""
+    import psycopg
+    from psycopg import sql
+
+    generated_name = f"jarvis_it_{uuid4().hex}"
+    assert GENERATED_DATABASE_RE.fullmatch(generated_name)
+    config = runner.DatabaseConfig(
+        host=isolated_postgres.migration_config.host,
+        port=isolated_postgres.migration_config.port,
+        database=generated_name,
+        username=isolated_postgres.migration_config.username,
+        maintenance_database="postgres",
+        pg_bin_dir=isolated_postgres.migration_config.pg_bin_dir,
+        pgpass_file=isolated_postgres.migration_config.pgpass_file,
+        backup_dir=isolated_postgres.migration_config.backup_dir,
+    )
+    database_url = isolated_postgres.database_url.rsplit("/", 1)[0] + "/" + generated_name
+    rows = [
+        (UUID(int=7101), TEST_OWNER_ID, "Previously saved memory", "notes", None),
+        (UUID(int=7102), UUID(int=7100), "Previously imported document", None, "legacy.md"),
+        (UUID(int=7103), None, "Previously unowned memory", "legacy", None),
+    ]
+    created = False
+    try:
+        with psycopg.connect(isolated_postgres.admin_url, connect_timeout=3, autocommit=True) as admin:
+            if admin.execute("SELECT 1 FROM pg_database WHERE datname = %s", (generated_name,)).fetchone():
+                pytest.fail("Generated source-kind upgrade database name unexpectedly exists.", pytrace=False)
+            admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(generated_name)))
+            created = True
+
+        with tempfile.TemporaryDirectory(prefix="jarvis-pre-0005-") as temporary:
+            database_dir = Path(temporary)
+            scripts = database_dir / "scripts"
+            scripts.mkdir()
+            for migration in sorted(runner.MIGRATIONS_DIR.glob("000[1234]_*.sql")):
+                shutil.copy2(migration, scripts / migration.name)
+            assert len(list(scripts.glob("*.sql"))) == 4
+            if runner.install(config, database_dir=database_dir) != 0:
+                pytest.fail("Could not initialize the disposable pre-0005 database.", pytrace=False)
+            with psycopg.connect(database_url, connect_timeout=3) as connection:
+                assert connection.execute(
+                    "SELECT 1 FROM information_schema.columns WHERE table_schema = 'jarvis_app' "
+                    "AND table_name = 'memories' AND column_name = 'source_kind'"
+                ).fetchone() is None
+                for row in rows:
+                    connection.execute(
+                        "INSERT INTO jarvis_app.memories (id, owner_id, content, category, source_reference) "
+                        "VALUES (%s, %s, %s, %s, %s)", row,
+                    )
+            shutil.copy2(runner.MIGRATIONS_DIR / "0005_memory_source_kind.sql", scripts)
+            if runner.install(config, database_dir=database_dir) != 0:
+                pytest.fail("Could not apply 0005 to the disposable upgrade database.", pytrace=False)
+            assert runner.verify(config, database_dir=database_dir) == 0
+
+        with psycopg.connect(database_url, connect_timeout=3) as connection:
+            upgraded = connection.execute(
+                "SELECT id, owner_id, content, category, source_reference, source_kind "
+                "FROM jarvis_app.memories ORDER BY id"
+            ).fetchall()
+            assert upgraded == [(*row, "memory") for row in rows]
+            assert connection.execute(
+                "SELECT is_nullable, column_default FROM information_schema.columns "
+                "WHERE table_schema = 'jarvis_app' AND table_name = 'memories' AND column_name = 'source_kind'"
+            ).fetchone() == ("NO", "'memory'::text")
+            index = connection.execute(
+                "SELECT indexdef FROM pg_indexes WHERE schemaname = 'jarvis_app' "
+                "AND indexname = 'memories_owner_document_digest_idx'"
+            ).fetchone()
+            assert index is not None
+            assert all(fragment in index[0] for fragment in ("owner_id", "md5(content)", "source_kind", "document", "IS NOT NULL"))
+            with pytest.raises(psycopg.errors.CheckViolation):
+                with connection.transaction():
+                    connection.execute(
+                        "INSERT INTO jarvis_app.memories (id, content, source_kind) VALUES (%s, %s, %s)",
+                        (UUID(int=7104), "Invalid source kind", "unsupported"),
+                    )
+    except psycopg.Error as exc:
+        pytest.fail(f"Disposable source-kind upgrade failed ({type(exc).__name__}); details suppressed.", pytrace=False)
+    finally:
+        if created:
+            if not GENERATED_DATABASE_RE.fullmatch(generated_name):
+                raise RuntimeError("Refusing cleanup without a generated integration-test name.")
+            try:
+                with psycopg.connect(isolated_postgres.admin_url, connect_timeout=3, autocommit=True) as admin:
+                    admin.execute(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = %s AND pid <> pg_backend_pid()", (generated_name,),
+                    )
+                    admin.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(generated_name)))
+                    if admin.execute("SELECT 1 FROM pg_database WHERE datname = %s", (generated_name,)).fetchone():
+                        raise RuntimeError("generated database remains after drop")
+            except Exception as exc:
+                pytest.fail(
+                    f"Could not complete or verify cleanup of generated upgrade database {generated_name} "
+                    f"({type(exc).__name__}); details suppressed.", pytrace=False,
+                )
+
+
 def test_memory_source_kind_migration_defaults_existing_rows_to_memory(isolated_postgres):
     import psycopg
 

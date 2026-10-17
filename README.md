@@ -4,6 +4,8 @@ JARVIS is a modular foundation for a personal AI operating system. Core v2.0 int
 
 ## What works now
 
+- Core v2.4 adds authenticated repository-grounded coding reports and validated **proposed** patches in the Coding workspace. It reuses repository safeguards and shared advisory execution. Static/mock operation is local; sending redacted context to a configured model requires per-request consent. Reports distinguish facts, hypotheses and verification not run. No patch application, command execution, or test execution is enabled. See [coding API, security bounds and verification](docs/CODING_INTELLIGENCE.md). The owner accepted v2.4 with documented limitations: live-provider behavior remains unverified, PostgreSQL was not rerun against v2.4, and single-owner security limitations remain.
+
 - `GET /health` reports process liveness and version. `GET /ready` reports sanitized in-process readiness for the application, provider, orchestration, authorization policy, and persistence wiring; it returns 503 when required components are unavailable. Persistence `configured` means repository adapters are wired, not that PostgreSQL was contacted.
 - `POST /chat` accepts a validated message and returns a structured response. When persistence is enabled, it creates or continues a conversation and returns its stable `conversation_id`; without persistence, the ID is `null`.
 - Authenticated `GET /conversations?limit=20&offset=0` lists saved conversations with `conversation_id`, `created_at`, `last_activity_at`, and a nullable first-user-message preview. Pages are bounded (limit 1–100, offset 0–1,000,000), ordered by `last_activity_at DESC, conversation_id DESC`, and may shift between requests as conversations change. Previews are capped at 120 Unicode characters (119 plus an ellipsis when truncated); preview text is not logged.
@@ -54,11 +56,11 @@ The latest live PostgreSQL integration result is owner-reported: the project own
 
 The authorization foundation remains single-owner and advisory. The tool registry is empty, `execution_enabled=False`, and there is no approval workflow or external-action executor. This is not multi-user authorization, PostgreSQL row-level security, or evidence of production readiness. No live OpenAI request is claimed.
 
-## Core v2.1 — Reliability and operational readiness (in progress)
+## Core v2.1 — Reliability and operational readiness (owner accepted with documented non-blocking findings)
 
-The readiness endpoint now reports only fixed component states for in-process wiring and returns sanitized HTTP 503 if a required provider, orchestrator, authorization policy, or enabled persistence repository is missing. Persistence status does not probe PostgreSQL. The integration acceptance pass independently ran the full offline Python suite and local Playwright smoke tests; the opt-in PostgreSQL suite was not run because its required process environment was not configured. Exact results and remaining verification limits are recorded in `docs/HANDOFF.md`. Final milestone acceptance remains with the project owner.
+The readiness endpoint now reports only fixed component states for in-process wiring and returns sanitized HTTP 503 if a required provider, orchestrator, authorization policy, or enabled persistence repository is missing. Persistence status does not probe PostgreSQL. The project owner accepted the integrated v2.1–v2.3 working tree with documented non-blocking findings. **OWNER-RUN RESULTS REPORTED BY THE PROJECT OWNER:** live PostgreSQL integration **6 passed, 1 warning**; repository/security tests **84 passed, zero skipped, 1 warning**. These are separate from independently executed regressions and were not rerun during this documentation update. The authoritative evidence, provenance, and retained limitations are in `docs/HANDOFF.md`; acceptance does not authorize a commit, push, merge, deployment, or next phase.
 
-## Memory, context continuity, and knowledge (implemented; live PostgreSQL verification pending)
+## Core v2.2 — Memory, context continuity, and knowledge (owner accepted with documented non-blocking findings)
 
 When persistence is enabled, `/chat` assembles a bounded, attributed context for each request. Full design: `docs/ARCHITECTURE.md` → "Memory, context continuity, and knowledge".
 

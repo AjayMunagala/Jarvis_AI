@@ -286,7 +286,9 @@ Developer 3 has designed, implemented, and verified a modular, strictly read-onl
 - `.\.venv-dev\Scripts\python.exe -m compileall -q jarvis tests`: passed with 0 errors.
 - `git diff --check`: passed with 0 whitespace errors.
 
-## Memory, context continuity, and knowledge phase (implemented; live PostgreSQL verification pending)
+## Memory, context continuity, and knowledge phase (historical implementation snapshot)
+
+This section records the review-memory branch's implementation-time status. Its pending live-test statements and operator instructions are historical; see the acceptance remediation record below for subsequent owner-provided evidence and current verification limits.
 
 ### Scope and ownership
 
@@ -331,3 +333,116 @@ Full PostgreSQL integration prerequisites and the `PGPASSFILE` setup are in `dat
 - Applying the patch to `3e19fbc` needed three manual resolutions: the `frontend/src/App.tsx` import line keeps both `getReadiness` and `ChatContextSummary`; this ARCHITECTURE section and this HANDOFF section are appended after Developer 3's sections.
 - `codex/jarvis-v2.1-consolidated-20261017` (`33c1016`) is based on `aa735e6`, not `3e19fbc`, and was not used. An earlier scratch integration of Codex's isolated v2.1 readiness changes with this phase applied cleanly in code (only the same `App.tsx` import line and documentation appends conflicted) and passed 394 Python, 58 Vitest, and 9 E2E tests; that result predates Codex's published branch and does not verify it.
 - Developer 3's `authenticated_owner` change (any `Authorization` header disables anonymous stateless mock chat; without a configured token it returns 503 `persistence_unavailable`) is outside this phase and is flagged for the project lead's decision.
+
+## Acceptance remediation — 2026-10-17 (owner accepted with documented non-blocking findings; uncommitted)
+
+The project owner has accepted the integrated v2.1 reliability, v2.2 memory/context, and v2.3 repository-intelligence implementation with the limitations below. This records acceptance of the current integrated working tree; it does not authorize a commit, push, merge, deployment, or next-phase implementation.
+
+Starting branch: `jarvis/integration-acceptance-v24`, HEAD `a07a7d9e462ab74bcbd61cdb26c20181c2afbf52`. Local `main` remains `aa735e6`; recorded `origin/main` is `3e19fbc`. The pre-existing readiness changes in `frontend/src/App.tsx` and `App.test.tsx`, and the pre-0005 upgrade test in `integration_tests/test_postgres_integration.py`, were preserved. No branch switch, merge, commit, push, dependency installation, credential change, or database operation was performed during remediation.
+
+### Findings and fixes
+
+- **Manifest symlink bypass:** configuration and test discovery now validate original paths through the shared bounded reader before opening manifests. Internal/external links, linked directory components, excluded paths, oversized files, and inaccessible targets are omitted safely. Malformed JSON container shapes no longer cause discovery exceptions.
+- **Inventory/search symlink bypass:** inventory retains lexical paths until validation, validates directories before traversal, and applies exclusions to original and resolved names. Text search, AST extraction, and explicit diagnostic targets enforce the same policy. Windows reparse points are rejected alongside symlinks; off-root absolute/UNC targets are rejected before resolution. Dotenv variants are excluded (the ordinary `.env.example` remains permitted), directory exclusions are case-insensitive, and trailing-dot/space path aliases are rejected. The resolved containment check remains; filesystem races remain possible.
+- **Related confirmed output/command gaps:** search redacts full multiline blocks before excerpt selection/truncation; symbol and dependency metadata also receive known-secret redaction. Git diffs are redacted before truncation, and Git inspection disables fsmonitor, optional index writes, external diff, and textconv helpers. The existing `search_type=symbol` contract now dispatches to AST symbol search rather than text search; malformed regex errors are sanitized. Redaction remains heuristic.
+- **Readiness:** successful chat/list operations refresh `/ready`; only readiness responses set overall ready status. A request sequence guard prevents an older response from overwriting a newer decision. Tests retain loading, unavailable, recovery, and unreachable behavior.
+- **Migration 0005:** the preserved upgrade test applies 0001–0004, inserts owned/foreign/unowned rows, applies 0005, checks row preservation/default/constraint/index, and verifies catalog absence after cleanup. Disposable-name, collision, creation-tracking, and sanitized-error safeguards remain intact.
+- **Core boundaries:** bearer authentication and server-defined capabilities remain authoritative; memory/document SQL remains owner-scoped and parameterized. Conversations have no independent owner column and use the configured single-owner bearer boundary. Context remains bounded lexical reference data with untrusted framing. The tool registry stays empty and execution disabled.
+
+### Independently executed verification during remediation (separate execution provenance)
+
+Python tests used verified-new external `--basetemp` directories; the old pytest temporary root was not repaired or deleted.
+
+| Command | Observed result | Exit |
+| --- | --- | --- |
+| `.\.venv-dev\Scripts\python.exe -m pytest -q -rs tests --basetemp=$testBase` | Final run: 431 passed, 16 skipped, 1 Starlette/httpx warning; 23.27s | 0 |
+| `npm test -- --run src/App.test.tsx` in `frontend/` | 31 passed | 0 |
+| `npm test -- --run` in `frontend/` | 56 passed; 53.14s | 0 |
+| `npm run build` in `frontend/` | TypeScript checking and Vite production build passed | 0 |
+| `npm run test:e2e` in `frontend/` | 9 passed; 16.5s; color-environment warning | 0 |
+| `.\.venv-dev\Scripts\python.exe -m compileall -q jarvis tests integration_tests database` | Completed successfully | 0 |
+
+The final full Python invocation created `$testBase` with `Join-Path ([IO.Path]::GetTempPath()) ('jarvis-remediation-final-' + [guid]::NewGuid().ToString('N'))` and refused to run if that path already existed. The focused repository runs passed as well; final coverage is included in the full-suite result above. Browser scenarios use the local mock provider, persistence disabled, and intercepted conversation responses where configured; they do not prove PostgreSQL persistence.
+
+The explicit integration selection `-k 'integration_guard or preexisting_database_review or memory_source_kind or document_import_deduplicates or concurrent_identical_document_imports or context_search_is_owner_scoped or chat_uses_live_history'` produced **11 passed, 6 skipped, 16 deselected**, exit 0, with the existing warning. All six live cases skipped at the opt-in gate. `JARVIS_RUN_POSTGRES_INTEGRATION`, `JARVIS_TEST_POSTGRES_ADMIN_URL`, `PGPASSFILE`, and `JARVIS_PG_BIN_DIR` were unset in this execution environment; no live connection or migration was attempted.
+
+### OWNER-RUN RESULTS REPORTED BY THE PROJECT OWNER
+
+- **OWNER-RUN RESULTS REPORTED BY THE PROJECT OWNER — live PostgreSQL integration:** **6 passed, 1 warning in 8.68s**, PostgreSQL 18.6, including the genuine pre-0005 upgrade. The supplied passing session had no teardown errors, supporting completion of both fixtures' post-drop absence checks; Codex did not separately query the catalog or independently rerun these live tests.
+- **OWNER-RUN RESULTS REPORTED BY THE PROJECT OWNER — repository/security tests:** **84 passed, zero skipped, 1 warning in 9.77s**, running `tests/test_repo_security.py tests/test_repo_intel.py` with a fresh `--basetemp`. The supplied output shows the native internal/external manifest links, protected-file aliases, directory links, service/API callers, and original helper tests passing. This closes the native verification gate using owner-provided execution evidence; Codex did not independently execute this zero-skip run.
+- Historical owner-run native repository suite: **35 passed, 0 skipped, 1 warning in 3.99s**. That earlier run covered the helper tests and is superseded for current repository/security coverage by the separate 84-test run above.
+
+The owner-run evidence was reviewed from supplied terminal output. Neither run was executed during this documentation update. The existing Starlette/httpx deprecation remains a warning, not a test failure. The independently executed full Python result above remains **431 passed, 16 skipped, 1 warning**; its 16 native skips are retained as facts about that execution environment and are not replaced by or combined with the separate owner-run 84-pass result.
+
+### Outstanding verification and operational limits
+
+`tests/test_repo_security.py` adds service/HTTP caller regressions with both mocked-lstat and actual-link variants. In the independently executed run, 14 new native-link cases and the two original native-link tests skipped because link creation was denied (WinError 1314; `SeCreateSymbolicLinkPrivilege` absent). Mocked rejection, ordinary files/manifests, protected-file exclusions, capability denials, malformed inputs, redaction, and Git-helper restrictions passed. The separate owner-run 84-test result above establishes native execution without skips and closes that acceptance gate; it does not change the earlier skipped-run record. Do not weaken permissions checks or change machine security settings automatically.
+
+The historical `C:\Users\ganip\AppData\Local\Temp\pytest-of-ganip\pytest-current` is still a directory reparse point. ACL and `fsutil reparsepoint query` access are denied (Error 5); no handle-inspection tool is available, so a lock/handle or exact ACL cause could not be established. Fresh `--basetemp` runs completed without that cleanup error. Leave the old object untouched pending privileged inspection; do not recursively delete its parent or change ownership/permissions without authorization.
+
+Other retained limits: no independent conversation tenant isolation, no live-provider verification, heuristic secret detection, possible concurrent filesystem races, and unverified worst-case regex/subprocess-capture resource use. The project owner's v2.1–v2.3 acceptance acknowledges these documented non-blocking findings; no public/shared deployment readiness is claimed.
+
+## Core v2.4 — Coding intelligence and patch generation (owner accepted with documented limitations)
+
+The owner subsequently authorized this full phase on `codex/jarvis-v2.4-coding-intelligence`. The starting checkout was `jarvis/integration-acceptance-v24` at `a07a7d9e462ab74bcbd61cdb26c20181c2afbf52`, with 16 modified tracked files, one untracked `tests/test_repo_security.py`, and no staged changes. The dedicated branch was created at the same HEAD, carrying all pre-existing changes. Earlier no-next-phase statements describe their historical acceptance tasks; this authorization covered v2.4 only. At implementation time no commit, push or merge was authorized; the subsequent acceptance and local-integration authorization are recorded below.
+
+Implemented: bounded coding request routing, repository evidence/excerpts/hashes/Python symbols and syntactic calls, verified-existing test discovery, honest static/mock reports, optional consent-gated structured model proposals through shared orchestration, validated exact-edit/new-file diffs, and the integrated React Coding workspace. Both `repo.read` and `chat.advisory` are required in addition to the configured bearer identity. No anonymous repository access, model-granted permissions, database change, patch application, test execution or tool execution is exposed. Exact supplied edits remain local even when provider disclosure is permitted. Reports always distinguish generated proposals from actual changes and tests not run.
+
+See [CODING_INTELLIGENCE.md](CODING_INTELLIGENCE.md) for the API contract, processing limits, security model, file responsibilities and exact developer commands. The original master vision and accepted v2.1–v2.3 evidence above remain intact. Static routing/AST observations are not model reasoning or proof of a root cause; model responses are locally validated but semantically unverified. Native-link privilege restrictions, heuristic redaction, filesystem races, single-owner deployment limits and the old inaccessible pytest temporary object remain documented findings. No permissions were changed or uncertain files deleted.
+
+### v2.4 execution evidence
+
+Verification below describes commands actually run for this phase, separately from the historical owner-run PostgreSQL and native-link results above. Commands used the installed dependencies, loopback-capable host execution where required, and fresh external pytest temporary directories; no machine permissions were changed.
+
+| Command | Completed result | Exit |
+| --- | --- | --- |
+| `.\.venv-dev\Scripts\python.exe -m pytest tests/test_coding.py tests/test_orchestration.py tests/test_auth.py tests/test_policy.py -q -rs --basetemp=$testBase` | Focused intermediate run: 128 passed, 1 existing warning | 0 |
+| `.\.venv-dev\Scripts\python.exe -m pytest tests/test_coding.py tests/test_intelligence_provider.py -q -rs --basetemp=$testBase` | Later focused run, including intercepted real-provider-adapter HTTP: 131 passed, 1 native-link skip, 1 existing warning | 0 |
+| `.\.venv-dev\Scripts\python.exe -m pytest -q -rs tests --basetemp=$testBase` | **Final code run: 518 passed, 17 skipped, 1 warning in 16.29s** | 0 |
+| `npm.cmd test -- --run` in `frontend/` | **74 passed**, 5 test files, 32.83s | 0 |
+| `npm.cmd run build` in `frontend/` | TypeScript checking and Vite production build passed | 0 |
+| `npm.cmd run test:e2e` in `frontend/` | **Final code run: 10 passed in 10.7s** | 0 |
+| `.\.venv-dev\Scripts\python.exe -m compileall -q jarvis tests integration_tests database` | Completed after final implementation changes | 0 |
+| `git diff --check` | Passed; existing/new tracked files report LF-to-CRLF warnings only | 0 |
+
+For the final Python run, `$testBase` was created with `Join-Path ([IO.Path]::GetTempPath()) ('jarvis-v24-release-review-' + [guid]::NewGuid().ToString('N'))`, refusing any existing target before pytest. The 17 skips comprise the 16 pre-existing native-link skips plus one new native coding-caller link test denied by Windows (`WinError 1314`). Mocked symlink and reparse-point coding-caller rejection passed. The existing Starlette/httpx deprecation remains a warning. No pytest temporary cleanup `PermissionError` occurred in these fresh-directory final runs; the old uncertain temporary object remains untouched, not repaired. Browser execution emitted the existing `NO_COLOR`/`FORCE_COLOR` environment warning.
+
+The new browser scenario sends real authenticated loopback `/coding/analyze` requests against the mock backend, inspects `README.md`, previews an unapplied synthetic new-file diff, and verifies lock-time clearing. The E2E server uses a fixed synthetic test identity, not operator credentials; anonymous mock chat still passes. Existing intercepted conversation scenarios remain UI coverage only. Provider-specific schema serialization and response parsing were exercised with `httpx.MockTransport`, not the internet. Inspection caught that the existing strict adapter requires every wire field and rejects defaults; separate all-required coding wire contracts now pass that adapter while local models retain edit validation. Early development checks found a line-ending-normalizing hash assertion and a test using unsupported TypeScript `.at()`; both were corrected before passing final regressions. No existing assertions were removed or weakened.
+
+Live PostgreSQL tests were **not run**: all four integration process variables were unset. No database connection, migration, creation or deletion was attempted in this phase. The existing fixture and database tests remain byte-for-byte unchanged. No live model was called. At this implementation-time snapshot native v2.4 coding-caller symlink execution and live-provider semantic/compatibility validation were unverified; subsequent owner-run native evidence below closes the native gate only. Previous owner-run v2.1–v2.3 evidence does not substitute for new v2.4 checks.
+
+### File ownership and preservation
+
+Files changed for v2.4:
+
+- New backend: `jarvis/coding/__init__.py`, `models.py`, `evidence.py`, `patches.py`, `service.py`; `jarvis/api/routes/coding.py`; `tests/test_coding.py`.
+- Backend integration: `jarvis/main.py`, `jarvis/orchestration/experts.py`, `jarvis/orchestration/service.py` (new trusted specialist entry point reusing existing execution logic).
+- New frontend: `frontend/src/components/CodingPanel.tsx`, `CodingPanel.css`, `CodingPanel.test.tsx`; `frontend/src/services/coding-api.test.ts`.
+- Frontend integration: `frontend/src/App.tsx`, `frontend/src/App.test.tsx`, `frontend/src/services/api.ts`, `frontend/e2e/jarvis.e2e.mjs`, `frontend/playwright.config.mjs`.
+- Documentation: `README.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/HANDOFF.md`, new `docs/CODING_INTELLIGENCE.md`.
+
+Original non-overlapping modifications were checked against the starting SHA-256 snapshot: `integration_tests/test_postgres_integration.py`, the nine modified `jarvis/repo/` files (`config_discovery.py`, `diagnostics.py`, `git_intel.py`, `inventory.py`, `path_security.py`, `search.py`, `secret_redactor.py`, `service.py`, `test_discovery.py`), and untracked `tests/test_repo_security.py` are byte-for-byte unchanged. Existing documentation and App changes were preserved while adding v2.4 sections/integration. No dependencies, migrations, ranking logic, authentication/policy implementation, or tool registry were modified. Generated build/cache/test artifacts follow existing ignore rules; the synthetic proposed `coding-smoke-proposed.py` was not created.
+
+Historical implementation-time owner-review checklist: inspect the combined tracked and untracked diff without attributing pre-existing changes to v2.4; exercise explain/trace and an exact offline patch in the Coding tab; confirm no apply/execute control exists; run the new native coding-link test in an authorized Windows session if native confirmation is required. Any optional live-provider validation requires separately approved credentials, disclosure and cost. No next phase, commit, push, merge or release was performed during that implementation task. Subsequent owner acceptance and integration authorization follow.
+
+### Owner acceptance and local integration — 2026-10-17
+
+The project owner formally accepted v2.4 — Coding Intelligence & Patch Generation — with these retained limits: live-provider behavior and model reasoning remain unverified; PostgreSQL was not rerun against v2.4; the single-owner architecture and documented security limitations remain; patches are advisory and never automatically applied; tool/verification-command execution stays disabled. Acceptance does not claim public deployment readiness or eliminate heuristic redaction, filesystem race, or historical temporary-directory limitations.
+
+**OWNER-RUN RESULTS REPORTED BY THE PROJECT OWNER:** the exact 17 formerly skipped native Windows cases produced **17 passed, 0 failed, 0 skipped, 14 deselected, 1 existing Starlette/httpx warning in 1.73s**, pytest exit 0. Codex reviewed the supplied terminal output and did not independently execute that zero-skip run. It includes `test_native_coding_link_rejection` and closes the native Windows acceptance gate. Earlier independent runs with 17 skips (and historical 431-pass/16-skip remediation) remain separate execution records.
+
+The owner separately authorized local integration and one local integration commit, with no push/publication or v2.5 work. Both the implementation branch and the existing integration branch pointed to `a07a7d9e462ab74bcbd61cdb26c20181c2afbf52`. The checkout was switched safely to `jarvis/integration-acceptance-v24`; SHA-256 checks confirmed that all 35 reviewed working-tree files survived the switch unchanged. The combined checkpoint includes accepted v2.1–v2.3 remediation/prerequisites (11 non-overlapping files plus historical shared documentation/App hunks) and v2.4 additions. No unrelated file was identified. It is a combined accepted integration baseline, not a phase-only patch; no merge to main or published-history rewrite is involved.
+
+#### Local integration regressions executed by Codex
+
+| Command | Observed result | Exit |
+| --- | --- | --- |
+| `.\.venv-dev\Scripts\python.exe -m pytest -q -rs tests --basetemp=$testBase` | **518 passed, 17 skipped, 1 warning in 25.40s** | 0 |
+| `npm.cmd test -- --run` in `frontend/` | **74 passed**, 5 test files, 43.78s | 0 |
+| `npm.cmd run build` in `frontend/` | TypeScript checking and Vite production build passed | 0 |
+| `npm.cmd run test:e2e` in `frontend/` | **10 passed in 15.1s** | 0 |
+| `.\.venv-dev\Scripts\python.exe -m compileall -q jarvis tests integration_tests database` | Passed | 0 |
+
+The integration Python run used a fresh `Join-Path ([IO.Path]::GetTempPath()) ('jarvis-v24-local-integration-' + [guid]::NewGuid().ToString('N'))` directory and refused existing targets. Its 17 skips are native-link privilege restrictions (two original helper cases, ten manifest cases, four alias/service cases, and one coding-caller case). They remain skips in this execution, separate from the owner's accepted 17-pass native result. The existing Starlette/httpx deprecation and browser color-environment warnings remain; no temporary cleanup error appeared in this run. All four PostgreSQL integration process variables were unset, so no live database tests, connections or migrations ran. Browser tests remained local mock-only; no live model was called. Verification-command/tool execution within the application remains disabled.
+
+The pre-commit preservation check found only four intentional documentation changes relative to the accepted starting tree (`README.md`, `docs/HANDOFF.md`, `docs/ROADMAP.md`, `docs/CODING_INTELLIGENCE.md`), recording acceptance and owner evidence; all 31 other reviewed files were byte-for-byte unchanged. The local commit is scoped to those same 35 accepted files with explicit-path staging, whitespace checks and a staged-file review. The resulting commit SHA is the Git commit containing this record; it is reported separately by `git log -1` rather than embedded in its own contents. No push, main-branch merge, dependency installation, permission/credential change, patch application, or v2.5 implementation is part of local integration.

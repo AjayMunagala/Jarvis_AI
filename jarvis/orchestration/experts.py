@@ -18,6 +18,7 @@ from jarvis.orchestration.models import (
     ExpertOutput,
     ExpertResult,
     ExpertTimeoutError,
+    PlanStep,
     ExecutionPlan,
     RequestContext,
     RequestDeadlineExceeded,
@@ -174,8 +175,25 @@ class ExpertExecutor:
             raise ExpertExecutionError(cause_type=cause_type)
         return tuple(results), tuple(events)
 
-    async def _execute_step(self, step, context: RequestContext, execution_id: str, deadline: float, semaphore):
-        expert = self._experts.get(step.expert_id)
+    async def execute_advisory(self, expert: Expert, context: RequestContext, *, deadline: float) -> str:
+        """Execute a server-created, data-only specialist using the shared budget/retries.
+
+        This Python interface is not a client-selectable expert or tool registry.
+        It neither applies patches nor executes commands.
+        """
+        step = PlanStep(step_id="coding", expert_id=expert.definition.id, round_number=1,
+                        expected_evidence="Validated, bounded coding proposal; no execution")
+        result, _ = await self._execute_step(
+            step, context, context.execution_id, deadline, asyncio.Semaphore(1), expert_override=expert,
+        )
+        if result.status != "succeeded" or result.output is None:
+            if result.error_code == "timeout":
+                raise ExpertTimeoutError(cause_type="TimeoutError")
+            raise ExpertExecutionError(cause_type=result.failure_type or "ExpertExecutionError")
+        return result.output.content
+
+    async def _execute_step(self, step, context: RequestContext, execution_id: str, deadline: float, semaphore, *, expert_override: Expert | None = None):
+        expert = expert_override if expert_override is not None else self._experts.get(step.expert_id)
         if expert is None:
             result = ExpertResult(step_id=step.step_id, expert_id=step.expert_id, persona="unknown", status="failed", error_code="expert_failure", attempts=1)
             return result, AuditEvent(execution_id=execution_id, event_type="expert_failed", expert_id=step.expert_id, outcome="failed")

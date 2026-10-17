@@ -1,0 +1,16 @@
+.coding-panel { max-width: 1000px; margin: 0 auto; padding: 32px; line-height: 1.6; overflow-wrap: anywhere; }
+.coding-panel h1 { font-size: 28px; }
+.coding-panel h2 { font-size: 22px; }
+.coding-panel h3 { margin-top: 24px; font-size: 16px; }
+.coding-panel form { display: grid; gap: 12px; margin: 24px 0; }
+.coding-panel textarea, .coding-panel select { width: 100%; padding: 10px; color: inherit; background: #131a22; border: 1px solid #405064; border-radius: 8px; font: inherit; }
+.coding-panel textarea { min-height: 80px; resize: vertical; }
+.coding-panel button { padding: 10px 16px; color: inherit; background: #23364a; border: 1px solid #526b87; border-radius: 8px; cursor: pointer; }
+.coding-panel button:disabled { opacity: .55; cursor: not-allowed; }
+.coding-panel :focus-visible { outline: 2px solid #a5d3ff; outline-offset: 3px; }
+.coding-panel pre { max-height: 480px; overflow: auto; padding: 14px; background: #10161f; border: 1px solid #344052; border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.coding-panel details { margin: 12px 0; padding: 12px; border: 1px solid #344052; border-radius: 8px; }
+.coding-panel summary { cursor: pointer; }
+.coding-panel .coding-consent { display: flex; align-items: flex-start; gap: 10px; }
+.coding-panel [role="alert"] { color: #ffb6b6; }
+@media (max-width: 600px) { .coding-panel { padding: 18px; } }

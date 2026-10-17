@@ -98,6 +98,10 @@ The v2.0 policy boundary is still the existing configured single owner. Capabili
 
 The subsystem is strictly read-only: it never modifies code, installs packages, runs tests autonomously, or executes arbitrary shell commands. `execution_enabled` remains `False`.
 
+Repository file-access enforcement validates the original lexical path before following it: inventory prunes prohibited directory components and omits unsafe files, and manifest discovery, text search, symbol extraction, and diagnostics share the same exclusions and bounded text reader (512 KiB by default). Both lexical names and resolved targets are checked; symlinks and Windows reparse points are omitted, including aliases to protected files such as `.env`. Unsafe, missing, oversized, or inaccessible files are omitted without exposing their contents or raw filesystem errors. Ordinary manifests retain their existing discovery behavior. These checks still do not eliminate concurrent filesystem races.
+
+Known-secret redaction runs before output truncation and search-context selection, including multiline private-key blocks, symbol docstrings/decorators, and dependency specifications. It remains heuristic, not a guarantee that every credential format is detected. Git inspection disables optional index writes, fsmonitor, external diff drivers, and text conversion helpers in addition to stripping ambient `GIT_*` overrides. Its returned diff is capped; subprocess capture and optional regular-expression searches have not been stress-verified for worst-case resource use. This remains a trusted local, single-owner service rather than a hardened public repository-analysis service.
+
 ## Memory, context continuity, and knowledge
 
 This phase keeps the existing modular monolith, PostgreSQL schema family, owner predicates, capability policy, and shared request deadline. It adds no embeddings, vector search, GPU, paid service, or tool execution.
@@ -151,3 +155,11 @@ Retrieved conversation turns, memories, and document excerpts are data. The syst
 - One document is one record of at most 4,000 characters; no chunking.
 - Pre-0005 imported documents remain `memory` until re-imported.
 - Python ranking was measured only on a fixed synthetic corpus; live PostgreSQL candidate selection is covered by opt-in integration tests.
+
+## Core v2.4 — Coding advisory and patch proposals
+
+`POST /coding/analyze` composes the existing single-owner authentication with both `repo.read` and `chat.advisory`. `jarvis/coding/models.py` defines closed bounded contracts; `evidence.py` reuses repository inventory, guarded reading, Python symbol extraction and affected-test mappings. It collects static file hashes/excerpts and syntactic relationships, with explicit incomplete-discovery limits. `service.py` separates server-derived facts from unverified model reasoning and user-reported observations. Non-demo analysis requires request consent before sending bounded redacted context and uses a server-created coding specialist through `OrchestrationService.run_advisory` and the existing executor's validation, deadlines and transient retry handling. This is not a client-selectable executor or a second agent scheduler. Existing chat specialist registry behavior is unchanged.
+
+`patches.py` checks repository-relative paths, protected/private exclusions, exact unique replacements, current preimages and output limits before generating unified diffs in memory. Creation requires an explicitly requested nonexistent target. There is no apply path or test/command execution. Model output cannot change authentication, policy, tool metadata or execution state. Coding reports are ephemeral and do not write memories, conversations, repository files or audit records to PostgreSQL. Stable execution/outcome metadata is logged without source or prompt text.
+
+The React Coding workspace uses the existing API transport, escaped text, in-memory identity, session clearing and cancellation safeguards. Model advice never becomes a verified repository fact. Source inspection does not prove runtime behavior, redaction is heuristic, and filesystem races remain possible. The tools registry remains empty and `execution_enabled=False`. Full contracts, limits, browser/mock distinctions and developer commands are in [CODING_INTELLIGENCE.md](CODING_INTELLIGENCE.md). This phase implements coding proposals; it does not implement the later verification/execution engine.

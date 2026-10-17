@@ -28,7 +28,7 @@ def _run_git_cmd(repo_root: Path, args: list[str], timeout_seconds: float = 5.0)
 
     try:
         proc = subprocess.run(
-            [git_bin, *args],
+            [git_bin, "--no-optional-locks", "-c", "core.fsmonitor=false", *args],
             cwd=str(repo_root),
             env=safe_env,
             capture_output=True,
@@ -114,10 +114,10 @@ def get_git_status(repo_root: Path | str, *, max_diff_entries: int = 50) -> GitS
 
     # 4. Diff entries (both unstaged and staged)
     diff_entries: list[GitDiffEntry] = []
-    rc, diff_stat, _ = _run_git_cmd(root, ["diff", "--numstat", "HEAD"])
+    rc, diff_stat, _ = _run_git_cmd(root, ["diff", "--no-ext-diff", "--no-textconv", "--numstat", "HEAD"])
     if rc != 0:
         # Fallback to unstaged diff numstat if no commits exist
-        rc, diff_stat, _ = _run_git_cmd(root, ["diff", "--numstat"])
+        rc, diff_stat, _ = _run_git_cmd(root, ["diff", "--no-ext-diff", "--no-textconv", "--numstat"])
 
     if rc == 0 and diff_stat:
         for line in diff_stat.splitlines()[:max_diff_entries]:
@@ -129,13 +129,13 @@ def get_git_status(repo_root: Path | str, *, max_diff_entries: int = 50) -> GitS
                 deletions = int(dels) if not is_bin else 0
 
                 # Fetch file diff content with bounds and redaction
-                _, file_diff, _ = _run_git_cmd(root, ["diff", "HEAD", "--", path])
-                truncated = False
-                if len(file_diff) > MAX_DIFF_BYTES:
-                    file_diff = file_diff[:MAX_DIFF_BYTES] + "\n... [diff truncated]"
-                    truncated = True
-
+                _, file_diff, _ = _run_git_cmd(root, ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", path])
                 safe_diff, _ = redact_secrets(file_diff)
+                truncated = False
+                encoded_diff = safe_diff.encode("utf-8")
+                if len(encoded_diff) > MAX_DIFF_BYTES:
+                    safe_diff = encoded_diff[:MAX_DIFF_BYTES].decode("utf-8", errors="ignore") + "\n... [diff truncated]"
+                    truncated = True
 
                 diff_entries.append(
                     GitDiffEntry(

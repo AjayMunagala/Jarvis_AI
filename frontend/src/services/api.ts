@@ -146,6 +146,17 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
   }
   if (response.status === 204) return undefined as T
   if (!response.ok) {
+    if (path === '/coding/analyze') {
+      const messages: Record<number, string> = {
+        403: 'Coding inspection is not permitted by the server policy.',
+        413: 'The coding request exceeds the configured request size limit.',
+        422: 'The coding request, repository paths or proposed changes are invalid.',
+        502: 'The coding proposal could not be validated. No changes were applied.',
+        503: 'Coding intelligence is unavailable or not configured.',
+        504: 'The coding request timed out. No changes were applied.',
+      }
+      throw new Error(messages[response.status] ?? 'Coding analysis failed. No changes were applied.')
+    }
     if (response.status === 503) {
       if (path === '/ready' || path.startsWith('/ready')) {
         try {
@@ -200,6 +211,62 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
 const json = (body: unknown): RequestInit => ({
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 })
+
+export type CodingWorkflow = 'auto' | 'explain' | 'locate' | 'trace' | 'diagnose' | 'recommend' | 'patch' | 'review_patch' | 'tests'
+export interface CodingChange {
+  path: string
+  operation: 'modify' | 'create'
+  replacements?: { old_text: string; new_text: string }[]
+  content?: string
+  reason: string
+}
+export interface CodingRequest {
+  request: string
+  workflow: CodingWorkflow
+  target_paths: string[]
+  reported_observation?: string
+  changes?: CodingChange[]
+  allow_provider_context: boolean
+}
+export interface CodingReport {
+  execution_id: string
+  workflow: Exclude<CodingWorkflow, 'auto'>
+  interpretation: string
+  analysis_origin: 'static' | 'model'
+  provider: string
+  evidence: { id: string; path: string; sha256: string; excerpt: string; excerpt_start_line: number; truncated: boolean; symbols: string[]; relationships: string[] }[]
+  facts: string[]
+  reported_observation: string | null
+  proposal: { summary: string; hypotheses: { explanation: string; evidence_ids: string[] }[]; recommendations: string[]; risks: string[]; missing_information: string[]; changes: CodingChange[] }
+  patch_status: 'not_requested' | 'proposed' | 'unavailable'
+  patches: { path: string; operation: 'modify' | 'create'; reason: string; sha256_before: string | null; sha256_after: string; diff: string }[]
+  existing_tests: string[]
+  verification_recommendations: string[]
+  limitations: string[]
+  verification_status: 'not_run'
+  repository_modified: false
+  execution_enabled: false
+}
+
+export function analyzeCoding(body: CodingRequest, auth?: ApiAuth): Promise<CodingReport> {
+  return request<CodingReport>('/coding/analyze', json(body), false, auth).then((data) => {
+    const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === 'string')
+    if (!data || typeof data.execution_id !== 'string' || typeof data.interpretation !== 'string'
+      || !['static', 'model'].includes(data.analysis_origin) || typeof data.provider !== 'string'
+      || data.verification_status !== 'not_run' || data.repository_modified !== false || data.execution_enabled !== false
+      || !strings(data.facts) || !strings(data.existing_tests) || !strings(data.verification_recommendations) || !strings(data.limitations)
+      || !data.proposal || typeof data.proposal.summary !== 'string' || !strings(data.proposal.recommendations)
+      || !strings(data.proposal.risks) || !strings(data.proposal.missing_information)
+      || !Array.isArray(data.proposal.hypotheses) || !data.proposal.hypotheses.every((item) => item && typeof item.explanation === 'string' && strings(item.evidence_ids))
+      || !Array.isArray(data.evidence) || !data.evidence.every((item) => item && typeof item.path === 'string' && typeof item.id === 'string'
+        && typeof item.sha256 === 'string' && typeof item.excerpt === 'string' && strings(item.symbols) && strings(item.relationships))
+      || !Array.isArray(data.patches) || !data.patches.every((item) => item && typeof item.path === 'string' && typeof item.reason === 'string' && typeof item.diff === 'string'
+        && typeof item.sha256_after === 'string' && (item.sha256_before === null || typeof item.sha256_before === 'string'))) {
+      throw new Error('JARVIS returned an unexpected coding report. No changes were applied.')
+    }
+    return data
+  })
+}
 
 export function sendChatMessage(message: string, auth?: ApiAuth, conversationId?: string): Promise<ChatResponse> {
   const body: ChatRequest = conversationId ? { message, conversation_id: conversationId } : { message }

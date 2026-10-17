@@ -10,7 +10,7 @@ from jarvis.repo.models import (
     DiagnosticReport,
     SymbolType,
 )
-from jarvis.repo.path_security import safe_resolve_path, validate_repo_root
+from jarvis.repo.path_security import is_ignored_repository_path, safe_resolve_path, validate_repo_root
 from jarvis.repo.search import extract_python_symbols, search_filenames
 from jarvis.repo.test_discovery import discover_tests_and_build
 
@@ -40,6 +40,8 @@ def generate_diagnostic_report(
     if target_files:
         for tf in target_files:
             try:
+                if is_ignored_repository_path(tf):
+                    continue
                 resolved = safe_resolve_path(root, tf, must_exist=True)
                 investigated_files.append(tf)
             except Exception:
@@ -71,7 +73,7 @@ def generate_diagnostic_report(
             )
 
             if rel_path.endswith(".py"):
-                symbols = extract_python_symbols(resolved, rel_path)
+                symbols = extract_python_symbols(root / rel_path, rel_path, repo_root=root)
                 for sym in symbols:
                     if sym.symbol_type == SymbolType.ROUTE_HANDLER:
                         facts.append(

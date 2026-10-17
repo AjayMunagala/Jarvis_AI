@@ -179,16 +179,16 @@ Verification on Windows/Python 3.12.10: 143 default Python tests and 13 focused 
 
 Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remains single-owner and advisory-only; `tools.json` is empty and `execution_enabled=False`. No approval workflow, external-action executor, multi-user authorization, or production-readiness claim is included.
 
-## Core v2.1 — Reliability and operational readiness (in progress)
+## Core v2.1 — Reliability and operational readiness (owner accepted with documented non-blocking findings)
 
 - Improve operational diagnostics without changing the modular-monolith architecture or exposing sensitive configuration.
 - Keep `/health` as process liveness. Make `/ready` report fixed readiness states for application, provider, orchestration, authorization-policy, and persistence wiring; fail with sanitized HTTP 503 when a required component is unavailable.
 - Treat intentionally disabled persistence as a valid ready mode. Report configured persistence only as repository wiring; do not connect to PostgreSQL from readiness.
 - Preserve authentication, capability enforcement, mock mode, provider selection, owner isolation, bounded execution, and disabled tool/action execution.
 - Add focused pure unit coverage for ready, incomplete, and persistence-disabled/configured states, plus HTTP contract regression coverage.
-- On the v2.1–v2.3 integration acceptance branch, the full offline Python suite and browser smoke suite were independently run in an environment permitting Windows local sockets. The opt-in PostgreSQL suite remains unverified in this execution because its required process variables were unset. Exact commands, results, and environment limitations are recorded in `docs/HANDOFF.md`; owner acceptance remains pending.
+- The project owner accepted the integrated v2.1–v2.3 working tree with documented non-blocking findings. Independently executed results and separate owner-run PostgreSQL/native Windows evidence are recorded in the authoritative `docs/HANDOFF.md`; no commit, push, merge, deployment, or next phase is authorized by acceptance.
 
-## Repository Intelligence and Coding Diagnostics (implemented)
+## Core v2.3 — Repository Intelligence and Coding Diagnostics (owner accepted with documented non-blocking findings)
 
 - Add a secure, bounded, read-only repository intelligence subsystem (`jarvis/repo/`) for Project JARVIS.
 - Implement bounded repository inventory (`jarvis/repo/inventory.py`): structure, language detection, manifest recognition, entry points, and test directories with strict ignore rules.
@@ -202,21 +202,29 @@ Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remain
 - Expose authenticated, read-only API endpoints under `/repo` (`/inventory`, `/search`, `/symbols`, `/git`, `/config`, `/tests`, `/diagnostics`) requiring bearer authentication and `Capability.REPO_READ`.
 - The subsystem is strictly read-only, does not execute arbitrary code, does not modify files, does not change Git state, and keeps `execution_enabled=False`.
 
-## v2.1–v2.3 integration acceptance pass (verification recorded; owner acceptance pending)
+## v2.1–v2.3 integration acceptance pass (owner accepted with documented non-blocking findings)
 
 - Integration branch: `jarvis/integration-acceptance-v24`, based on `origin/main` at `3e19fbc65a8aed8612d944c79a913596803ce1fe`. v2.1 readiness and v2.3 repository intelligence were already on that base; v2.2 memory/context work was integrated from `origin/jarvis/review-memory-v22` at `e7840b906e04442e06b25b95694526a904bf32b9`. The obsolete Codex v2.1 branch was not cherry-picked because current main already contained newer implementation.
-- The confirmed repository-path issue was fixed: disallowed symlink components are detected with `lstat` before resolution, with the existing containment check retained. The precheck narrows but does not eliminate races with concurrent filesystem changes. Two OS-level symlink tests skipped because Windows symlink creation was unavailable; a mocked-`lstat` test covers the rejection branch.
-- Independently executed verification on this integrated tree: full offline Python suite **396 passed, 2 skipped**; repo-intelligence tests **33 passed, 2 skipped**; frontend unit tests **53 passed**; production build and compileall passed; Playwright **9 passed**; PostgreSQL URL/collision guards **11 passed**. The existing Starlette/httpx warning and pytest atexit temp-directory `PermissionError` are recorded in `docs/HANDOFF.md`.
-- The live PostgreSQL suite was not run because its required process environment was not configured here. No live provider call was made. The integration/browser results do not verify database persistence; owner acceptance remains pending live PostgreSQL verification and review.
+- The repository-path fixes now cover original-path validation in inventory, manifest discovery, search, and service/API callers, retaining resolved containment. The precheck narrows but does not eliminate filesystem races. Native cases skipped in the Codex execution environment; the separate owner-run repository/security evidence below closes that gate.
+- Historical independently executed integration snapshot: full offline Python suite **396 passed, 2 skipped**; repo-intelligence tests **33 passed, 2 skipped**; frontend unit tests **53 passed**; production build and compileall passed; Playwright **9 passed**; PostgreSQL URL/collision guards **11 passed**. After remediation, the independently executed full Python result was **431 passed, 16 skipped, 1 warning**; frontend tests **56 passed**, build/compilation passed, and Playwright **9 passed**. These runs remain separate from owner-run results. The existing Starlette/httpx warning and unresolved pytest temporary reparse-point issue remain documented in `docs/HANDOFF.md`.
+- **OWNER-RUN RESULTS REPORTED BY THE PROJECT OWNER:** live PostgreSQL integration **6 passed, 1 warning** against PostgreSQL 18.6; repository/security tests **84 passed, zero skipped, 1 warning**, including native caller tests. Codex reviewed the supplied output and did not independently execute these owner runs or rerun them during this documentation update. Browser mock/intercepted results do not establish PostgreSQL persistence.
+- The project owner accepted v2.1–v2.3 with the retained limitations: single-owner conversation boundary, filesystem races, heuristic redaction, unverified live-provider behavior and worst-case resource use, and the unresolved old pytest temporary object. No next-phase implementation, commit, push, or merge is authorized.
 
-## Memory, context continuity, and knowledge phase (implemented; live PostgreSQL verification pending)
+## Core v2.2 — Memory, context continuity, and knowledge (owner accepted with documented non-blocking findings)
 
 - Separate explicit memories from ingested documents with `source_kind` (migration 0005, no backfill); owner-scoped exact-duplicate document imports return the existing record (HTTP 200).
 - Replace chat retrieval's all-words `plainto_tsquery` match with stopword-filtered, suffix-trimmed OR-prefix candidate matching in PostgreSQL plus deterministic Python ranking (coverage, phrase, density, recency, UUID), weak-match filtering, de-duplication, and per-kind limits. The explicit `/memories/search` API keeps all-words semantics.
 - Add a pure, bounded context assembler: recent same-conversation turns, memories, and document excerpts with character budgets, deterministic ordering, `H/M/D` refs, and escaped-JSON untrusted framing. Unknown conversations are rejected before any provider call; history requires `conversation.read`; storage failures degrade with an explicit status.
 - Report supplied sources (metadata only) in `ChatResponse.context`, including `cited_in_reply` and a count of invented refs; show them in the chat UI and mark documents in the memory manager.
 - Controlled synthetic evaluation (12 chat-style queries, 16 records): legacy all-words rule hit@3 0.0833; new rule hit@3 1.0, recall@3 1.0, MRR@3 1.0, precision@3 0.7917. This describes only that corpus; it is not a general quality claim.
-- Verification on review branch `jarvis/review-memory-v22` (baseline `3e19fbc`): 394 Python tests passed; 53 frontend tests, TypeScript, `npm run build`, and 9 Playwright E2E scenarios passed. The 5 new opt-in PostgreSQL tests were not executed (no operator credentials available); see `docs/HANDOFF.md`.
+- Historical verification on review branch `jarvis/review-memory-v22` (baseline `3e19fbc`): 394 Python tests passed; 53 frontend tests, TypeScript, `npm run build`, and 9 Playwright E2E scenarios passed. The 5 new opt-in PostgreSQL tests were not executed in that historical run (no operator credentials available). Subsequent owner-run live evidence, including the added migration-upgrade test, is recorded separately in the integration acceptance section and `docs/HANDOFF.md`.
+
+## Core v2.4 — Coding intelligence, repository understanding and proposed patches (owner accepted with documented limitations)
+
+- Add authenticated `/coding/analyze` and a Coding workspace for bounded explain/locate/trace/diagnose/recommend/patch/review/test-discovery workflows, using existing repository safety and shared orchestration.
+- Separate static facts, user-reported observations, unverified hypotheses, missing information, reviewable diffs and verification recommendations. Static/mock mode does not claim model reasoning or test success. Non-demo context disclosure requires explicit per-request consent; live-provider behavior remains unverified.
+- Validate closed contracts, source snapshots, path/private exclusions, bounded exact replacements and new-file proposals. Diffs are generated only; no code application, test execution, shell commands, tool execution or autonomous action is introduced. No dependencies or database changes are required.
+- Preserve the accepted v2.1–v2.3 changes and their separate test provenance. The owner accepted v2.4 on 2026-10-17. **OWNER-RUN RESULTS REPORTED BY THE PROJECT OWNER:** 17 native Windows tests passed, 0 failed, 0 skipped (14 mocked variants deselected; 1 existing warning; exit 0). Live-provider behavior remains unverified, PostgreSQL has not been rerun against v2.4, and single-owner/advisory-only security limitations remain. Evidence and local integration provenance are recorded in `docs/HANDOFF.md`. Local integration and a local commit are separately authorized; pushing, publishing, merging to main and v2.5 are not authorized.
 
 ## Later milestones
 

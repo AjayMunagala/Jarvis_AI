@@ -7,7 +7,7 @@ import { getConversationMessages, getMemory, getReadiness, listConversations, li
 
 vi.mock('./services/api', () => ({
   sendChatMessage: vi.fn(), listConversations: vi.fn(), getConversationMessages: vi.fn(), listMemories: vi.fn(), searchMemories: vi.fn(),
-  createMemory: vi.fn(), updateMemory: vi.fn(), deleteMemory: vi.fn(), getMemory: vi.fn(), getReadiness: vi.fn(),
+  createMemory: vi.fn(), updateMemory: vi.fn(), deleteMemory: vi.fn(), getMemory: vi.fn(), getReadiness: vi.fn(), analyzeCoding: vi.fn(),
 }))
 const sendMock = vi.mocked(sendChatMessage)
 const listConversationsMock = vi.mocked(listConversations)
@@ -453,6 +453,58 @@ describe('JARVIS chat', () => {
     await userEvent.click(screen.getByLabelText(/System status: offline/i))
     expect(await screen.findByText('System ready')).toBeInTheDocument()
     unmountOffline()
+  })
+
+  it('keeps component failures authoritative after successful chat and refreshes readiness', async () => {
+    const unavailable: ReadinessResponse = {
+      status: 'not_ready', version: '2.1.0',
+      components: { application: 'ready', repository_intelligence: 'unavailable' },
+    }
+    getReadinessMock.mockResolvedValue(unavailable)
+    sendMock.mockResolvedValue({ reply: 'Chat still works.', provider: 'mock', demo: true })
+    render(<App />)
+    expect(await screen.findByText('System not ready')).toBeInTheDocument()
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'Hello{Enter}')
+    expect(await screen.findByText('Chat still works.')).toBeInTheDocument()
+    await waitFor(() => expect(getReadinessMock).toHaveBeenCalledTimes(2))
+    expect(screen.getByText('System not ready')).toBeInTheDocument()
+    expect(screen.queryByText('System ready')).not.toBeInTheDocument()
+
+    getReadinessMock.mockResolvedValue({ ...unavailable, status: 'ready', components: { application: 'ready', repository_intelligence: 'ready' } })
+    await userEvent.click(screen.getByLabelText('System status: not ready'))
+    expect(await screen.findByText('System ready')).toBeInTheDocument()
+    expect(getReadinessMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not promote readiness after successful conversation listing or a failed refresh', async () => {
+    getReadinessMock.mockResolvedValue({
+      status: 'not_ready', version: '2.1.0', components: { repository_intelligence: 'unavailable' },
+    })
+    render(<App />)
+    expect(await screen.findByText('System not ready')).toBeInTheDocument()
+    await unlockWithToken()
+    expect(await screen.findByText('No saved conversations yet.')).toBeInTheDocument()
+    await waitFor(() => expect(getReadinessMock).toHaveBeenCalledTimes(2))
+    expect(screen.getByText('System not ready')).toBeInTheDocument()
+
+    getReadinessMock.mockRejectedValue(new Error('Network unavailable'))
+    await userEvent.click(screen.getByLabelText('System status: not ready'))
+    expect(await screen.findByText('System offline')).toBeInTheDocument()
+    expect(screen.queryByText('System ready')).not.toBeInTheDocument()
+  })
+
+  it('ignores an older ready response after a newer readiness check fails', async () => {
+    let resolveInitial!: (value: ReadinessResponse) => void
+    getReadinessMock.mockReturnValueOnce(new Promise((resolve) => { resolveInitial = resolve }))
+      .mockResolvedValueOnce({ status: 'not_ready', version: '2.1.0', components: { authorization: 'unavailable' } })
+    sendMock.mockResolvedValue({ reply: 'Successful chat.', provider: 'mock', demo: true })
+    render(<App />)
+    expect(screen.getByText('Checking…')).toBeInTheDocument()
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'Hello{Enter}')
+    expect(await screen.findByText('System not ready')).toBeInTheDocument()
+    await act(async () => resolveInitial({ status: 'ready', version: '2.1.0', components: { application: 'ready' } }))
+    expect(screen.getByText('System not ready')).toBeInTheDocument()
+    expect(screen.queryByText('System ready')).not.toBeInTheDocument()
   })
 
   it('lists the context sources supplied to the model with cited markers', async () => {

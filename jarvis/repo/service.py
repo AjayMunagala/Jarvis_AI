@@ -12,6 +12,7 @@ from jarvis.repo.models import (
     GitStatusSummary,
     RepositoryInventory,
     SearchSummary,
+    SearchMatch,
     SymbolInfo,
     SymbolType,
     TestDiscovery,
@@ -62,6 +63,17 @@ class RepoIntelligenceService:
                 self._repo_root,
                 query,
                 max_results=max_results,
+            )
+        if search_type == "symbol":
+            symbols = self.find_symbols(query, path_filter=path_filter, max_results=max_results)
+            return SearchSummary(
+                query=query, search_type="symbol", total_matches=len(symbols),
+                matched_files_count=len({symbol.path for symbol in symbols}),
+                matches=[SearchMatch(
+                    path=symbol.path, line_number=symbol.line_number,
+                    match_type="symbol", matched_text=symbol.name,
+                ) for symbol in symbols],
+                truncated=len(symbols) >= min(max_results, 200),
             )
         return search_text(
             self._repo_root,

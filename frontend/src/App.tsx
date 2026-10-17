@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { getConversationMessages, getReadiness, listConversations, sendChatMessage, type ApiAuth, type ChatContextSummary, type ChatMemoryContext } from './services/api'
 import MemoryManager from './components/MemoryManager'
+import CodingPanel from './components/CodingPanel'
 
 const MAX_MESSAGE_LENGTH = 4000
 
@@ -41,6 +42,7 @@ const navItems = [
   { label: 'Chat', icon: MessageSquare, active: true },
   { label: 'Capabilities', icon: Sparkles },
   { label: 'Memory', icon: Folder },
+  { label: 'Coding', icon: Command },
   { label: 'Activity', icon: Activity },
 ]
 
@@ -64,7 +66,7 @@ export default function App() {
   const [pending, setPending] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [notice, setNotice] = useState('')
-  const [activeView, setActiveView] = useState<'Chat' | 'Memory'>('Chat')
+  const [activeView, setActiveView] = useState<'Chat' | 'Memory' | 'Coding'>('Chat')
   const [inspectMemoryIds, setInspectMemoryIds] = useState<string[]>([])
   const [providerInfo, setProviderInfo] = useState<{ provider: string; demo: boolean } | null>(null)
   const [credential, setCredential] = useState('')
@@ -85,6 +87,7 @@ export default function App() {
   const activeIdRef = useRef<string | null>(null)
   const sessionVersionRef = useRef(0)
   const sessionControllerRef = useRef(new AbortController())
+  const readinessRequestRef = useRef(0)
 
   const setActiveConversationId = useCallback((id: string | null) => {
     activeIdRef.current = id
@@ -92,15 +95,17 @@ export default function App() {
   }, [])
 
   const fetchReadiness = useCallback(async () => {
+    const requestId = ++readinessRequestRef.current
     try {
       const res = await getReadiness()
+      if (requestId !== readinessRequestRef.current) return
       if (res && res.status === 'ready') {
         setReadiness('ready')
       } else {
         setReadiness('not_ready')
       }
     } catch {
-      setReadiness('unreachable')
+      if (requestId === readinessRequestRef.current) setReadiness('unreachable')
     }
   }, [])
 
@@ -197,13 +202,13 @@ export default function App() {
       })
       setConversationListOffset(page.offset + page.limit)
       setConversationListHasMore(page.has_more)
-      setReadiness((current) => current !== 'ready' ? 'ready' : current)
+      void fetchReadiness()
     } catch (cause) {
       if (version === sessionVersionRef.current) setConversationListError(cause instanceof Error ? cause.message : 'Could not load saved conversations.')
     } finally {
       if (version === sessionVersionRef.current) setConversationListLoading(false)
     }
-  }, [credential, currentAuth])
+  }, [credential, currentAuth, fetchReadiness])
 
   useEffect(() => {
     if (!credential) {
@@ -305,7 +310,7 @@ export default function App() {
         : await sendChatMessage(text, auth)
       if (version !== sessionVersionRef.current) return
       setProviderInfo({ provider: result.provider, demo: result.demo })
-      setReadiness((current) => current !== 'ready' ? 'ready' : current)
+      void fetchReadiness()
       const persistedId = result.conversation_id || conversationId
       setConversations((current) => current.map((conversation) => conversation.id === conversationId
         ? { ...conversation, id: persistedId, persisted: Boolean(result.conversation_id) || conversation.persisted, updatedAt: Date.now(), messages: [...conversation.messages.filter((message) => !(retryMessageId && message.id === retryMessageId)), { id: createId(), role: 'assistant', content: result.reply, provider: result.provider, demo: result.demo, partial: result.partial, memoryContext: result.memory_context, context: result.context }] }
@@ -343,7 +348,7 @@ export default function App() {
   }
 
   function selectNav(label: string) {
-    if (label === 'Chat' || label === 'Memory') {
+    if (label === 'Chat' || label === 'Memory' || label === 'Coding') {
       setActiveView(label)
       setNotice('')
       setMobileMenuOpen(false)
@@ -373,7 +378,7 @@ export default function App() {
         <nav className="primary-nav">
           {navItems.map(({ label, icon: Icon }) => {
             const active = label === activeView
-            const available = label === 'Chat' || label === 'Memory'
+            const available = label === 'Chat' || label === 'Memory' || label === 'Coding'
             return <button key={label} className={`nav-item ${active ? 'nav-active' : ''}`} onClick={() => selectNav(label)} aria-current={active ? 'page' : undefined}>
               <Icon size={17} strokeWidth={1.8} /><span>{label}</span>{!available && <span className="nav-soon">SOON</span>}
             </button>
@@ -407,7 +412,7 @@ export default function App() {
           <div className="topbar-right"><div className="provider-pill"><span className="provider-dot" /><span>{providerInfo ? `${providerInfo.demo ? 'DEMO' : 'MODEL'} · ${providerInfo.provider.toUpperCase()}` : 'PROVIDER MODE'}</span></div>{credential && <button type="button" className="workspace-lock" onClick={lockWorkspace}>Lock workspace</button>}<span className="topbar-divider" /><div className={`system-status ${readiness !== 'ready' && readiness !== 'loading' ? 'system-status-clickable' : ''}`} aria-label={`System status: ${readiness === 'ready' ? 'ready' : readiness === 'not_ready' ? 'not ready' : readiness === 'unreachable' ? 'offline' : 'checking'}`} onClick={readiness !== 'ready' && readiness !== 'loading' ? () => void fetchReadiness() : undefined} title={readiness === 'ready' ? 'System ready' : readiness === 'not_ready' ? 'System not ready — click to refresh' : readiness === 'unreachable' ? 'System offline — click to retry' : 'Checking system readiness…'}><span className={`status-ring status-${readiness}`}>{readiness === 'ready' ? <Check size={11} /> : readiness === 'loading' ? <Clock3 size={11} /> : readiness === 'not_ready' ? <CircleHelp size={11} /> : <X size={11} />}</span><span>{readiness === 'ready' ? 'System ready' : readiness === 'loading' ? 'Checking…' : readiness === 'not_ready' ? 'System not ready' : 'System offline'}</span></div></div>
         </header>
 
-        {activeView === 'Memory' ? <div className="content-area"><MemoryManager inspectIds={inspectMemoryIds} auth={{ token: credential || undefined, onUnauthorized: handleUnauthorized }} /></div> : <><div className={`content-area ${messages.length ? 'has-messages' : ''}`}>
+        {activeView === 'Coding' ? <div className="content-area"><CodingPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Memory' ? <div className="content-area"><MemoryManager inspectIds={inspectMemoryIds} auth={{ token: credential || undefined, onUnauthorized: handleUnauthorized }} /></div> : <><div className={`content-area ${messages.length ? 'has-messages' : ''}`}>
           {notice && <div className="notice-banner" role="status"><CircleHelp size={16} /><span>{notice}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => setNotice('')}><X size={15} /></button></div>}
           {historyError && <div className="notice-banner conversation-error" role="alert"><CircleHelp size={16} /><span>{historyError}</span><button className="icon-button" aria-label="Dismiss conversation error" onClick={() => setHistoryError('')}><X size={15} /></button></div>}
           {historyLoading && <div className="notice-banner" role="status">Loading conversation history…</div>}

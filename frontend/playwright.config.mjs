@@ -46,7 +46,8 @@ export default defineConfig({
         JARVIS_PROVIDER: 'mock',
         JARVIS_PERSISTENCE_ENABLED: 'false',
         JARVIS_MEMORY_RETRIEVAL_ENABLED: 'false',
-        JARVIS_LOCAL_AUTH_TOKEN: '',
+        // Synthetic local fixture identity; never use a real credential in browser tests.
+        JARVIS_LOCAL_AUTH_TOKEN: 'jarvis-e2e-synthetic-token-never-a-secret-0001',
         JARVIS_OWNER_ID: '00000000-0000-4000-8000-000000000001',
         JARVIS_PERSISTENCE_DATABASE_URL: '',
         JARVIS_OPENAI_API_KEY: '',
