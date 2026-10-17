@@ -27,6 +27,8 @@ from jarvis.api.routes.scheduler import router as scheduler_router
 from jarvis.api.routes.health_diagnostic import router as health_diagnostic_router
 from jarvis.api.routes.finance import router as finance_router
 from jarvis.api.routes.improvement import router as improvement_router
+from jarvis.api.routes.autonomous import router as autonomous_router
+from jarvis.autonomous.coordinator import AutonomousCoordinator
 from jarvis.assistant.service import AssistantService
 from jarvis.assistant.stores import MemoryAssistantStore, PostgresAssistantStore
 from jarvis.workflow.service import WorkflowService
@@ -201,6 +203,17 @@ def create_app(
         health_service=app.state.health_service,
         finance_service=app.state.finance_service,
     )
+    app.state.autonomous_coordinator = AutonomousCoordinator(
+        assistant_service=app.state.assistant_service,
+        workflow_service=app.state.workflow_service,
+        knowledge_service=app.state.knowledge_service,
+        research_service=app.state.research_service,
+        scheduler_service=app.state.scheduler_service,
+        health_service=app.state.health_service,
+        finance_service=app.state.finance_service,
+        improvement_service=app.state.improvement_service,
+        audit_service=app.state.audit_service,
+    )
 
     app.add_middleware(
         RequestBodyLimitMiddleware,
@@ -225,6 +238,7 @@ def create_app(
     app.include_router(scheduler_router)
     app.include_router(finance_router)
     app.include_router(improvement_router)
+    app.include_router(autonomous_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
