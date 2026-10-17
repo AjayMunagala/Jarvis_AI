@@ -1,0 +1,38 @@
+{
+  "dataset_id": "routing-baseline",
+  "version": 1,
+  "description": "Small deterministic smoke dataset covering arithmetic, classification, extraction and coding answers. It checks plumbing and answer formats; it is not a benchmark of model intelligence.",
+  "cases": [
+    {
+      "case_id": "arith-1",
+      "task_type": "reasoning",
+      "prompt": "What is 17 multiplied by 23? Reply with the number only.",
+      "expected": {"kind": "number", "number": 391}
+    },
+    {
+      "case_id": "classify-1",
+      "task_type": "classification",
+      "prompt": "Classify the sentiment of 'The build finally passed, great work!' as positive, negative or neutral. Reply with one word.",
+      "expected": {"kind": "regex", "value": "(?i)^\\W*positive\\W*$"}
+    },
+    {
+      "case_id": "extract-1",
+      "task_type": "structured_extraction",
+      "prompt": "Extract the service name and port from: 'The api service listens on port 8173.' Return JSON with fields service and port.",
+      "expected": {"kind": "json_fields", "fields": {"service": "string", "port": "integer"},
+                   "field_values": {"service": "api", "port": 8173}}
+    },
+    {
+      "case_id": "coding-1",
+      "task_type": "coding",
+      "prompt": "In Python, which built-in function returns the number of items in a list? Reply with the function name.",
+      "expected": {"kind": "regex", "value": "\\blen\\b"}
+    },
+    {
+      "case_id": "summary-1",
+      "task_type": "summarization",
+      "prompt": "Text: 'JARVIS records approval requests; approving them executes nothing.' In two words, what does JARVIS record? Reply with those words only.",
+      "expected": {"kind": "regex", "value": "(?i)^\\W*approval requests?\\W*$"}
+    }
+  ]
+}

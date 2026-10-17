@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "default_policy": "balanced",
+  "policies": [
+    {
+      "name": "balanced",
+      "description": "Suitability and measured quality first, then latency and cost.",
+      "weights": {"suitability": 1.0, "quality": 1.0, "latency": 0.5, "cost": 0.5, "locality": 0.25}
+    },
+    {
+      "name": "quality",
+      "description": "Prefer the best-suited, best-measured model regardless of latency and cost.",
+      "weights": {"suitability": 1.5, "quality": 2.0, "latency": 0.1, "cost": 0.1, "locality": 0.0}
+    },
+    {
+      "name": "fast",
+      "description": "Prefer low measured latency among suitable models.",
+      "weights": {"suitability": 1.0, "quality": 0.5, "latency": 2.0, "cost": 0.5, "locality": 0.25}
+    },
+    {
+      "name": "private",
+      "description": "Local models only; remote providers are never eligible.",
+      "weights": {"suitability": 1.0, "quality": 1.0, "latency": 0.5, "cost": 0.0, "locality": 1.0},
+      "allow_remote": false
+    }
+  ]
+}
