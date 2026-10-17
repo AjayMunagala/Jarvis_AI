@@ -11,7 +11,7 @@ It assigns no v3.x or v4.0 work and does not implement any.
 | Repository | https://github.com/AjayMunagala/Jarvis_AI |
 | Handover branch | `jarvis/integration-acceptance-v30` (local; **not pushed**). It contains v3.0 on top of `jarvis/integration-acceptance-v29` (`ef3ae95`). |
 | History | v2.4 `abcb594` → v2.5 `5d615fc` → v2.6 `a0dc5be` → v2.7 `7ba5853` → v2.8 `5d70dbc` → v2.9 `ef3ae95` → v3.0 (this commit) |
-| Owner acceptance | v2.4–v2.8: accepted and integrated. v2.9 and v3.0: implemented and integrated locally under the owner's instruction to continue through v3.0; **formal owner acceptance is pending**. |
+| Owner acceptance | v2.4–v3.0: accepted by the owner and integrated locally. v2.9 and v3.0 were accepted as delivered on `jarvis/integration-acceptance-v30` (2026-10-17). |
 | Shared checkout | `D:\Project_Jarvis` is still on `jarvis/integration-acceptance-v25`; it was not modified. Work happened in worktrees under `D:\Project_Jarvis_worktrees\`. |
 | Runtime | Windows 10/11, Python 3.12 (`.venv-dev`), Node with Vite, React 18 and TypeScript. PostgreSQL through psycopg is optional. Playwright Chromium is used for the browser provider and E2E tests. |
 

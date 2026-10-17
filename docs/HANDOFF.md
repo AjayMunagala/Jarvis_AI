@@ -567,7 +567,7 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - Decision D3 applied: model-proposed calls only for currently invocable LOW-risk read-only tools, each validated by trusted code and re-checked by the runtime.
 - Dependencies for v2.9: the approval gateway should reuse `ToolResult`/`ToolActivityCall` statuses (`approval_required` already exists) and the audit correlation ids; durable audit should persist `ToolAuditEvent` records.
 
-## Core v2.9 — Approval gateway and durable audit (implemented; owner acceptance pending)
+## Core v2.9 — Approval gateway and durable audit (accepted)
 
 - Baseline: `jarvis/integration-acceptance-v28` at `5d70dbc26815090f83d4f1875820eaeaa1fc6c5e` (v2.8 accepted and integrated locally). Work is on `claude/jarvis-v2.9-approvals-audit` in `D:\Project_Jarvis_worktrees\approvals-v29`; not pushed.
 - New `jarvis/audit/` (`models.py`, `stores.py`, `service.py`), `jarvis/api/routes/activity.py`, migration `database/scripts/0006_audit_and_approvals.sql`, capabilities `audit.read`, `approvals.read`, `approvals.decide`, setting `JARVIS_APPROVALS_TTL_SECONDS` (default 900), and the Activity view. See `docs/APPROVALS_AUDIT.md`.
@@ -575,7 +575,7 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - Not run: live PostgreSQL application of migration 0006 (needs operator credentials).
 - Dependencies for v3.0: voice input should submit through the existing chat path (no new execution surface); Activity remains the place to review refused actions.
 
-## Core v3.0 — Voice and unified interface (implemented; owner acceptance pending)
+## Core v3.0 — Voice and unified interface (accepted)
 
 - Baseline: `jarvis/integration-acceptance-v29` at `ef3ae95292ecd9650d9a0d7d9455ccf6ffa767a4`. Work is on `claude/jarvis-v3.0-voice-interface` in `D:\Project_Jarvis_worktrees\voice-v30`; not pushed.
 - New `frontend/src/voice/` (`speech.ts`, `VoiceControls.tsx`/`.css`, tests), `jarvis/api/routes/interface.py` (`GET /interface/config`), setting `JARVIS_VOICE_ENABLED` (default true; opt-in still required per page session), voice wiring and OFF badges in `App.tsx`, one Playwright voice scenario. See `docs/VOICE_INTERFACE.md`.
