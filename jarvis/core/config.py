@@ -73,6 +73,8 @@ class Settings(BaseSettings):
     # Action loop (v2.8): chat may propose read-only tool calls; trusted code validates each one.
     chat_tools_enabled: bool = False
     chat_tool_max_calls: int = Field(default=4, ge=1, le=8)
+    # Approval gateway (v2.9): pending requests expire; approval executes nothing.
+    approvals_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
 
     @model_validator(mode="after")
     def validate_provider_configuration(self) -> "Settings":

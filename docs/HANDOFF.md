@@ -566,3 +566,11 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - New `jarvis/agent/` (`models.py`, `proposers.py`, `loop.py`, `verification.py`, `rendering.py`); chat integration in `jarvis/api/routes/chat.py`; `RequestContext.tool_evidence` and expert rendering of tool results; `ChatResponse.tool_activity`; settings `JARVIS_CHAT_TOOLS_ENABLED` (default false) and `JARVIS_CHAT_TOOL_MAX_CALLS`; `CapabilityDescriptor.autonomous` now reflects chat-tool enablement; chat UI tool-activity line. See `docs/ACTION_LOOP.md`.
 - Decision D3 applied: model-proposed calls only for currently invocable LOW-risk read-only tools, each validated by trusted code and re-checked by the runtime.
 - Dependencies for v2.9: the approval gateway should reuse `ToolResult`/`ToolActivityCall` statuses (`approval_required` already exists) and the audit correlation ids; durable audit should persist `ToolAuditEvent` records.
+
+## Core v2.9 — Approval gateway and durable audit (implemented; owner acceptance pending)
+
+- Baseline: `jarvis/integration-acceptance-v28` at `5d70dbc26815090f83d4f1875820eaeaa1fc6c5e` (v2.8 accepted and integrated locally). Work is on `claude/jarvis-v2.9-approvals-audit` in `D:\Project_Jarvis_worktrees\approvals-v29`; not pushed.
+- New `jarvis/audit/` (`models.py`, `stores.py`, `service.py`), `jarvis/api/routes/activity.py`, migration `database/scripts/0006_audit_and_approvals.sql`, capabilities `audit.read`, `approvals.read`, `approvals.decide`, setting `JARVIS_APPROVALS_TTL_SECONDS` (default 900), and the Activity view. See `docs/APPROVALS_AUDIT.md`.
+- Owner decision: approvals are recorded only; approval does not execute anything. Decision D7 applied: durable in PostgreSQL when persistence is enabled, otherwise in memory and labelled non-durable.
+- Not run: live PostgreSQL application of migration 0006 (needs operator credentials).
+- Dependencies for v3.0: voice input should submit through the existing chat path (no new execution surface); Activity remains the place to review refused actions.

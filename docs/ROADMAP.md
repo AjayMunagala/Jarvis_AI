@@ -255,6 +255,11 @@ Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remain
 - Master Phase 6. Chat requests can use registered read-only tools: rule-based (offline) or model-proposed calls, validated by trusted code, executed through the v2.7 runtime within the shared deadline and round/call limits, answered with untrusted tool evidence, and independently verified (citations and computed values).
 - `ChatResponse.tool_activity` and a chat UI line show calls, statuses, and verification. Off by default (`JARVIS_CHAT_TOOLS_ENABLED=false`). Details: `docs/ACTION_LOOP.md`.
 
+## Core v2.9 — Approval gateway and durable audit (implemented; owner acceptance pending)
+
+- Approval requests for refused actions (tools needing approval, consequential browser clicks) with risk, target, reason, expected side effects, scope hash and expiry; owner approve/reject exactly once; **recorded only, nothing executes**.
+- Central owner-scoped audit trail for tools, browser and approvals: PostgreSQL when persistence is enabled (migration 0006), otherwise in memory and labelled non-durable (D7). Activity frontend view. Details: `docs/APPROVALS_AUDIT.md`.
+
 ## Later milestones
 
 1. Identity and memory governance: authenticated users, explicit ownership, access controls, retention/export/revocation, and user-visible memory controls before exposing memory in shared deployments.

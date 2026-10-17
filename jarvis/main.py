@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from jarvis import __version__
+from jarvis.api.routes.activity import router as activity_router
 from jarvis.api.routes.browser import router as browser_router
 from jarvis.api.routes.chat import router as chat_router
 from jarvis.api.routes.coding import router as coding_router
@@ -17,6 +18,10 @@ from jarvis.api.routes.memories import router as memories_router
 from jarvis.api.routes.repo import router as repo_router
 from jarvis.api.routes.tools import router as tools_router
 from jarvis.api.routes.verification import router as verification_router
+from jarvis.audit.service import ApprovalService, AuditService
+from jarvis.audit.stores import (
+    MemoryApprovalStore, MemoryAuditStore, PostgresApprovalStore, PostgresAuditStore,
+)
 from jarvis.browser.service import BrowserService
 from jarvis.core.config import Settings, get_settings
 from jarvis.core.logging_config import configure_logging
@@ -97,6 +102,22 @@ def create_app(
     app.state.tool_runtime = ToolRuntime(
         resolved_settings, orchestration_service.tool_registry, app.state.authorization_policy,
     )
+    # v2.9 audit trail and approval gateway: durable in PostgreSQL when persistence is
+    # enabled (decision D7), otherwise in memory and labelled non-durable.
+    if resolved_settings.persistence_enabled:
+        url = resolved_settings.persistence_database_url.get_secret_value()
+        timeouts = dict(connect_timeout_seconds=resolved_settings.persistence_connect_timeout_seconds,
+                        operation_timeout_seconds=resolved_settings.persistence_operation_timeout_seconds)
+        audit_store, approval_store = PostgresAuditStore(url, **timeouts), PostgresApprovalStore(url, **timeouts)
+    else:
+        audit_store, approval_store = MemoryAuditStore(), MemoryApprovalStore()
+    app.state.audit_service = AuditService(audit_store)
+    app.state.approval_service = ApprovalService(
+        approval_store, app.state.audit_service, ttl_seconds=resolved_settings.approvals_ttl_seconds,
+    )
+    for component in (app.state.tool_runtime, app.state.browser_service):
+        component.audit_service = app.state.audit_service
+        component.approval_service = app.state.approval_service
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=resolved_settings.max_request_body_bytes,
@@ -110,6 +131,7 @@ def create_app(
     app.include_router(verification_router)
     app.include_router(browser_router)
     app.include_router(tools_router)
+    app.include_router(activity_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

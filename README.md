@@ -87,6 +87,10 @@ Apply migration `0005_memory_source_kind.sql` (`database\install_db.bat` applies
 
 With `JARVIS_TOOLS_ENABLED=true` and `JARVIS_CHAT_TOOLS_ENABLED=true`, chat can use the read-only tools: JARVIS proposes calls (deterministic rules offline, the model with a real provider), validates and runs them through the tool runtime, gives the results to the answer as untrusted data, and checks the answer against the evidence (`verified`, `partially_verified`, `unverified`, or `not_applicable`). Each answer shows which tools ran and their statuses. Nothing beyond the read-only tools can run. See `docs/ACTION_LOOP.md`.
 
+## Core v2.9 — Approval gateway and audit trail (implemented; owner acceptance pending)
+
+When JARVIS refuses an action that needs approval (a non-read-only or higher-risk tool, or a consequential browser click), it records an approval request. The **Activity** view (or `GET /approvals`, `POST /approvals/{id}/approve|reject`) lets the owner approve or reject it, and `GET /activity` shows one audit trail for tool calls, browser actions and decisions. **Approving records the decision only; nothing is executed.** Records are stored in PostgreSQL when persistence is enabled (apply migration `0006_audit_and_approvals.sql`), otherwise in memory and labelled not durable. See `docs/APPROVALS_AUDIT.md`.
+
 ## Prerequisites
 
 - Windows 10/11 and Python 3.11 or newer (developed with Python 3.12.10).

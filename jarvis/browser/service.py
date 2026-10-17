@@ -11,6 +11,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from time import monotonic, perf_counter
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from jarvis.browser.actions import classify
@@ -107,6 +108,9 @@ class BrowserService:
         )
         self._sessions: dict[str, _Session] = {}
         self._registry_lock = threading.Lock()
+        # v2.9: optional central audit trail and approval gateway (set by the app factory).
+        self.audit_service = None
+        self.approval_service = None
 
     # ------------------------------------------------------------- status
     def status(self) -> BrowserStatus:
@@ -232,6 +236,7 @@ class BrowserService:
             session.actions.append(record)
             del session.actions[:-MAX_ACTION_RECORDS]
             self._audit(session, f"action_{action}", outcome, f"{classification}: {reason}")
+            self._central_audit(session, record)
             logger.info("Browser action recorded", extra={
                 "outcome": outcome, "error_code": f"{action}:{classification}",
                 "duration_ms": record.duration_ms,
@@ -266,8 +271,11 @@ class BrowserService:
             return finish("blocked", "blocked", reason)
         if classification == "consequential":
             # Never executed in v2.6, regardless of what the page or model requests.
+            approval = self._request_approval(session, element, stored, reason)
             return finish("consequential", "approval_required",
-                          f"{reason} Owner approval is required; the action was not performed.")
+                          f"{reason} Owner approval is required; the action was not performed."
+                          + (f" Approval request {approval.approval_id} was recorded; approving it does not perform"
+                             " the action in this version." if approval else ""))
 
         # 3. Field-level rules.
         if action == "type":
@@ -384,6 +392,41 @@ class BrowserService:
 
     def _check_url(self, url: str) -> str:
         return self.policy.check(url)
+
+    # ------------------------------------------------- audit and approvals
+    def _central_audit(self, session: "_Session", record: ActionRecord) -> None:
+        if self.audit_service is None:
+            return
+        try:
+            self.audit_service.record(
+                owner_id=session.owner_id, category="browser", event_type=f"browser_{record.action}",
+                decision=record.classification, status=record.outcome, subject=record.element_label or record.action,
+                correlation_id=session.session_id[:64],
+                details={"action_id": record.action_id, "transition": record.transition,
+                         "url_host": _host(record.url_after or record.url_before),
+                         "duration_ms": record.duration_ms},
+            )
+        except Exception:
+            logger.warning("Central audit recording failed", extra={"outcome": "audit_error"})
+
+    def _request_approval(self, session: "_Session", element, stored, reason: str):
+        if self.approval_service is None or element is None:
+            return None
+        from jarvis.audit.models import ApprovalProposal  # noqa: PLC0415 - optional integration
+
+        page_url = sanitize_url(session.current_url) if session.current_url else ""
+        try:
+            return self.approval_service.request(session.owner_id, ApprovalProposal(
+                category="browser", action=f"click:{element.kind}",
+                target=f"{page_url} :: {(element.label or element.text or element.element_id)[:150]}"[:300],
+                reason=reason[:500], risk="consequential",
+                expected_side_effects="May submit, send, purchase, delete, publish, or change an account on the site.",
+                scope_material=f"{page_url}|{element.element_id}|{element.css_path}|{stored.view.content_sha256 if stored else ''}",
+                correlation_id=session.session_id[:64],
+            ))
+        except Exception:
+            logger.warning("Approval request recording failed", extra={"outcome": "approval_error"})
+            return None
 
     # -------------------------------------------------------- observation
     def _observe(self, session: _Session, page: RawPage) -> PageObservation:
@@ -510,6 +553,15 @@ def build_observation(
         limitations=tuple(limitations),
     )
     return view, extraction
+
+
+def _host(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        return urlsplit(url).hostname
+    except ValueError:
+        return None
 
 
 def _domains(raw: str) -> tuple[str, ...]:

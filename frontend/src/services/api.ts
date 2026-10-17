@@ -179,7 +179,8 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
     throw new Error('Workspace locked. Enter your local access token again.')
   }
   if (response.status === 204) return undefined as T
-  if (!response.ok && (path.startsWith('/browser') || path.startsWith('/tools') || path === '/capabilities')) {
+  if (!response.ok && (path.startsWith('/browser') || path.startsWith('/tools') || path === '/capabilities'
+    || path.startsWith('/approvals') || path.startsWith('/activity'))) {
     // Browser and tool routes return short, sanitized policy messages that explain blocks.
     let detail = ''
     try {
@@ -725,4 +726,58 @@ export function callTool(toolId: string, args: Record<string, unknown>, auth?: A
 
 export function getToolAudit(limit: number, auth?: ApiAuth): Promise<ToolAuditPage> {
   return request<ToolAuditPage>(`/tools/audit?limit=${encodeURIComponent(String(limit))}`, undefined, false, auth)
+}
+
+// ----------------------------------------------- activity and approvals (v2.9)
+
+export interface AuditRecord {
+  event_id: string
+  occurred_at: string
+  owner_id: string
+  category: 'tool' | 'browser' | 'approval'
+  event_type: string
+  decision: string
+  status: string
+  subject: string
+  correlation_id: string | null
+  details: Record<string, string | number | boolean | null>
+  durable: boolean
+}
+export interface ActivityPage { durable_storage: boolean; storage_note: string; events: AuditRecord[] }
+export type ApprovalState = 'pending' | 'approved' | 'rejected' | 'expired'
+export interface ApprovalRequest {
+  approval_id: string
+  owner_id: string
+  category: 'tool' | 'browser'
+  action: string
+  target: string
+  reason: string
+  risk: 'low' | 'medium' | 'high' | 'critical' | 'consequential'
+  expected_side_effects: string
+  scope_sha256: string
+  correlation_id: string | null
+  created_at: string
+  expires_at: string
+  state: ApprovalState
+  decided_at: string | null
+  decision_note: string | null
+  execution: 'not_available'
+  durable: boolean
+}
+export interface ApprovalPage { durable_storage: boolean; execution_note: string; approvals: ApprovalRequest[] }
+
+export function getActivity(limit: number, auth?: ApiAuth, category?: AuditRecord['category']): Promise<ActivityPage> {
+  const query = new URLSearchParams({ limit: String(limit) })
+  if (category) query.set('category', category)
+  return request<ActivityPage>(`/activity?${query.toString()}`, undefined, false, auth)
+}
+
+export function getApprovals(limit: number, auth?: ApiAuth, state?: ApprovalState): Promise<ApprovalPage> {
+  const query = new URLSearchParams({ limit: String(limit) })
+  if (state) query.set('state', state)
+  return request<ApprovalPage>(`/approvals?${query.toString()}`, undefined, false, auth)
+}
+
+export function decideApproval(approvalId: string, approve: boolean, note: string | undefined, auth?: ApiAuth): Promise<ApprovalRequest> {
+  return request<ApprovalRequest>(`/approvals/${encodeURIComponent(approvalId)}/${approve ? 'approve' : 'reject'}`, json(note ? { note } : {}), false, auth)
 }

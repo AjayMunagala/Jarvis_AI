@@ -21,6 +21,10 @@ class Capability(StrEnum):
     # Tool runtime (v2.7): list capabilities/audit, and invoke registered read-only tools.
     TOOLS_READ = "tools.read"
     TOOLS_INVOKE = "tools.invoke"
+    # Audit trail and approval gateway (v2.9). Deciding never executes anything.
+    AUDIT_READ = "audit.read"
+    APPROVALS_READ = "approvals.read"
+    APPROVALS_DECIDE = "approvals.decide"
     EXTERNAL_ACTION_EXECUTE = "external_action.execute"
 
 
@@ -36,6 +40,9 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.BROWSER_INTERACT,
     Capability.TOOLS_READ,
     Capability.TOOLS_INVOKE,
+    Capability.AUDIT_READ,
+    Capability.APPROVALS_READ,
+    Capability.APPROVALS_DECIDE,
 })
 
 

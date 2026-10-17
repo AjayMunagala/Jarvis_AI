@@ -48,6 +48,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def _canonical(arguments) -> str:
+    try:
+        return json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)[:20_000]
+    except (TypeError, ValueError):
+        return "<unserializable>"
+
+
 def _digest(arguments: dict) -> str:
     try:
         canonical = json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)
@@ -80,6 +87,9 @@ class ToolRuntime:
         self.policy = policy
         self.handlers = HANDLERS if handlers is None else handlers
         self.audit = audit or AuditLog()
+        # v2.9: optional central audit trail and approval gateway (set by the app factory).
+        self.audit_service = None
+        self.approval_service = None
         self._executor = ThreadPoolExecutor(max_workers=settings.tools_max_concurrent, thread_name_prefix="jarvis-tool")
         self._slots = threading.BoundedSemaphore(settings.tools_max_concurrent)
 
@@ -167,6 +177,7 @@ class ToolRuntime:
                 duration_ms=round((perf_counter() - started) * 1000, 3), evidence_count=len(evidence),
             )
             self.audit.append(event)
+            self._central_audit(owner_id, event)
             logger.info("Tool call recorded", extra={
                 "outcome": status.value, "error_code": f"{call.tool_id}:{decision}", "duration_ms": event.duration_ms,
             })
@@ -185,9 +196,13 @@ class ToolRuntime:
                           error=ToolError(code="unknown_tool", message="The tool is not registered."))
         definition = self.registry.get(tool_id)
         if definition.risk != "low" or not definition.read_only or handler.risk != RiskClass.LOW or not handler.read_only:
+            approval = self._request_approval(owner_id, definition, arguments, call.correlation_id)
             return finish(ToolStatus.APPROVAL_REQUIRED, "approval_required",
+                          evidence=(f"approval:{approval.approval_id}",) if approval else (),
                           error=ToolError(code="approval_required",
-                                          message="Only low-risk read-only tools can run; this tool was not executed."))
+                                          message="Only low-risk read-only tools can run; this tool was not executed."
+                                          + (f" Approval request {approval.approval_id} was recorded; approving it does"
+                                             " not execute anything in this version." if approval else "")))
         for capability in (Capability.TOOLS_INVOKE, *handler.required):
             if not self._allows(policy, owner_id, capability):
                 return finish(ToolStatus.DENIED, "denied",
@@ -258,6 +273,39 @@ class ToolRuntime:
                           error=ToolError(code="output_too_large", message="The tool output exceeded the configured size limit."))
         return finish(ToolStatus.SUCCEEDED, "allowed", output=output, evidence=result.evidence,
                       output_bytes=size, untrusted=result.untrusted_content)
+
+    def _central_audit(self, owner_id: UUID, event: ToolAuditEvent) -> None:
+        service = self.audit_service
+        if service is None:
+            return
+        try:
+            service.record(
+                owner_id=owner_id, category="tool", event_type="tool_call", decision=event.decision,
+                status=event.status.value, subject=event.tool_id, correlation_id=event.correlation_id,
+                event_id=event.event_id, occurred_at=event.timestamp,
+                details={"call_id": event.call_id, "error_code": event.error_code, "duration_ms": event.duration_ms,
+                         "evidence_count": event.evidence_count, "argument_sha256": event.argument_sha256},
+            )
+        except Exception:
+            logger.warning("Central audit recording failed", extra={"outcome": "audit_error"})
+
+    def _request_approval(self, owner_id: UUID, definition, arguments, correlation_id: str):
+        service = self.approval_service
+        if service is None:
+            return None
+        from jarvis.audit.models import ApprovalProposal  # noqa: PLC0415 - optional integration
+
+        try:
+            return service.request(owner_id, ApprovalProposal(
+                category="tool", action=definition.id, target=definition.id,
+                reason="The tool is not registered as low-risk and read-only, so it cannot run automatically.",
+                risk=definition.risk if definition.risk in {"low", "medium", "high", "critical"} else "high",
+                expected_side_effects="Unknown; the tool may change data or systems.",
+                scope_material=_canonical(arguments), correlation_id=correlation_id,
+            ))
+        except Exception:
+            logger.warning("Approval request recording failed", extra={"outcome": "approval_error"})
+            return None
 
     def audit_page(self, limit: int) -> AuditPage:
         return AuditPage(retention=f"In-memory only, last {MAX_AUDIT_EVENTS} events; cleared on restart.",
