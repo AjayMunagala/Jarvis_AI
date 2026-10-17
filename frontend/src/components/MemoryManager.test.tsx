@@ -2,9 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import MemoryManager from './MemoryManager'
-import { createMemory, deleteMemory, getMemory, listMemories, searchMemories, updateMemory } from '../services/api'
+import { createMemory, deleteMemory, getMemory, ingestDocument, listMemories, searchMemories, updateMemory } from '../services/api'
 
-vi.mock('../services/api', () => ({ createMemory: vi.fn(), deleteMemory: vi.fn(), getMemory: vi.fn(), listMemories: vi.fn(), searchMemories: vi.fn(), updateMemory: vi.fn() }))
+vi.mock('../services/api', () => ({ createMemory: vi.fn(), deleteMemory: vi.fn(), getMemory: vi.fn(), ingestDocument: vi.fn(), listMemories: vi.fn(), searchMemories: vi.fn(), updateMemory: vi.fn() }))
 const record = { id: 'memory-1', content: 'A saved fact', category: 'project', source_reference: 'doc-1', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' }
 const page = { items: [record], total: 1, limit: 20, offset: 0, has_more: false }
 afterEach(() => { cleanup(); vi.clearAllMocks() })
@@ -52,6 +52,36 @@ describe('MemoryManager', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' })); expect(deleteMemory).not.toHaveBeenCalled()
     await userEvent.click(screen.getByRole('button', { name: 'Delete' })); await userEvent.click(screen.getByRole('button', { name: 'Delete permanently' }))
     await waitFor(() => expect(deleteMemory).toHaveBeenCalledWith('memory-1', undefined))
+  })
+  it('requires filename confirmation before importing and announces success', async () => {
+    vi.mocked(listMemories).mockResolvedValue(page)
+    vi.mocked(ingestDocument).mockResolvedValue(record)
+    render(<MemoryManager />); await screen.findByText('A saved fact')
+    const file = new File(['document text'], 'project-notes.md', { type: 'text/markdown' })
+    await userEvent.upload(screen.getByLabelText(/Import one/), file)
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('project-notes.md')
+    expect(ingestDocument).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(ingestDocument).not.toHaveBeenCalled()
+
+    await userEvent.upload(screen.getByLabelText(/Import one/), file)
+    await userEvent.click(screen.getByRole('button', { name: 'Import document' }))
+    await waitFor(() => expect(ingestDocument).toHaveBeenCalledWith(file, undefined))
+    expect(await screen.findByRole('status')).toHaveTextContent('Imported project-notes.md as one memory.')
+    expect(listMemories).toHaveBeenCalledTimes(2)
+  })
+  it('rejects unsupported files locally and presents server import errors', async () => {
+    vi.mocked(listMemories).mockResolvedValue(page)
+    vi.mocked(ingestDocument).mockRejectedValue(new Error('Document must not be blank.'))
+    render(<MemoryManager />); await screen.findByText('A saved fact')
+    await userEvent.upload(screen.getByLabelText(/Import one/), new File(['x'], 'script.exe'), { applyAccept: false })
+    expect(await screen.findByRole('alert')).toHaveTextContent('Choose a .txt or .md document.')
+    expect(ingestDocument).not.toHaveBeenCalled()
+
+    const file = new File(['   '], 'empty.txt')
+    await userEvent.upload(screen.getByLabelText(/Import one/), file)
+    await userEvent.click(screen.getByRole('button', { name: 'Import document' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Document must not be blank.')
   })
   it('handles unavailable storage and stale selected IDs', async () => {
     vi.mocked(listMemories).mockRejectedValue(new Error('Memory storage is disabled or unavailable. Enable local PostgreSQL persistence to manage saved memories.'))

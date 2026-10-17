@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+from uuid import UUID
 
 import httpx
 import pytest
@@ -24,8 +25,22 @@ from jarvis.orchestration.registry import ExpertRegistry, ToolRegistry, ToolRegi
 from jarvis.orchestration.service import OrchestrationService
 
 
+STATELESS_AUTH_TOKEN = "stateless-provider-auth-token-0123456789-abcdef"
+STATELESS_OWNER_ID = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
+
+
+def stateless_openai_settings():
+    return Settings(
+        _env_file=None,
+        provider="openai",
+        openai_api_key=SecretStr("unit-test-placeholder"),
+        local_auth_token=SecretStr(STATELESS_AUTH_TOKEN),
+        owner_id=STATELESS_OWNER_ID,
+    )
+
+
 def openai_provider(transport: httpx.AsyncBaseTransport) -> OpenAIProvider:
-    settings = Settings(provider="openai", openai_api_key=SecretStr("test-fixture-only"))
+    settings = stateless_openai_settings()
     return OpenAIProvider(
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
@@ -51,10 +66,26 @@ def test_openai_selection_requires_api_key_and_does_not_fall_back_to_mock():
         build_provider("openai")
 
 
+def test_non_mock_provider_configuration_requires_local_bearer_identity_without_persistence():
+    with pytest.raises(ValidationError, match="JARVIS_LOCAL_AUTH_TOKEN"):
+        Settings(
+            _env_file=None, provider="openai",
+            openai_api_key=SecretStr("unit-test-placeholder"),
+        )
+    with pytest.raises(ValidationError, match="JARVIS_OWNER_ID"):
+        Settings(
+            _env_file=None, provider="openai",
+            openai_api_key=SecretStr("unit-test-placeholder"),
+            local_auth_token=SecretStr(STATELESS_AUTH_TOKEN),
+        )
+
+
 def test_openai_configuration_loads_from_environment_without_exposing_key(monkeypatch):
     monkeypatch.setenv("JARVIS_PROVIDER", "openai")
     monkeypatch.setenv("JARVIS_OPENAI_API_KEY", "unit-test-placeholder")
     monkeypatch.setenv("JARVIS_OPENAI_MODEL", "test-model")
+    monkeypatch.setenv("JARVIS_LOCAL_AUTH_TOKEN", STATELESS_AUTH_TOKEN)
+    monkeypatch.setenv("JARVIS_OWNER_ID", str(STATELESS_OWNER_ID))
     settings = Settings(_env_file=None)
     assert settings.provider == "openai"
     assert settings.openai_model == "test-model"
@@ -62,18 +93,22 @@ def test_openai_configuration_loads_from_environment_without_exposing_key(monkey
 
 
 def test_openai_secret_is_masked_and_endpoint_must_use_https():
-    settings = Settings(provider="openai", openai_api_key=SecretStr("unit-test-placeholder"))
+    settings = stateless_openai_settings()
     assert "unit-test-placeholder" not in repr(settings)
     with pytest.raises(ValidationError, match="must use HTTPS"):
         Settings(
             provider="openai",
             openai_api_key=SecretStr("unit-test-placeholder"),
+            local_auth_token=SecretStr(STATELESS_AUTH_TOKEN),
+            owner_id=STATELESS_OWNER_ID,
             openai_base_url="http://provider.invalid/v1",
         )
     with pytest.raises(ValidationError, match="must not contain credentials"):
         Settings(
             provider="openai",
             openai_api_key=SecretStr("unit-test-placeholder"),
+            local_auth_token=SecretStr(STATELESS_AUTH_TOKEN),
+            owner_id=STATELESS_OWNER_ID,
             openai_base_url="https://user:pass@provider.invalid/v1",
         )
 
@@ -104,8 +139,10 @@ def test_chat_contract_identifies_model_provider_and_returns_null_id_without_per
     provider = openai_provider(httpx.MockTransport(
         lambda request: httpx.Response(200, json={"choices": [{"message": {"content": "Model-backed reply."}}]})
     ))
-    settings = Settings(provider="openai", openai_api_key=SecretStr("unit-test-placeholder"))
-    with TestClient(create_app(settings=settings, provider=provider)) as client:
+    settings = stateless_openai_settings()
+    with TestClient(create_app(settings=settings, provider=provider), headers={
+        "Authorization": f"Bearer {STATELESS_AUTH_TOKEN}"
+    }) as client:
         response = client.post("/chat", json={"message": "hello"})
     assert response.status_code == 200
     assert response.json() == {
@@ -117,6 +154,61 @@ def test_chat_contract_identifies_model_provider_and_returns_null_id_without_per
         "memory_context": None,
     }
     assert len(response.headers["x-jarvis-execution-id"]) == 32
+
+
+@pytest.mark.parametrize("authorization", [None, "Bearer wrong-token-value-0123456789-abcdef"])
+def test_stateless_non_demo_chat_rejects_missing_or_invalid_bearer_before_provider_call(authorization):
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={"choices": [{"message": {"content": "unexpected"}}]})
+
+    provider = openai_provider(httpx.MockTransport(handler))
+    headers = {} if authorization is None else {"Authorization": authorization}
+    with TestClient(create_app(settings=stateless_openai_settings(), provider=provider)) as client:
+        response = client.post("/chat", json={"message": "private request"}, headers=headers)
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.json() == {
+        "error": "unauthorized", "detail": "A valid bearer credential is required."
+    }
+    assert calls == 0
+
+
+def test_stateless_non_demo_chat_requires_server_configured_identity():
+    provider = openai_provider(httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"choices": [{"message": {"content": "unexpected"}}]})
+    ))
+    settings = Settings(_env_file=None, openai_api_key=SecretStr("unused"))
+    with TestClient(create_app(settings=settings, provider=provider)) as client:
+        response = client.post("/chat", json={"message": "hello"})
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "persistence_unavailable", "detail": "Authenticated access is not configured."
+    }
+
+
+def test_chat_request_cannot_select_demo_provider_to_bypass_authentication():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={"choices": [{"message": {"content": "unexpected"}}]})
+
+    provider = openai_provider(httpx.MockTransport(handler))
+    with TestClient(create_app(settings=stateless_openai_settings(), provider=provider)) as client:
+        response = client.post(
+            "/chat",
+            json={"message": "hello", "provider": "mock"},
+            headers={"Authorization": f"Bearer {STATELESS_AUTH_TOKEN}"},
+        )
+    assert response.status_code == 422
+    assert response.json() == {"error": "invalid_request", "detail": "The request body is invalid."}
+    assert calls == 0
 
 
 def test_structured_specialist_chat_keeps_public_api_contract():
@@ -135,8 +227,10 @@ def test_structured_specialist_chat_keeps_public_api_contract():
             json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(structured)}}]},
         )
     ))
-    settings = Settings(provider="openai", openai_api_key=SecretStr("unit-test-placeholder"))
-    with TestClient(create_app(settings=settings, provider=provider)) as client:
+    settings = stateless_openai_settings()
+    with TestClient(create_app(settings=settings, provider=provider), headers={
+        "Authorization": f"Bearer {STATELESS_AUTH_TOKEN}"
+    }) as client:
         response = client.post("/chat", json={"message": "Analyze the proposal"})
     assert response.status_code == 200
     assert set(response.json()) == {"reply", "provider", "demo", "partial", "conversation_id", "memory_context"}
@@ -157,8 +251,10 @@ def test_malformed_structured_specialist_response_is_sanitized_at_api_boundary()
     provider = openai_provider(httpx.MockTransport(
         lambda request: httpx.Response(200, json={"choices": [{"message": {"content": raw}}]})
     ))
-    settings = Settings(provider="openai", openai_api_key=SecretStr("unit-test-placeholder"))
-    with TestClient(create_app(settings=settings, provider=provider)) as client:
+    settings = stateless_openai_settings()
+    with TestClient(create_app(settings=settings, provider=provider), headers={
+        "Authorization": f"Bearer {STATELESS_AUTH_TOKEN}"
+    }) as client:
         response = client.post("/chat", json={"message": "Analyze this claim"})
     assert response.status_code == 502
     assert response.json() == {"error": "provider_error", "detail": "The configured provider failed."}
@@ -176,8 +272,10 @@ def test_structured_output_still_enforces_local_bounds_removed_from_transmitted_
     provider = openai_provider(httpx.MockTransport(
         lambda request: httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(structured)}}]})
     ))
-    settings = Settings(provider="openai", openai_api_key=SecretStr("unit-test-placeholder"))
-    with TestClient(create_app(settings=settings, provider=provider)) as client:
+    settings = stateless_openai_settings()
+    with TestClient(create_app(settings=settings, provider=provider), headers={
+        "Authorization": f"Bearer {STATELESS_AUTH_TOKEN}"
+    }) as client:
         response = client.post("/chat", json={"message": "Analyze the proposal"})
     assert response.status_code == 502
     assert response.json() == {"error": "provider_error", "detail": "The configured provider failed."}
@@ -199,9 +297,11 @@ def test_validation_finding_is_rendered_in_readable_chat_reply_without_internal_
     provider = openai_provider(httpx.MockTransport(
         lambda request: httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(structured)}}]})
     ))
-    settings = Settings(provider="openai", openai_api_key=SecretStr("unit-test-placeholder"))
+    settings = stateless_openai_settings()
     caplog.set_level("INFO")
-    with TestClient(create_app(settings=settings, provider=provider)) as client:
+    with TestClient(create_app(settings=settings, provider=provider), headers={
+        "Authorization": f"Bearer {STATELESS_AUTH_TOKEN}"
+    }) as client:
         response = client.post("/chat", json={"message": "Validate claim marker PRIVATE_PROMPT_MARKER"})
     assert response.status_code == 200
     body = response.json()
@@ -251,12 +351,10 @@ def test_chat_does_not_fall_back_to_mock_after_openai_authentication_failure():
         return httpx.Response(401, json={"error": {"message": "sensitive provider detail"}})
 
     provider = openai_provider(httpx.MockTransport(handler))
-    settings = Settings(
-        provider="openai",
-        openai_api_key=SecretStr("unit-test-placeholder"),
-        max_expert_retries=3,
-    )
-    with TestClient(create_app(settings=settings, provider=provider)) as client:
+    settings = stateless_openai_settings().model_copy(update={"max_expert_retries": 3})
+    with TestClient(create_app(settings=settings, provider=provider), headers={
+        "Authorization": f"Bearer {STATELESS_AUTH_TOKEN}"
+    }) as client:
         response = client.post("/chat", json={"message": "hello"})
     assert response.status_code == 502
     assert response.json() == {"error": "provider_error", "detail": "The configured provider failed."}
@@ -391,7 +489,7 @@ def test_configured_specialist_instructions_reach_openai_request_payloads():
             }
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(structured)}}]})
 
-    settings = Settings(provider="openai", openai_api_key=SecretStr("unit-test-placeholder"))
+    settings = stateless_openai_settings()
     provider = OpenAIProvider(
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,

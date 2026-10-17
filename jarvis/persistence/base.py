@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
+from jarvis.models.schemas import CONVERSATION_LIST_DEFAULT_LIMIT, ConversationListResponse
+
 
 MessageRole = Literal["user", "assistant"]
 
@@ -40,6 +42,10 @@ class ConversationRepository(Protocol):
     def get_messages(
         self, conversation_id: UUID, *, before_sequence: int | None = None, limit: int = 51
     ) -> tuple[ConversationMessage, ...]: ...
+
+    def list_conversations(
+        self, *, limit: int = CONVERSATION_LIST_DEFAULT_LIMIT, offset: int = 0
+    ) -> ConversationListResponse: ...
 
     def save_exchange(
         self, user_content: str, assistant_content: str, conversation_id: UUID | None = None

@@ -47,6 +47,15 @@ button:focus-visible, textarea:focus-visible { outline: 2px solid #5bc8e8; outli
 .history-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; margin: 27px 9px 10px; color: #788697; }
 .history-list { min-width: 0; display: grid; gap: 3px; overflow-x: hidden; overflow-y: auto; }
 .history-empty { margin: 2px 9px; max-width: 175px; color: #657182; font-size: 11px; line-height: 1.55; }
+.history-status { margin: 2px 9px; color: #91a0b0; font-size: 10px; }
+.history-error { display: grid; gap: 7px; margin: 3px 5px; padding: 9px; border: 1px solid rgba(232,123,110,.25); border-radius: 6px; color: #e6aaa3; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.history-error button, .history-load-more, .history-load-older, .history-unlock { justify-self: start; border: 1px solid var(--line-strong); border-radius: 5px; padding: 5px 8px; background: rgba(255,255,255,.025); color: #a9dbe7; font-size: 10px; cursor: pointer; }
+.history-unlock { margin: 0 5px 5px; }
+.history-load-more { margin: 5px 8px; }
+.history-load-more:disabled, .history-load-older:disabled { opacity: .5; cursor: wait; }
+.history-load-older { display: block; margin: 0 auto 17px; }
+.retry-warning { display: block; margin: 7px 0 2px; color: #d8c192; font-size: 10px; line-height: 1.45; }
+.conversation-error { border-color: rgba(232,123,110,.3); color: #f0b5ad; background: rgba(95,40,36,.2); }
 .history-item { display: flex; align-items: center; gap: 9px; width: 100%; min-width: 0; min-height: 35px; padding: 0 9px; overflow: hidden; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #8591a0; cursor: pointer; text-align: left; }
 .history-item:hover, .history-active { background: rgba(255,255,255,.04); color: #d5dee7; }
 .history-item svg { flex: 0 0 auto; color: #788696; }

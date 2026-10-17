@@ -8,6 +8,10 @@ from pydantic import SecretStr, ValidationError
 from jarvis.core.config import Settings
 from jarvis.persistence.base import ConversationMessage, ConversationNotFound, PersistenceError
 from jarvis.persistence.postgres import PostgresConversationRepository
+from jarvis.models.schemas import (
+    CONVERSATION_LIST_MAX_LIMIT,
+    CONVERSATION_LIST_MAX_OFFSET,
+)
 
 TEST_AUTH_TOKEN = "test-only-token-with-at-least-32-characters"
 TEST_OWNER_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -103,10 +107,19 @@ def test_message_contract_rejects_blank_content():
 
 
 class FakeConnection(AbstractContextManager):
-    def __init__(self, rows=(), *, fail_on_call=None, next_sequence=0, conversation_exists=True):
+    def __init__(
+        self,
+        rows=(),
+        *,
+        fail_on_call=None,
+        next_sequence=0,
+        conversation_exists=True,
+        conversation_rows=(),
+    ):
         self.calls = []
         self.rows = list(rows)
         self.message_rows = list(rows)
+        self.conversation_rows = list(conversation_rows)
         self.fail_on_call = fail_on_call
         self.next_sequence = next_sequence
         self.conversation_exists = conversation_exists
@@ -125,7 +138,10 @@ class FakeConnection(AbstractContextManager):
         self.calls.append((query, params))
         if self.fail_on_call == len(self.calls):
             raise RuntimeError("private database password and provider payload")
-        if "SELECT id FROM jarvis_app.conversations" in query:
+        if "FROM jarvis_app.conversations AS c" in query:
+            requested_limit, offset = params
+            self.rows = self.conversation_rows[offset : offset + requested_limit]
+        elif "SELECT id FROM jarvis_app.conversations" in query:
             self.rows = [(params[0],)] if self.conversation_exists else []
         elif "RETURNING id, conversation_id, sequence_number, role, content, created_at" in query:
             self.rows = [(*params[:3], params[3], params[4], datetime.now(timezone.utc))]
@@ -315,6 +331,116 @@ def test_message_retrieval_cursor_filters_to_older_sequence_numbers():
     query, params = sql_calls[1]
     assert "sequence_number < %s" in query
     assert params == (conversation_id, 9, 21)
+
+
+def test_conversation_listing_summarizes_empty_and_populated_conversations():
+    conversation_id = UUID("00000000-0000-0000-0000-000000000001")
+    created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    last_activity = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    empty_id = UUID("00000000-0000-0000-0000-000000000002")
+    connection = FakeConnection(conversation_rows=[
+        (conversation_id, created_at, last_activity, "first user message"),
+        (empty_id, created_at, created_at, None),
+    ])
+    repository = PostgresConversationRepository(
+        "private-url", connect=lambda *_args, **_kwargs: connection
+    )
+
+    page = repository.list_conversations(limit=2)
+
+    assert [item.conversation_id for item in page.items] == [conversation_id, empty_id]
+    assert page.items[0].preview == "first user message"
+    assert page.items[1].preview is None
+    assert page.items[1].last_activity_at == created_at
+    assert page.limit == 2 and page.offset == 0 and not page.has_more
+    sql_calls = [call for call in connection.calls if "set_config('statement_timeout'" not in call[0]]
+    query, params = sql_calls[0]
+    assert params == (3, 0)
+    assert "LEFT JOIN LATERAL" in query
+    assert "m.role = 'user'" in query
+    assert "ORDER BY m.sequence_number ASC, m.id ASC" in query
+    assert "ORDER BY last_activity_at DESC, c.id DESC" in query
+    assert "LEFT(m.content, 121)" in query
+
+
+def test_conversation_listing_truncates_preview_by_unicode_codepoint():
+    conversation_id = uuid4()
+    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    exact_preview = "é" * 120
+    overlong_preview = "猫" * 121
+    connection = FakeConnection(conversation_rows=[
+        (conversation_id, timestamp, timestamp, exact_preview),
+        (uuid4(), timestamp, timestamp, overlong_preview),
+    ])
+    repository = PostgresConversationRepository(
+        "private-url", connect=lambda *_args, **_kwargs: connection
+    )
+
+    page = repository.list_conversations(limit=2)
+
+    assert page.items[0].preview == exact_preview
+    assert page.items[1].preview == ("猫" * 119) + "…"
+    assert len(page.items[1].preview) == 120
+
+
+def test_conversation_listing_uses_offset_and_reports_has_more():
+    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    rows = [
+        (UUID(int=4 - index), timestamp, timestamp, f"preview {index}")
+        for index in range(4)
+    ]
+    connection = FakeConnection(conversation_rows=rows)
+    repository = PostgresConversationRepository(
+        "private-url", connect=lambda *_args, **_kwargs: connection
+    )
+
+    page = repository.list_conversations(limit=2, offset=1)
+
+    assert [item.preview for item in page.items] == ["preview 1", "preview 2"]
+    assert page.has_more is True
+    assert len(page.items) <= page.limit
+    sql_calls = [call for call in connection.calls if "set_config('statement_timeout'" not in call[0]]
+    assert sql_calls[0][1] == (3, 1)
+    assert "ORDER BY last_activity_at DESC, c.id DESC" in sql_calls[0][0]
+
+
+@pytest.mark.parametrize(
+    ("limit", "offset"),
+    [
+        (0, 0),
+        (CONVERSATION_LIST_MAX_LIMIT + 1, 0),
+        (True, 0),
+        (1, -1),
+        (1, CONVERSATION_LIST_MAX_OFFSET + 1),
+        (1, False),
+    ],
+)
+def test_conversation_listing_rejects_invalid_bounds_before_connect(limit, offset):
+    connect_calls = []
+    repository = PostgresConversationRepository(
+        "private-url",
+        connect=lambda *args, **kwargs: connect_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(ValueError):
+        repository.list_conversations(limit=limit, offset=offset)
+
+    assert connect_calls == []
+
+
+def test_conversation_listing_sanitizes_persistence_failures():
+    connection = FakeConnection(fail_on_call=2)
+    repository = PostgresConversationRepository(
+        "private database URL", connect=lambda *_args, **_kwargs: connection
+    )
+
+    with pytest.raises(PersistenceError) as error:
+        repository.list_conversations()
+
+    assert str(error.value) == "Conversation persistence is unavailable."
+    assert "private database URL" not in str(error.value)
+    assert "private database password" not in str(error.value)
+    assert connection.rolled_back and not connection.committed
 
 
 def test_append_message_assigns_next_conversation_sequence_and_checks_parent():

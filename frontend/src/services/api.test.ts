@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createMemory, deleteMemory, listMemories, searchMemories, sendChatMessage, updateMemory } from './api'
+import { createMemory, deleteMemory, getConversationMessages, ingestDocument, listConversations, listMemories, searchMemories, sendChatMessage, updateMemory } from './api'
 
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.resetModules() })
 const page = { items: [], total: 0, limit: 20, offset: 0, has_more: false }
 
 describe('API client', () => {
   it('posts the chat request and returns the response including memory metadata', async () => {
-    const body = { reply: 'Echo', provider: 'mock', demo: true, memory_context: { outcome: 'empty', memory_ids: [] } }
+    const body = { reply: 'Echo', provider: 'mock', demo: true, conversation_id: 'conversation-1', memory_context: { outcome: 'empty', memory_ids: [] } }
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
     await expect(sendChatMessage('Hello')).resolves.toEqual(body)
@@ -14,6 +14,33 @@ describe('API client', () => {
     expect(url).toBe('/api/chat')
     expect(init).toMatchObject({ method: 'POST', body: JSON.stringify({ message: 'Hello' }) })
     expect(new Headers(init?.headers).get('content-type')).toBe('application/json')
+  })
+  it('sends a persisted conversation ID only when provided', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ reply: 'Saved', provider: 'mock', demo: true, conversation_id: 'c-1' }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await sendChatMessage('Continue', { token: 'local-token' }, 'c-1')
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ body: JSON.stringify({ message: 'Continue', conversation_id: 'c-1' }) })
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('authorization')).toBe('Bearer local-token')
+  })
+  it('lists conversations with bounded endpoint defaults and caller pagination', async () => {
+    const page = { items: [], limit: 20, offset: 0, has_more: false }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(page), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...page, limit: 10, offset: 20 }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await listConversations({}, { token: 'local-token' })
+    await listConversations({ limit: 10, offset: 20 })
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/conversations?limit=20&offset=0', '/api/conversations?limit=10&offset=20',
+    ])
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('authorization')).toBe('Bearer local-token')
+  })
+  it('loads history using the existing bounded sequence cursor contract', async () => {
+    const body = { conversation_id: 'c-1', messages: [], has_more: true, next_before_sequence: 20 }
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(getConversationMessages('c-1', { limit: 100, beforeSequence: 20 }, { token: 'local-token' })).resolves.toEqual(body)
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/conversations/c-1/messages?limit=100&before_sequence=20')
   })
   it('returns the safe validation detail for chat', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'invalid_request', detail: 'The request body is invalid.' }), { status: 422 })))
@@ -43,10 +70,28 @@ describe('API client', () => {
       ['/api/memories', 'POST'], ['/api/memories/m', 'PATCH'], ['/api/memories/m', 'DELETE'],
     ])
   })
+  it('uploads a document as raw bytes with a safely encoded filename and auth', async () => {
+    const file = new File(['plain text'], 'résumé.md', { type: 'text/markdown' })
+    const result = { id: 'memory-1', content: 'plain text' }
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(result), { status: 201 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(ingestDocument(file, { token: 'local-test-token' })).resolves.toEqual(result)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/memories/ingest')
+    expect(init).toMatchObject({ method: 'POST', body: file })
+    expect(new Headers(init.headers).get('content-type')).toBe('application/octet-stream')
+    expect(new Headers(init.headers).get('x-document-filename')).toBe(encodeURIComponent(file.name))
+    expect(new Headers(init.headers).get('authorization')).toBe('Bearer local-test-token')
+  })
   it('turns disabled persistence into a clear safe error', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'persistence_unavailable', detail: 'internal detail' }), { status: 503 })))
     await expect(listMemories()).rejects.toThrow(/Memory storage is disabled or unavailable/)
     await expect(listMemories()).rejects.not.toThrow(/internal detail/)
+  })
+  it('uses safe conversation-specific 404 and 503 errors', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('{"detail":"internal"}', { status: 404 })).mockResolvedValueOnce(new Response('{"detail":"internal"}', { status: 503 })))
+    await expect(getConversationMessages('missing')).rejects.toThrow(/conversation is no longer available/i)
+    await expect(listConversations()).rejects.toThrow(/Saved conversations are disabled or unavailable/)
   })
   it('sanitizes network and malformed-response failures', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('private socket')))

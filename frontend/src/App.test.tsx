@@ -1,15 +1,36 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import App from './App'
 import './styles.css'
-import { getMemory, listMemories, sendChatMessage } from './services/api'
+import { getConversationMessages, getMemory, listConversations, listMemories, sendChatMessage, type ConversationPage } from './services/api'
 
 vi.mock('./services/api', () => ({
-  sendChatMessage: vi.fn(), listMemories: vi.fn(), searchMemories: vi.fn(),
+  sendChatMessage: vi.fn(), listConversations: vi.fn(), getConversationMessages: vi.fn(), listMemories: vi.fn(), searchMemories: vi.fn(),
   createMemory: vi.fn(), updateMemory: vi.fn(), deleteMemory: vi.fn(), getMemory: vi.fn(),
 }))
 const sendMock = vi.mocked(sendChatMessage)
+const listConversationsMock = vi.mocked(listConversations)
+const historyMock = vi.mocked(getConversationMessages)
+
+const emptyConversationPage = { items: [], limit: 20, offset: 0, has_more: false }
+
+async function unlockWithToken(token = 'a'.repeat(32)) {
+  vi.mocked(listMemories).mockImplementation(async (_options, auth) => {
+    auth?.onUnauthorized?.()
+    throw new Error('Workspace locked. Enter your local access token again.')
+  })
+  await userEvent.click(screen.getByRole('button', { name: 'Memory' }))
+  await userEvent.type(await screen.findByLabelText('Local access token'), token)
+  await userEvent.click(screen.getByRole('button', { name: 'Unlock' }))
+  await waitFor(() => expect(listConversationsMock).toHaveBeenCalled())
+  await userEvent.click(screen.getByRole('button', { name: /chat/i }))
+}
+
+beforeEach(() => {
+  listConversationsMock.mockResolvedValue(emptyConversationPage)
+  historyMock.mockResolvedValue({ conversation_id: 'conversation-1', messages: [], has_more: false, next_before_sequence: null })
+})
 
 afterEach(() => {
   cleanup()
@@ -23,6 +44,140 @@ describe('JARVIS chat', () => {
     expect(screen.getByText(/PROVIDER MODE/)).toBeInTheDocument()
     expect(screen.getByText(/backend selects the response provider/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /explain a concept/i })).toBeInTheDocument()
+  })
+
+  it('keeps anonymous stateless mock chat available without requesting persisted conversations', async () => {
+    sendMock.mockResolvedValue({ reply: 'Offline mock reply.', provider: 'mock', demo: true, conversation_id: null })
+    render(<App />)
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'Hello offline{Enter}')
+    expect(await screen.findByText('Offline mock reply.')).toBeInTheDocument()
+    expect(sendMock).toHaveBeenCalledWith('Hello offline', expect.objectContaining({ token: undefined }))
+    expect(listConversationsMock).not.toHaveBeenCalled()
+  })
+
+  it('shows conversation-list loading and renders persisted previews and activity dates', async () => {
+    let resolveList!: (page: ConversationPage) => void
+    listConversationsMock.mockReturnValue(new Promise((resolve) => { resolveList = resolve }))
+    render(<App />)
+    await unlockWithToken()
+    expect(screen.getByText(/loading saved conversations/i)).toBeInTheDocument()
+    await act(async () => resolveList({
+      items: [{ conversation_id: 'saved-1', created_at: '2026-10-15T10:00:00Z', last_activity_at: '2026-10-15T11:00:00Z', preview: 'Saved first question' }],
+      limit: 20, offset: 0, has_more: false,
+    }))
+    expect(await screen.findByTitle('Saved first question')).toBeInTheDocument()
+    expect(screen.getByTitle('Saved first question')).toHaveTextContent('Saved first question')
+  })
+
+  it('shows the empty conversation-list state after a successful empty response', async () => {
+    render(<App />)
+    await unlockWithToken()
+    expect(await screen.findByText('No saved conversations yet.')).toBeInTheDocument()
+  })
+
+  it('allows re-authentication from the conversation sidebar after a page reload', async () => {
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: /unlock to load saved conversations/i }))
+    await userEvent.type(await screen.findByLabelText('Local access token'), 'r'.repeat(32))
+    await userEvent.click(screen.getByRole('button', { name: 'Unlock' }))
+    await waitFor(() => expect(listConversationsMock).toHaveBeenCalledWith(
+      { limit: 20, offset: 0 }, expect.objectContaining({ token: 'r'.repeat(32) }),
+    ))
+    expect(await screen.findByText('No saved conversations yet.')).toBeInTheDocument()
+  })
+
+  it('shows a safe API error and allows retrying the conversation list', async () => {
+    listConversationsMock.mockRejectedValueOnce(new Error('Saved conversations are disabled or unavailable. Enable local PostgreSQL persistence to use conversation history.'))
+      .mockResolvedValueOnce(emptyConversationPage)
+    render(<App />)
+    await unlockWithToken()
+    expect(await screen.findByRole('alert')).toHaveTextContent(/saved conversations are disabled or unavailable/i)
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('No saved conversations yet.')).toBeInTheDocument()
+  })
+
+  it('loads a saved conversation history and sends follow-up messages to its backend ID', async () => {
+    listConversationsMock.mockResolvedValue({
+      items: [{ conversation_id: 'saved-42', created_at: '2026-10-15T10:00:00Z', last_activity_at: '2026-10-15T11:00:00Z', preview: 'Original question' }],
+      limit: 20, offset: 0, has_more: false,
+    })
+    historyMock.mockResolvedValue({
+      conversation_id: 'saved-42', messages: [
+        { id: 'm1', conversation_id: 'saved-42', sequence_number: 1, role: 'user', content: 'Original question', created_at: '2026-10-15T10:00:00Z' },
+        { id: 'm2', conversation_id: 'saved-42', sequence_number: 2, role: 'assistant', content: 'Earlier answer', created_at: '2026-10-15T10:01:00Z' },
+      ], has_more: false, next_before_sequence: null,
+    })
+    sendMock.mockResolvedValue({ reply: 'Follow-up answer', provider: 'mock', demo: true, conversation_id: 'saved-42' })
+    render(<App />)
+    await unlockWithToken()
+    await userEvent.click(await screen.findByTitle('Original question'))
+    expect(await screen.findByText('Earlier answer')).toBeInTheDocument()
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'Continue{Enter}')
+    expect(await screen.findByText('Follow-up answer')).toBeInTheDocument()
+    expect(sendMock).toHaveBeenCalledWith('Continue', expect.objectContaining({ token: 'a'.repeat(32) }), 'saved-42')
+  })
+
+  it('loads older history pages in original message order', async () => {
+    listConversationsMock.mockResolvedValue({ items: [{ conversation_id: 'saved-1', created_at: '2026-10-15T10:00:00Z', last_activity_at: '2026-10-15T11:00:00Z', preview: 'Question' }], limit: 20, offset: 0, has_more: false })
+    historyMock.mockResolvedValueOnce({ conversation_id: 'saved-1', messages: [{ id: 'm2', conversation_id: 'saved-1', sequence_number: 2, role: 'assistant', content: 'Newest answer', created_at: '2026-10-15T10:01:00Z' }], has_more: true, next_before_sequence: 2 })
+      .mockResolvedValueOnce({ conversation_id: 'saved-1', messages: [{ id: 'm1', conversation_id: 'saved-1', sequence_number: 1, role: 'user', content: 'Oldest question', created_at: '2026-10-15T10:00:00Z' }], has_more: false, next_before_sequence: null })
+    render(<App />)
+    await unlockWithToken()
+    await userEvent.click(await screen.findByTitle('Question'))
+    await screen.findByText('Newest answer')
+    await userEvent.click(screen.getByRole('button', { name: 'Load older messages' }))
+    expect(await screen.findByText('Oldest question')).toBeInTheDocument()
+    const displayed = [...document.querySelectorAll('.message-bubble')].map((node) => node.textContent)
+    expect(displayed).toEqual(['Oldest question', 'Newest answer'])
+  })
+
+  it('shows a safe error when persisted history is missing or unavailable', async () => {
+    listConversationsMock.mockResolvedValue({ items: [{ conversation_id: 'missing-1', created_at: '2026-10-15T10:00:00Z', last_activity_at: '2026-10-15T10:00:00Z', preview: 'Old preview' }], limit: 20, offset: 0, has_more: false })
+    historyMock.mockRejectedValue(new Error('That conversation is no longer available. Refresh the list and try again.'))
+    render(<App />)
+    await unlockWithToken()
+    await userEvent.click(await screen.findByTitle('Old preview'))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/conversation is no longer available/i)
+    expect(screen.queryByText(/internal|sql|password/i)).not.toBeInTheDocument()
+  })
+
+  it('clears selected conversation content and token on lock', async () => {
+    listConversationsMock.mockResolvedValue({ items: [{ conversation_id: 'saved-1', created_at: '2026-10-15T10:00:00Z', last_activity_at: '2026-10-15T11:00:00Z', preview: 'Sensitive preview' }], limit: 20, offset: 0, has_more: false })
+    historyMock.mockResolvedValue({ conversation_id: 'saved-1', messages: [{ id: 'm1', conversation_id: 'saved-1', sequence_number: 1, role: 'user', content: 'Sensitive message body', created_at: '2026-10-15T10:00:00Z' }], has_more: false, next_before_sequence: null })
+    render(<App />)
+    await unlockWithToken()
+    await userEvent.click(await screen.findByTitle('Sensitive preview'))
+    expect(await screen.findByText('Sensitive message body')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Lock workspace' }))
+    expect(screen.queryByText('Sensitive message body')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('Sensitive preview')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Local access token')).toHaveValue('')
+    expect(listConversationsMock.mock.calls[0]?.[1]?.signal?.aborted).toBe(true)
+    expect(listConversationsMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears protected conversation data when history returns 401', async () => {
+    listConversationsMock.mockResolvedValue({ items: [{ conversation_id: 'saved-1', created_at: '2026-10-15T10:00:00Z', last_activity_at: '2026-10-15T11:00:00Z', preview: 'Protected preview' }], limit: 20, offset: 0, has_more: false })
+    historyMock.mockImplementation(async (_id, _options, auth) => {
+      auth?.onUnauthorized?.()
+      throw new Error('Workspace locked. Enter your local access token again.')
+    })
+    render(<App />)
+    await unlockWithToken()
+    await userEvent.click(await screen.findByTitle('Protected preview'))
+    expect(await screen.findByLabelText('Local access token')).toHaveValue('')
+    expect(screen.queryByTitle('Protected preview')).not.toBeInTheDocument()
+  })
+
+  it('requests additional conversation-list pages using the returned pagination metadata', async () => {
+    listConversationsMock.mockResolvedValueOnce({ items: [{ conversation_id: 'c1', created_at: '2026-10-15T10:00:00Z', last_activity_at: '2026-10-15T10:00:00Z', preview: 'First page' }], limit: 20, offset: 0, has_more: true })
+      .mockResolvedValueOnce({ items: [{ conversation_id: 'c2', created_at: '2026-10-14T10:00:00Z', last_activity_at: '2026-10-14T10:00:00Z', preview: 'Second page' }], limit: 20, offset: 20, has_more: false })
+    render(<App />)
+    await unlockWithToken()
+    expect(await screen.findByTitle('First page')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Load more' }))
+    expect(await screen.findByTitle('Second page')).toBeInTheDocument()
+    expect(listConversationsMock.mock.calls[listConversationsMock.mock.calls.length - 1]?.[0]).toEqual({ limit: 20, offset: 20 })
   })
 
   it('sends the message and renders the provider response and history', async () => {

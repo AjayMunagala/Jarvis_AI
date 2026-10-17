@@ -78,6 +78,10 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "JARVIS_PERSISTENCE_DATABASE_URL must include a PostgreSQL host and database name."
                 )
+        # Any configured non-mock provider can send request content outside the
+        # process, so even stateless provider use requires the existing local
+        # bearer identity. No database is required by this condition.
+        if self.persistence_enabled or self.provider != "mock":
             token = self.local_auth_token.get_secret_value() if self.local_auth_token else ""
             if (
                 len(token) < 32
@@ -85,10 +89,10 @@ class Settings(BaseSettings):
                 or any(not 0x21 <= ord(char) <= 0x7E for char in token)
             ):
                 raise ValueError(
-                    "JARVIS_LOCAL_AUTH_TOKEN must be configured as at least 32 visible ASCII characters when persistence is enabled."
+                    "JARVIS_LOCAL_AUTH_TOKEN must be configured as at least 32 visible ASCII characters when persistence is enabled or a non-mock provider is selected."
                 )
             if self.owner_id is None:
-                raise ValueError("JARVIS_OWNER_ID is required when persistence is enabled.")
+                raise ValueError("JARVIS_OWNER_ID is required when persistence is enabled or a non-mock provider is selected.")
             if self.owner_id.int == 0:
                 raise ValueError("JARVIS_OWNER_ID must not be the nil UUID.")
         if self.memory_retrieval_enabled and not self.persistence_enabled:

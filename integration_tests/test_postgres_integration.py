@@ -7,13 +7,14 @@ import os
 import re
 import shutil
 import tempfile
+import warnings
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlsplit, urlunsplit
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 from fastapi.testclient import TestClient
@@ -34,6 +35,15 @@ LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 GENERATED_DATABASE_RE = re.compile(r"^jarvis_it_[0-9a-f]{32}$")
 TEST_OWNER_ID = UUID("a5bff5ad-042a-4132-913a-4da0cfe24710")
 TEST_AUTH_TOKEN = "integration-test-token-with-at-least-32-characters"
+
+
+def _classify_preexisting_generated_database(name: object, connection_count: object) -> str | None:
+    """Classify a generated-name database for reporting, never for deletion."""
+    if not isinstance(name, str) or not GENERATED_DATABASE_RE.fullmatch(name):
+        return None
+    if isinstance(connection_count, bool) or not isinstance(connection_count, int) or connection_count < 0:
+        return "uncertain"
+    return "active" if connection_count else "uncertain"
 
 
 def parse_safe_admin_url(value: str):
@@ -73,6 +83,23 @@ def parse_safe_admin_url(value: str):
 def test_integration_guard_rejects_nonlocal_or_credential_urls(url):
     with pytest.raises(ValueError):
         parse_safe_admin_url(url)
+
+
+@pytest.mark.parametrize(
+    ("name", "connection_count", "expected"),
+    [
+        ("jarvis_AI", 0, None),
+        ("jarvis_it_" + "a" * 32, 0, "uncertain"),
+        ("jarvis_it_" + "a" * 31, 0, None),
+        ("jarvis_it_" + "b" * 32, 2, "active"),
+        ("jarvis_it_" + "c" * 32, 0, "uncertain"),
+        ("jarvis_it_" + "d" * 32, None, "uncertain"),
+    ],
+)
+def test_preexisting_database_review_never_marks_unsafe_or_uncertain_database_for_cleanup(
+    name, connection_count, expected
+):
+    assert _classify_preexisting_generated_database(name, connection_count) == expected
 
 
 @dataclass(frozen=True)
@@ -155,6 +182,34 @@ def isolated_postgres():
             ).fetchone()
             if collision is not None:
                 pytest.fail("Generated isolated database name unexpectedly exists.", pytrace=False)
+            # A process interruption can leave a generated database behind.
+            # Catalog presence and connection counts cannot prove staleness, so
+            # only report such databases; never clean them up automatically.
+            existing_generated = admin.execute(
+                "SELECT d.datname, COUNT(a.pid)::integer "
+                "FROM pg_database AS d "
+                "LEFT JOIN pg_stat_activity AS a "
+                "ON a.datid = d.oid AND a.pid <> pg_backend_pid() "
+                "WHERE d.datname ~ %s AND d.datname <> %s "
+                "GROUP BY d.datname",
+                (GENERATED_DATABASE_RE.pattern, integration_db),
+            ).fetchall()
+            classifications = [
+                _classify_preexisting_generated_database(name, count)
+                for name, count in existing_generated
+            ]
+            active_count = classifications.count("active")
+            uncertain_count = classifications.count("uncertain")
+            observed_count = active_count + uncertain_count
+            if observed_count:
+                warnings.warn(
+                    "Found pre-existing generated PostgreSQL integration database(s) "
+                    f"requiring manual review (active connections: {active_count}; "
+                    f"inactive or uncertain: {uncertain_count}). The fixture will not "
+                    "modify or remove them; no active connections does not establish staleness.",
+                    pytest.PytestWarning,
+                    stacklevel=2,
+                )
             # This name is generated in-process and validated against the test-only prefix above.
             admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(integration_db)))
             created = True
@@ -188,10 +243,15 @@ def isolated_postgres():
                         (integration_db,),
                     )
                     admin.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(integration_db)))
+                    remaining = admin.execute(
+                        "SELECT 1 FROM pg_database WHERE datname = %s", (integration_db,)
+                    ).fetchone()
+                    if remaining is not None:
+                        raise RuntimeError("generated database remains after drop")
             except Exception as exc:
                 pytest.fail(
-                    f"Could not remove the generated isolated integration database ({type(exc).__name__}); "
-                    "no other database was targeted.",
+                    f"Could not complete or verify cleanup of generated isolated integration database "
+                    f"{integration_db} ({type(exc).__name__}); credentials and connection details were suppressed.",
                     pytrace=False,
                 )
 
@@ -375,7 +435,6 @@ def test_memory_crud_search_ranking_and_delete(isolated_postgres):
     duplicate_a = repository.create(owner_id, "duplicate lifecycle content", category="notes", source_reference="manual")
     duplicate_b = repository.create(owner_id, "duplicate lifecycle content", category="notes", source_reference="manual")
     assert duplicate_a.id != duplicate_b.id
-
     with psycopg.connect(isolated_postgres.database_url) as connection:
         connection.execute(
             "UPDATE jarvis_app.memories SET updated_at = TIMESTAMPTZ '2001-01-01 00:00:00+00' WHERE id = %s",
@@ -399,6 +458,35 @@ def test_memory_crud_search_ranking_and_delete(isolated_postgres):
     fetched = repository.get(owner_id, top_relevant.id)
     assert fetched is not None
     assert fetched.category == "project"
+
+
+def test_authenticated_document_imports_create_owner_scoped_memory_records(isolated_postgres):
+    repository = isolated_postgres.memory_repository()
+    imported_ids = []
+    for _ in range(2):
+        with isolated_postgres.client() as client:
+            response = client.post(
+                "/memories/ingest",
+                content=b"v1 document import integration marker",
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "X-Document-Filename": r"C:\private\integration-note.MD",
+                },
+            )
+        assert response.status_code == 201, response.text
+        record = response.json()
+        assert record["content"] == "v1 document import integration marker"
+        assert record["source_reference"] == "integration-note.MD"
+        assert "private" not in record["source_reference"]
+        imported_ids.append(UUID(record["id"]))
+
+    assert imported_ids[0] != imported_ids[1]
+    assert all(repository.get(TEST_OWNER_ID, memory_id) is not None for memory_id in imported_ids)
+    other_owner_id = UUID("b5bff5ad-042a-4132-913a-4da0cfe24710")
+    assert all(repository.get(other_owner_id, memory_id) is None for memory_id in imported_ids)
+    matching = repository.search(TEST_OWNER_ID, "v1 document import integration marker", limit=5)
+    assert {item.id for item in matching.items} == set(imported_ids)
+    assert matching.total == 2
 
 
 def test_memory_lexical_retrieval_evaluation(isolated_postgres):
@@ -431,8 +519,8 @@ def test_memory_lexical_retrieval_evaluation(isolated_postgres):
         ("cache_plain", "cache key common"),
         ("cache_punctuation", "CACHE, KEY! common"),
         ("prefix_only", "alphabeta common"),
-        ("tie_a", "tie breaker common"),
-        ("tie_b", "tie breaker common"),
+        ("tie_a", "tieprobe breakerprobe common"),
+        ("tie_b", "tieprobe breakerprobe common"),
         ("owner_isolation", "orchid sentinel common"),
     )
     identifiers = {
@@ -489,7 +577,7 @@ def test_memory_lexical_retrieval_evaluation(isolated_postgres):
         ("case_and_punctuation_in_query", "CACHE, KEY!", ("cache_punctuation", "cache_plain"), 100),
         ("prefix_is_not_prefix_search", "alph", (), 100),
         ("zero_match", "unfindablequartz", (), 100),
-        ("equal_score_uuid_tie_break", "tie breaker", ("tie_a", "tie_b"), 100),
+        ("equal_score_uuid_tie_break", "tieprobe breakerprobe", ("tie_a", "tie_b"), 100),
         ("owner_isolation", "orchid sentinel", ("owner_isolation",), 100),
         (
             "five_result_limit_and_timestamps", "common",
@@ -582,6 +670,57 @@ def test_memory_lexical_retrieval_evaluation(isolated_postgres):
         )
     stage1_candidate_has_no_regressions = all(
         item["matches_stage_1_expected_ranking"] for item in stage1_candidate_diagnostics
+    )
+
+    stage1_normalization_2_diagnostics = []
+    for case_name, query, expected_labels, limit in cases:
+        with psycopg.connect(isolated_postgres.database_url) as connection:
+            candidate_rows = connection.execute(
+                """SELECT id::text,
+                          ts_rank_cd(to_tsvector('simple', content),
+                                     plainto_tsquery('simple', %s), 2) AS score
+                   FROM jarvis_app.memories
+                   WHERE owner_id = %s
+                     AND to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)
+                   ORDER BY score DESC, updated_at DESC, id ASC
+                   LIMIT %s""",
+                (query, owner_id, query, limit),
+            ).fetchall()
+            repeated_rows = connection.execute(
+                """SELECT id::text,
+                          ts_rank_cd(to_tsvector('simple', content),
+                                     plainto_tsquery('simple', %s), 2) AS score
+                   FROM jarvis_app.memories
+                   WHERE owner_id = %s
+                     AND to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)
+                   ORDER BY score DESC, updated_at DESC, id ASC
+                   LIMIT %s""",
+                (query, owner_id, query, limit),
+            ).fetchall()
+        candidate_ids = [memory_id for memory_id, _ in candidate_rows]
+        candidate_labels = [labels_by_id[memory_id] for memory_id in candidate_ids]
+        stage1_normalization_2_diagnostics.append(
+            {
+                "case": case_name,
+                "query": query,
+                "expected": list(expected_labels),
+                "candidate_normalization_2": candidate_labels,
+                "candidate_scores": [
+                    {"record": labels_by_id[memory_id], "ts_rank_cd": float(score)}
+                    for memory_id, score in candidate_rows
+                ],
+                "matches_stage_1_expected_ranking": candidate_labels == list(expected_labels),
+                "repeat_query_deterministic": repeated_rows == candidate_rows,
+                "owner_scoped": set(candidate_ids) <= allowed_ids,
+                "within_requested_limit": len(candidate_ids) <= limit,
+            }
+        )
+    stage1_normalization_2_has_no_regressions = all(
+        item["matches_stage_1_expected_ranking"]
+        and item["repeat_query_deterministic"]
+        and item["owner_scoped"]
+        and item["within_requested_limit"]
+        for item in stage1_normalization_2_diagnostics
     )
 
     print(
@@ -732,9 +871,17 @@ def test_memory_lexical_retrieval_evaluation(isolated_postgres):
         assert candidate_labels == expected_candidate, f"normalized candidate: {case['case']}"
         repeated_candidate_rows = scored_ranking(query, 1)
         assert repeated_candidate_rows == candidate_rows
+
+        normalization_2_rows = scored_ranking(query, 2)
+        normalization_2_ids = [row[0] for row in normalization_2_rows]
+        normalization_2_labels = [length_labels[memory_id] for memory_id in normalization_2_ids]
+        expected_normalization_2 = [case["relevant"], case["repeated"], case["single"]]
+        assert scored_ranking(query, 2) == normalization_2_rows
         assert len(current_ids) <= 5 and len(candidate_ids) <= 5
+        assert len(normalization_2_ids) <= 5
         assert set(current_ids) <= {str(value) for value in length_identifiers.values()}
         assert set(candidate_ids) <= {str(value) for value in length_identifiers.values()}
+        assert set(normalization_2_ids) <= {str(value) for value in length_identifiers.values()}
 
         repeated_page = repository.search(owner_id, query, limit=5)
         assert [str(item.id) for item in repeated_page.items] == current_ids
@@ -742,6 +889,7 @@ def test_memory_lexical_retrieval_evaluation(isolated_postgres):
 
         current_metrics = metrics(current_labels, relevant)
         candidate_metrics = metrics(candidate_labels, relevant)
+        normalization_2_metrics = metrics(normalization_2_labels, relevant)
         length_diagnostics.append(
             {
                 "case": case["case"],
@@ -759,10 +907,21 @@ def test_memory_lexical_retrieval_evaluation(isolated_postgres):
                     {"record": length_labels[memory_id], "ts_rank_cd": float(score)}
                     for memory_id, score in candidate_rows
                 ],
+                "expected_normalization_2": expected_normalization_2,
+                "actual_normalization_2": normalization_2_labels,
+                "normalization_2_matches_expected_order": (
+                    normalization_2_labels == expected_normalization_2
+                ),
+                "normalization_2_scores": [
+                    {"record": length_labels[memory_id], "ts_rank_cd": float(score)}
+                    for memory_id, score in normalization_2_rows
+                ],
                 "current_metrics_at_5": current_metrics,
                 "candidate_metrics_at_5": candidate_metrics,
+                "normalization_2_metrics_at_5": normalization_2_metrics,
                 "repeat_query_deterministic": True,
                 "repeat_candidate_query_deterministic": True,
+                "repeat_normalization_2_query_deterministic": True,
             }
         )
 
@@ -778,12 +937,32 @@ def test_memory_lexical_retrieval_evaluation(isolated_postgres):
         aggregate["candidate_mrr_at_5"] - aggregate["current_mrr_at_5"]
     )
     assert aggregate["mean_mrr_at_5_improvement"] >= 0.10
+    normalization_2_aggregate = {
+        metric: sum(item["normalization_2_metrics_at_5"][metric] for item in length_diagnostics)
+        / len(length_diagnostics)
+        for metric in ("precision_at_5", "recall_at_5", "mrr_at_5")
+    }
+    normalization_2_aggregate["mean_mrr_at_5_improvement"] = (
+        normalization_2_aggregate["mrr_at_5"] - aggregate["current_mrr_at_5"]
+    )
+    normalization_2_adoption_gate = (
+        normalization_2_aggregate["mean_mrr_at_5_improvement"] >= 0.10
+        and stage1_normalization_2_has_no_regressions
+        and all(
+            item["repeat_normalization_2_query_deterministic"]
+            and len(item["actual_normalization_2"]) <= 5
+            for item in length_diagnostics
+        )
+    )
     print(
         "LENGTH_SENSITIVE_RETRIEVAL_EVALUATION="
         + json.dumps(
             {
                 "postgres_database": isolated_postgres.database_name,
-                "ranking_change": "ts_rank_cd normalization 0 (current) versus 1 (candidate)",
+                "ranking_comparisons": [
+                    "normalization 0 (current) versus 1 (Stage 2 candidate)",
+                    "normalization 0 (current) versus 2 (Stage 3 candidate)",
+                ],
                 "metric_definition": {
                     "precision_at_5": "relevant returned in first 5 divided by 5",
                     "recall_at_5": "relevant returned in first 5 divided by known relevant count",
@@ -792,6 +971,13 @@ def test_memory_lexical_retrieval_evaluation(isolated_postgres):
                 "cases": length_diagnostics,
                 "aggregate_mean_metrics": aggregate,
                 "candidate_threshold_met": aggregate["mean_mrr_at_5_improvement"] >= 0.10,
+                "normalization_2_aggregate_mean_metrics": normalization_2_aggregate,
+                "normalization_2_stage_1_rankings": stage1_normalization_2_diagnostics,
+                "normalization_2_stage_1_regressions": not stage1_normalization_2_has_no_regressions,
+                "normalization_2_adoption_gate_passed": normalization_2_adoption_gate,
+                "normalization_2_candidate_outcome": (
+                    "accepted for further review" if normalization_2_adoption_gate else "rejected"
+                ),
                 "stage_1_candidate_rankings": stage1_candidate_diagnostics,
                 "stage_1_expected_rankings_regressed": not stage1_candidate_has_no_regressions,
                 "candidate_adoption_recommended": (
@@ -862,6 +1048,132 @@ def test_chat_creates_continues_and_reads_history_across_pages(isolated_postgres
             for page in all_pages
             for message in page["messages"]
         )
+
+
+def test_conversation_listing_repository_and_authenticated_api(isolated_postgres):
+    """Verify bounded summaries and ordering only in the generated disposable database."""
+    import psycopg
+
+    assert GENERATED_DATABASE_RE.fullmatch(isolated_postgres.database_name)
+    assert isolated_postgres.database_name != "jarvis_AI"
+    conversation_ids = {
+        "empty": UUID("11111111-1111-4111-8111-111111111101"),
+        "first_user": UUID("11111111-1111-4111-8111-111111111102"),
+        "exact_preview": UUID("11111111-1111-4111-8111-111111111103"),
+        "unicode_preview": UUID("11111111-1111-4111-8111-111111111104"),
+        "tie_low": UUID("11111111-1111-4111-8111-111111111105"),
+        "tie_high": UUID("11111111-1111-4111-8111-111111111106"),
+    }
+    created_at = {
+        "empty": datetime(2099, 1, 1, tzinfo=timezone.utc),
+        "first_user": datetime(2098, 1, 1, tzinfo=timezone.utc),
+        "exact_preview": datetime(2097, 1, 1, tzinfo=timezone.utc),
+        "unicode_preview": datetime(2096, 1, 1, tzinfo=timezone.utc),
+        "tie_low": datetime(2095, 1, 1, tzinfo=timezone.utc),
+        "tie_high": datetime(2095, 1, 1, tzinfo=timezone.utc),
+    }
+    empty_activity = created_at["empty"]
+    first_user_activity = datetime(2098, 1, 5, tzinfo=timezone.utc)
+    exact_activity = datetime(2097, 1, 2, tzinfo=timezone.utc)
+    unicode_activity = datetime(2096, 1, 2, tzinfo=timezone.utc)
+    tie_activity = datetime(2095, 1, 2, tzinfo=timezone.utc)
+    exact_text = "é" * 120
+    unicode_text = "雪🙂" * 65
+    later_than_first_user = "Later user text must not become the preview."
+
+    messages = {
+        "first_user": [
+            ("assistant", "Assistant opening must not become the preview.", datetime(2098, 1, 2, tzinfo=timezone.utc)),
+            ("user", "First user message is the preview.", datetime(2098, 1, 3, tzinfo=timezone.utc)),
+            ("assistant", "Assistant response must not become the preview.", datetime(2098, 1, 4, tzinfo=timezone.utc)),
+            ("user", later_than_first_user, first_user_activity),
+        ],
+        "exact_preview": [("user", exact_text, exact_activity)],
+        "unicode_preview": [("user", unicode_text, unicode_activity)],
+        "tie_low": [("user", "Lower UUID tie record.", tie_activity)],
+        "tie_high": [("user", "Higher UUID tie record.", tie_activity)],
+    }
+
+    with psycopg.connect(isolated_postgres.database_url) as connection:
+        assert connection.execute("SELECT current_database()").fetchone() == (
+            isolated_postgres.database_name,
+        )
+        for label, conversation_id in conversation_ids.items():
+            connection.execute(
+                "INSERT INTO jarvis_app.conversations (id, created_at) VALUES (%s, %s)",
+                (conversation_id, created_at[label]),
+            )
+            for sequence_number, (role, content, message_time) in enumerate(messages.get(label, ())):
+                connection.execute(
+                    "INSERT INTO jarvis_app.messages "
+                    "(id, conversation_id, sequence_number, role, content, created_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    (
+                        uuid5(
+                            NAMESPACE_URL,
+                            f"jarvis-v2-phase3:{conversation_id}:{sequence_number}",
+                        ),
+                        conversation_id,
+                        sequence_number,
+                        role,
+                        content,
+                        message_time,
+                    ),
+                )
+
+    repository = isolated_postgres.repository()
+    default_page = repository.list_conversations()
+    expected_order = [
+        conversation_ids[label]
+        for label in ("empty", "first_user", "exact_preview", "unicode_preview", "tie_high", "tie_low")
+    ]
+    assert default_page.limit == 20 and default_page.offset == 0
+    assert [item.conversation_id for item in default_page.items[:6]] == expected_order
+    assert len(default_page.items) <= default_page.limit
+
+    by_id = {item.conversation_id: item for item in default_page.items}
+    assert by_id[conversation_ids["empty"]].last_activity_at == created_at["empty"]
+    assert by_id[conversation_ids["empty"]].preview is None
+    assert by_id[conversation_ids["first_user"]].last_activity_at == first_user_activity
+    assert by_id[conversation_ids["first_user"]].preview == "First user message is the preview."
+    assert by_id[conversation_ids["first_user"]].preview != later_than_first_user
+    assert by_id[conversation_ids["exact_preview"]].preview == exact_text
+    assert by_id[conversation_ids["unicode_preview"]].preview == unicode_text[:119] + "…"
+    assert len(by_id[conversation_ids["unicode_preview"]].preview) == 120
+    assert by_id[conversation_ids["tie_high"]].last_activity_at == tie_activity
+    assert by_id[conversation_ids["tie_low"]].last_activity_at == tie_activity
+
+    custom_page = repository.list_conversations(limit=2, offset=1)
+    assert custom_page.limit == 2 and custom_page.offset == 1
+    assert [item.conversation_id for item in custom_page.items] == expected_order[1:3]
+    assert custom_page.has_more is True
+    assert len(custom_page.items) <= custom_page.limit
+
+    final_page = repository.list_conversations(limit=100, offset=1_000_000)
+    assert final_page.items == []
+    assert final_page.has_more is False
+    assert len(final_page.items) <= final_page.limit
+
+    with isolated_postgres.client() as client:
+        response = client.get("/conversations")
+        assert response.status_code == 200
+        api_page = response.json()
+        assert api_page["limit"] == 20 and api_page["offset"] == 0
+        assert [item["conversation_id"] for item in api_page["items"][:6]] == [
+            str(conversation_id) for conversation_id in expected_order
+        ]
+        assert api_page["items"][0]["preview"] is None
+        assert api_page["items"][3]["preview"] == unicode_text[:119] + "…"
+
+        custom_response = client.get("/conversations?limit=2&offset=1")
+        assert custom_response.status_code == 200
+        custom_api_page = custom_response.json()
+        assert custom_api_page["limit"] == 2 and custom_api_page["offset"] == 1
+        assert [item["conversation_id"] for item in custom_api_page["items"]] == [
+            str(conversation_id) for conversation_id in expected_order[1:3]
+        ]
+        assert custom_api_page["has_more"] is True
+        assert len(custom_api_page["items"]) <= custom_api_page["limit"]
 
 
 def test_memory_category_filter_is_exact_and_paginates_filtered_results(isolated_postgres):
