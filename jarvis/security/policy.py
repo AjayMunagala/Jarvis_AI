@@ -40,6 +40,10 @@ class Capability(StrEnum):
     # Proactive assistance & scheduling (v3.5): background jobs and notifications.
     SCHEDULER_READ = "scheduler.read"
     SCHEDULER_WRITE = "scheduler.write"
+    # System health & reliability (v3.6): telemetry diagnostics and security quarantine.
+    HEALTH_READ = "health.read"
+    HEALTH_DIAGNOSTIC_RUN = "health.diagnostic.run"
+    SECURITY_QUARANTINE_FILE = "security.quarantine.file"
     EXTERNAL_ACTION_EXECUTE = "external_action.execute"
 
 
@@ -68,6 +72,9 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.RESEARCH_WRITE,
     Capability.SCHEDULER_READ,
     Capability.SCHEDULER_WRITE,
+    Capability.HEALTH_READ,
+    Capability.HEALTH_DIAGNOSTIC_RUN,
+    Capability.SECURITY_QUARANTINE_FILE,
 })
 
 

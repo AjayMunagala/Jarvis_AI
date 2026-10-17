@@ -24,6 +24,7 @@ from jarvis.api.routes.workflow import router as workflow_router
 from jarvis.api.routes.knowledge import router as knowledge_router
 from jarvis.api.routes.research import router as research_router
 from jarvis.api.routes.scheduler import router as scheduler_router
+from jarvis.api.routes.health_diagnostic import router as health_diagnostic_router
 from jarvis.assistant.service import AssistantService
 from jarvis.assistant.stores import MemoryAssistantStore, PostgresAssistantStore
 from jarvis.workflow.service import WorkflowService
@@ -34,6 +35,8 @@ from jarvis.research.service import ResearchService
 from jarvis.research.stores import MemoryResearchStore, PostgresResearchStore
 from jarvis.scheduler.service import SchedulerService
 from jarvis.scheduler.stores import MemorySchedulerStore, PostgresSchedulerStore
+from jarvis.health.service import HealthService
+from jarvis.health.stores import MemoryHealthStore, PostgresHealthStore
 from jarvis.audit.service import ApprovalService, AuditService
 from jarvis.audit.stores import (
     MemoryApprovalStore, MemoryAuditStore, PostgresApprovalStore, PostgresAuditStore,
@@ -145,12 +148,14 @@ def create_app(
         knowledge_store = PostgresKnowledgeStore(url, **timeouts)
         research_store = PostgresResearchStore(url, **timeouts)
         scheduler_store = PostgresSchedulerStore(url, **timeouts)
+        health_store = PostgresHealthStore(url, **timeouts)
     else:
         assistant_store = MemoryAssistantStore()
         workflow_store = MemoryWorkflowStore()
         knowledge_store = MemoryKnowledgeStore()
         research_store = MemoryResearchStore()
         scheduler_store = MemorySchedulerStore()
+        health_store = MemoryHealthStore()
     app.state.assistant_service = AssistantService(assistant_store, audit_service=app.state.audit_service)
     app.state.workflow_service = WorkflowService(
         workflow_store,
@@ -169,12 +174,18 @@ def create_app(
         scheduler_store,
         audit_service=app.state.audit_service,
     )
+    app.state.health_service = HealthService(
+        health_store,
+        repo_root=repo_service.repo_root,
+        audit_service=app.state.audit_service,
+    )
 
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=resolved_settings.max_request_body_bytes,
     )
     app.include_router(health_router)
+    app.include_router(health_diagnostic_router)
     app.include_router(chat_router)
     app.include_router(conversations_router)
     app.include_router(memories_router)

@@ -1,0 +1,168 @@
+"""Health and security service coordinating diagnostics, telemetry, and file quarantine (v3.6)."""
+
+from datetime import datetime, timezone
+import logging
+from pathlib import Path
+from typing import Any
+from uuid import UUID, uuid4
+
+from jarvis.health.models import (
+    DiagnosticReport,
+    HealthSnapshot,
+    HealthSnapshotPage,
+    QuarantineRequest,
+    QuarantinedFile,
+    QuarantinedFilePage,
+    SecretFinding,
+)
+from jarvis.health.probes import get_system_telemetry, scan_directory_for_secrets
+from jarvis.health.quarantine import QuarantineManager
+from jarvis.health.stores import HealthStore
+
+logger = logging.getLogger(__name__)
+
+
+class HealthService:
+    def __init__(
+        self,
+        store: HealthStore,
+        quarantine_dir: Path | None = None,
+        repo_root: Path | None = None,
+        audit_service: Any = None,
+    ) -> None:
+        self.store = store
+        self.repo_root = repo_root or Path.cwd()
+        q_dir = quarantine_dir or (self.repo_root / ".quarantine")
+        self.quarantine_manager = QuarantineManager(q_dir)
+        self.audit_service = audit_service
+
+    def _audit(self, owner_id: UUID, event_type: str, subject: str, details: dict[str, Any]) -> None:
+        if self.audit_service is not None:
+            try:
+                self.audit_service.record(
+                    owner_id=owner_id,
+                    category="tool",
+                    event_type=event_type,
+                    decision="allow",
+                    status="success",
+                    subject=subject[:200],
+                    details=details,
+                )
+            except Exception as exc:
+                logger.warning("Failed to record health audit event: %s", exc)
+
+    def capture_snapshot(self, owner_id: UUID) -> HealthSnapshot:
+        telemetry = get_system_telemetry(self.repo_root)
+        now = datetime.now(timezone.utc)
+        services = {
+            "api_server": "healthy",
+            "database": "operational",
+            "orchestrator": "idle",
+        }
+        snapshot = HealthSnapshot(
+            id=uuid4(),
+            owner_id=owner_id,
+            cpu_percent=telemetry["cpu_percent"],
+            memory_percent=telemetry["memory_percent"],
+            disk_free_gb=telemetry["disk_free_gb"],
+            services_status=services,
+            created_at=now,
+        )
+        self.store.save_snapshot(snapshot)
+        self._audit(
+            owner_id,
+            "health.snapshot.capture",
+            f"health:snapshot:{snapshot.id}",
+            {"disk_free_gb": snapshot.disk_free_gb, "cpu": snapshot.cpu_percent},
+        )
+        return snapshot
+
+    def list_snapshots(
+        self, owner_id: UUID, limit: int = 50, offset: int = 0
+    ) -> HealthSnapshotPage:
+        limit = max(1, min(limit, 200))
+        offset = max(0, offset)
+        items, total = self.store.list_snapshots(owner_id, limit=limit, offset=offset)
+        return HealthSnapshotPage(items=items, total=total)
+
+    def run_diagnostics(
+        self, owner_id: UUID, scan_root: Path | None = None
+    ) -> DiagnosticReport:
+        target_root = scan_root or self.repo_root
+        telemetry = self.capture_snapshot(owner_id)
+        findings = scan_directory_for_secrets(target_root, max_findings=50)
+
+        recommendations: list[str] = []
+        if telemetry.disk_free_gb < 5.0:
+            recommendations.append("Warning: Disk space is critically low (< 5GB free).")
+        else:
+            recommendations.append("Disk space is adequate.")
+
+        if findings:
+            recommendations.append(
+                f"Action Required: Found {len(findings)} potential secret exposures. Review and rotate credentials."
+            )
+        else:
+            recommendations.append("No credential leaks detected in scanned directories.")
+
+        self._audit(
+            owner_id,
+            "health.diagnostic.run",
+            f"health:diagnostic:{telemetry.id}",
+            {"secret_findings": len(findings), "disk_free_gb": telemetry.disk_free_gb},
+        )
+
+        return DiagnosticReport(
+            telemetry=telemetry,
+            secret_findings=findings,
+            recommendations=recommendations,
+        )
+
+    def quarantine_file(
+        self,
+        owner_id: UUID,
+        req: QuarantineRequest,
+        approved_by: UUID | None = None,
+    ) -> QuarantinedFile:
+        target_path = Path(req.file_path)
+        record = self.quarantine_manager.quarantine_file(
+            owner_id=owner_id,
+            file_path=target_path,
+            reason=req.reason,
+            approved_by=approved_by,
+        )
+        self.store.save_quarantined_file(record)
+        self._audit(
+            owner_id,
+            "security.file.quarantine",
+            f"security:quarantine:{record.id}",
+            {"original_path": record.original_path, "reason": record.reason},
+        )
+        return record
+
+    def restore_quarantined_file(
+        self, owner_id: UUID, record_id: UUID
+    ) -> QuarantinedFile:
+        record = self.store.get_quarantined_file(owner_id, record_id)
+        if not record:
+            raise ValueError(f"Quarantined record {record_id} not found.")
+
+        restored_record = self.quarantine_manager.restore_file(record)
+        self.store.update_quarantined_file(restored_record)
+        self._audit(
+            owner_id,
+            "security.file.restore",
+            f"security:quarantine:{restored_record.id}",
+            {"original_path": restored_record.original_path},
+        )
+        return restored_record
+
+    def list_quarantined_files(
+        self, owner_id: UUID, limit: int = 50, offset: int = 0
+    ) -> QuarantinedFilePage:
+        limit = max(1, min(limit, 200))
+        offset = max(0, offset)
+        items, total = self.store.list_quarantined_files(
+            owner_id, limit=limit, offset=offset
+        )
+        return QuarantinedFilePage(items=items, total=total)
