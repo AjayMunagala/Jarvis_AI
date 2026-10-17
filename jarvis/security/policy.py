@@ -47,6 +47,10 @@ class Capability(StrEnum):
     # Finance & external data intelligence (v3.7): analytical personal finance intelligence.
     FINANCE_READ = "finance.read"
     FINANCE_WRITE = "finance.write"
+    # Controlled self-improvement & hardening (v3.9): offline benchmarks, diffs, approval gates.
+    IMPROVEMENT_READ = "improvement.read"
+    IMPROVEMENT_PROPOSE = "improvement.propose"
+    IMPROVEMENT_APPROVE = "improvement.approve"
     EXTERNAL_ACTION_EXECUTE = "external_action.execute"
 
 
@@ -80,6 +84,9 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.SECURITY_QUARANTINE_FILE,
     Capability.FINANCE_READ,
     Capability.FINANCE_WRITE,
+    Capability.IMPROVEMENT_READ,
+    Capability.IMPROVEMENT_PROPOSE,
+    Capability.IMPROVEMENT_APPROVE,
 })
 
 
