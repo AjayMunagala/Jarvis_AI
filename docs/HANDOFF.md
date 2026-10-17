@@ -234,7 +234,32 @@ The previous `/ready` handler returned `ready` unconditionally after application
 - PostgreSQL tests were not run. The four required integration variables were unset in this execution process. The earlier owner-reported v2.0 result (27 passed, 1 warning in 25.73 seconds) remains historical operator evidence, not a result reproduced here.
 - Environment sampled: Python 3.12.10, pytest 8.4.2, Node v24.14.0, npm 11.15.0; approximately 7.7 GiB total and 0.8 GiB free memory at sampling. Global Python lacked pytest; `.venv-dev` contains pytest. The existing Starlette/httpx deprecation warning remains.
 
-The readiness endpoint change is implemented, but v2.1 is not fully verified or accepted. Run the focused API test and full Python suite from a normal local PowerShell environment where loopback socket pairs and local server binds are permitted. Run actual Playwright only after the configured Chromium browser is installed. Run the opt-in PostgreSQL suite only after reviewing its documented disposable-database prerequisites in the operator's configured shell. No live provider request, database operation, commit, or push was performed here.
+At the time of the original v2.1 task, Python API, local-server, and PostgreSQL checks were blocked in the restricted execution environment, and Playwright Chromium was unavailable. The later integration verification below supersedes those limitations for offline Python, frontend, and browser checks. PostgreSQL remains unverified in this execution.
+
+## Integration and acceptance pass — v2.1, v2.2, and v2.3
+
+This work is on `jarvis/integration-acceptance-v24`, based on `origin/main` at `3e19fbc65a8aed8612d944c79a913596803ce1fe`. v2.1 reliability and v2.3 repository intelligence were already present on that base; v2.2 memory/context changes were integrated by fast-forwarding `origin/jarvis/review-memory-v22` at `e7840b906e04442e06b25b95694526a904bf32b9`. The earlier Codex v2.1 branch was not cherry-picked because its implementation was already present in newer form on the base. The only local implementation changes are the path-security fix and its regression tests.
+
+### Path-security fix
+
+`safe_resolve_path` now inspects each path component with `lstat` before `Path.resolve()` can follow a symbolic link, rejects any link component when `allow_symlinks=False`, and retains the resolved-path repository-containment check. The precheck narrows but cannot eliminate races with concurrent filesystem changes. The environment did not permit creating real Windows symlinks, so the two OS-level symlink tests skipped; a deterministic mocked-`lstat` test exercised the rejection branch. External-link behavior on a Windows filesystem with symlink creation enabled remains unverified here.
+
+### Verification performed on the integration working tree
+
+- ` .\.venv-dev\Scripts\python.exe -m pytest -q` (with `JARVIS_RUN_POSTGRES_INTEGRATION=0` for this process): **396 passed, 2 skipped**, 1 Starlette/httpx TestClient deprecation warning, in 7.87 seconds. The two skips were real symlink creation checks; pytest then emitted an ignored temporary-directory cleanup `PermissionError` from its atexit handler after the passing summary.
+- ` .\.venv-dev\Scripts\python.exe -m pytest -q tests/test_repo_intel.py`: **33 passed, 2 skipped**, 1 deprecation warning, in 4.20 seconds; the same post-summary pytest temp cleanup warning occurred.
+- Focused path tests (`-k safe_resolve_path`): **7 passed, 2 skipped, 26 deselected**; the deterministic mocked-`lstat` regression passed.
+- PostgreSQL integration guard tests with opt-in disabled: **11 passed, 21 deselected**. These only tested URL and pre-existing-name classification; they did not connect to PostgreSQL.
+- `npm test -- --run`: **53 passed** across 3 files. `npm run build`: passed (`tsc -b` and Vite production build).
+- `npm run test:e2e`: **9 passed**. The Playwright configuration started loopback-only backend/frontend services with the mock provider, persistence disabled, and retrieval disabled. Scenarios include local mock chat and intercepted synthetic conversation responses; interception does not verify PostgreSQL persistence.
+- ` .\.venv-dev\Scripts\python.exe -m compileall -q jarvis tests integration_tests database`: passed. `git diff --check`: passed; Git emitted only LF-to-CRLF working-copy warnings.
+
+### Remaining verification and limitations
+
+- The live PostgreSQL suite was not run: `JARVIS_RUN_POSTGRES_INTEGRATION`, `JARVIS_TEST_POSTGRES_ADMIN_URL`, `PGPASSFILE`, and `JARVIS_PG_BIN_DIR` were unset in this execution process. No PostgreSQL connection, migration, database creation, or cleanup occurred. v2.2's PostgreSQL behavior therefore remains unverified on this combined branch.
+- The sandboxed TestClient attempt blocked in Windows asyncio's socket-pair setup (`socket.accept`) before a request reached the application. Running the tests in the local unrestricted execution context succeeded; this is an environment boundary, not a confirmed application failure.
+- No live model provider call was made. Repository intelligence remains read-only and suggested commands are informational only; the tool registry remains empty and `execution_enabled=False`.
+- The branch is not accepted on behalf of the owner. Owner review remains the final acceptance gate.
 
 ## Developer 3 — Repository Intelligence and Coding Diagnostics Handoff
 
@@ -249,7 +274,7 @@ Developer 3 has designed, implemented, and verified a modular, strictly read-onl
 - **Configuration and Dependency Discovery (`jarvis/repo/config_discovery.py`):** Static parsing of `pyproject.toml` and `package.json` for declared dependencies, frameworks, build tools, and test runners. Discovers declared environment variable names from `config.py` and `.env.example` without reading `.env` secret values.
 - **Test and Build Discovery (`jarvis/repo/test_discovery.py`):** Discovers test frameworks (`pytest`, `vitest`, `playwright`), test files, test directories, package scripts, and maintains explicit module-to-test mappings. Discovered commands are treated as informational and are never executed autonomously.
 - **Evidence-Based Diagnostics (`jarvis/repo/diagnostics.py`):** Generates structured diagnostic reports separating verified facts (with file/line references) from plausible hypotheses (with explicit confirmation needed), and recommends human-executable diagnostic commands without code modification.
-- **Path Security (`jarvis/repo/path_security.py`):** Strict boundary validation prevents parent directory traversal (`..`), absolute paths outside root, Windows alternate data streams (colons in segments), drive-relative paths, NUL bytes, and external symlink escapes.
+- **Path Security (`jarvis/repo/path_security.py`):** Strict boundary validation prevents parent directory traversal (`..`), absolute paths outside root, Windows alternate data streams (colons in segments), drive-relative paths, NUL bytes, and symbolic-link components when disallowed. Components are checked with `lstat` before resolution and resolved-path containment is rechecked; concurrent filesystem changes can still race the precheck.
 - **Service and API Integration (`jarvis/repo/service.py`, `jarvis/api/routes/repo.py`):** Clean service facade and authenticated endpoints under `/repo` (`/inventory`, `/search`, `/symbols`, `/git`, `/config`, `/tests`, `/diagnostics`) requiring bearer authentication and `Capability.REPO_READ`.
 - **Read-Only Safety:** No file modification, package installation, or command execution. `tools.json` remains empty, and `execution_enabled=False`.
 

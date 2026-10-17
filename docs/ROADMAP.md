@@ -186,7 +186,7 @@ Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remain
 - Treat intentionally disabled persistence as a valid ready mode. Report configured persistence only as repository wiring; do not connect to PostgreSQL from readiness.
 - Preserve authentication, capability enforcement, mock mode, provider selection, owner isolation, bounded execution, and disabled tool/action execution.
 - Add focused pure unit coverage for ready, incomplete, and persistence-disabled/configured states, plus HTTP contract regression coverage.
-- v2.1 is not complete until verification is repeated in an environment that permits the Windows loopback sockets required by the current TestClient/Uvicorn setup. The current restricted execution result and the separate PostgreSQL/browser verification limits are recorded in `docs/HANDOFF.md`.
+- On the v2.1–v2.3 integration acceptance branch, the full offline Python suite and browser smoke suite were independently run in an environment permitting Windows local sockets. The opt-in PostgreSQL suite remains unverified in this execution because its required process variables were unset. Exact commands, results, and environment limitations are recorded in `docs/HANDOFF.md`; owner acceptance remains pending.
 
 ## Repository Intelligence and Coding Diagnostics (implemented)
 
@@ -198,9 +198,16 @@ Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remain
 - Implement static configuration and dependency discovery (`jarvis/repo/config_discovery.py`): parses `pyproject.toml`, `package.json`, and discovers declared environment variable names without exposing `.env` secret values.
 - Implement test and build discovery (`jarvis/repo/test_discovery.py`): test frameworks (`pytest`, `vitest`, `playwright`), test files, test commands, and module-to-test mappings.
 - Implement evidence-based diagnostic report generation (`jarvis/repo/diagnostics.py`): separates confirmed facts from hypotheses with explicit confirmation needed and human-executable suggested commands.
-- Implement strict path traversal and boundary security (`jarvis/repo/path_security.py`): prevents directory traversal, absolute path escapes, Windows alternate data streams, drive-relative paths, and external symlinks.
+- Implement strict path traversal and boundary security (`jarvis/repo/path_security.py`): rejects directory traversal, absolute path escapes, Windows alternate data streams, drive-relative paths, NUL bytes, and symbolic-link components when disallowed; resolved-path containment is rechecked. A concurrent filesystem change can still race the precheck.
 - Expose authenticated, read-only API endpoints under `/repo` (`/inventory`, `/search`, `/symbols`, `/git`, `/config`, `/tests`, `/diagnostics`) requiring bearer authentication and `Capability.REPO_READ`.
 - The subsystem is strictly read-only, does not execute arbitrary code, does not modify files, does not change Git state, and keeps `execution_enabled=False`.
+
+## v2.1–v2.3 integration acceptance pass (verification recorded; owner acceptance pending)
+
+- Integration branch: `jarvis/integration-acceptance-v24`, based on `origin/main` at `3e19fbc65a8aed8612d944c79a913596803ce1fe`. v2.1 readiness and v2.3 repository intelligence were already on that base; v2.2 memory/context work was integrated from `origin/jarvis/review-memory-v22` at `e7840b906e04442e06b25b95694526a904bf32b9`. The obsolete Codex v2.1 branch was not cherry-picked because current main already contained newer implementation.
+- The confirmed repository-path issue was fixed: disallowed symlink components are detected with `lstat` before resolution, with the existing containment check retained. The precheck narrows but does not eliminate races with concurrent filesystem changes. Two OS-level symlink tests skipped because Windows symlink creation was unavailable; a mocked-`lstat` test covers the rejection branch.
+- Independently executed verification on this integrated tree: full offline Python suite **396 passed, 2 skipped**; repo-intelligence tests **33 passed, 2 skipped**; frontend unit tests **53 passed**; production build and compileall passed; Playwright **9 passed**; PostgreSQL URL/collision guards **11 passed**. The existing Starlette/httpx warning and pytest atexit temp-directory `PermissionError` are recorded in `docs/HANDOFF.md`.
+- The live PostgreSQL suite was not run because its required process environment was not configured here. No live provider call was made. The integration/browser results do not verify database persistence; owner acceptance remains pending live PostgreSQL verification and review.
 
 ## Memory, context continuity, and knowledge phase (implemented; live PostgreSQL verification pending)
 

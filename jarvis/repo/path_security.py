@@ -2,6 +2,7 @@
 
 import os
 import re
+import stat
 from pathlib import Path, PureWindowsPath
 
 WINDOWS_RESERVED_NAMES = frozenset({
@@ -46,7 +47,11 @@ def safe_resolve_path(
     """Safely resolve a candidate path within an approved repository root.
 
     Prevents directory traversal ('..'), absolute paths outside the root,
-    Windows alternate data streams, drive-relative paths, and symlink escapes.
+    Windows alternate data streams, drive-relative paths, and disallowed
+    symbolic-link traversal.
+    The component precheck narrows symlink races but cannot eliminate changes
+    made concurrently by another process; resolved-path containment is checked
+    again before returning the path.
     """
     if candidate is None:
         raise PathSecurityError("Target path must not be None.")
@@ -78,9 +83,33 @@ def safe_resolve_path(
         if ":" in part:
             raise PathSecurityError("Alternate data streams or colons in relative paths are forbidden.")
 
-    # Resolve against root
+    # Resolve against root. Inspect each lexical component with lstat first:
+    # Path.resolve() follows symlinks, so checking the resolved path itself
+    # cannot tell whether the caller's path traversed one.
     resolved_root = repo_root.resolve(strict=True)
     target = (resolved_root / candidate)
+
+    if not allow_symlinks:
+        try:
+            relative_target = target.relative_to(resolved_root)
+        except ValueError:
+            relative_target = None
+        if relative_target is not None:
+            component_path = resolved_root
+            for component in relative_target.parts:
+                component_path = component_path / component
+                try:
+                    component_mode = component_path.lstat().st_mode
+                except FileNotFoundError:
+                    # Nonexistent suffixes are handled by the strict resolve
+                    # below when must_exist=True.
+                    continue
+                except OSError as exc:
+                    raise PathSecurityError("Unable to inspect the requested path safely.") from exc
+                if stat.S_ISLNK(component_mode):
+                    raise PathSecurityError(
+                        "Symbolic links are disallowed in read-only repository inspection."
+                    )
 
     try:
         resolved_target = target.resolve(strict=must_exist)
@@ -96,10 +125,6 @@ def safe_resolve_path(
         resolved_target.relative_to(resolved_root)
     except ValueError as exc:
         raise PathSecurityError("Resolved path escapes the approved repository root.") from exc
-
-    # Symlink verification
-    if not allow_symlinks and resolved_target.is_symlink():
-        raise PathSecurityError("Symbolic links are disallowed in read-only repository inspection.")
 
     return resolved_target
 
