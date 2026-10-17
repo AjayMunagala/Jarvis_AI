@@ -368,7 +368,9 @@ def test_malicious_document_in_chat_context_cannot_enable_tools_or_grant_capabil
     assert response.status_code == 200
     service = app.state.orchestration_service
     assert service.tool_registry.execution_enabled is False
-    assert service.tool_registry.config.tools == ()
+    # v2.7 (owner decision D1): only read-only, low-risk, non-autonomous tools are registered.
+    assert all(tool.read_only and not tool.executable and tool.risk == "low" for tool in service.tool_registry.config.tools)
+    assert app.state.settings.tools_enabled is False
     assert app.state.authorization_policy.allows(OWNER, Capability.EXTERNAL_ACTION_EXECUTE) is False
     sent_message, instruction = provider.calls[0]
     assert TOKEN not in sent_message and TOKEN not in instruction

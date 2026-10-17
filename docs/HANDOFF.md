@@ -50,7 +50,7 @@ npm run build
 ## Current limits
 
 - Intent classification and planning are deterministic, not model-driven. The configured personas share one provider; AnalysisExpert and ValidationExpert have distinct model instructions and structured contracts. In mock mode the instructions are ignored and responses are deterministic demo text with `not_evaluated` structured placeholders, not model reasoning.
-- The only configured tool list is empty. Tool execution, approval workflow, persistent audit storage, and external integrations are not implemented. Core v1.8 adds a small server-side capability policy for existing single-owner operations; it does not add per-user grants, multi-user accounts, PostgreSQL row-level security, semantic retrieval, embeddings, pgvector, automatic extraction, retention scheduling, or memory audit history. Conversation persistence is opt-in and gated by one configured bearer token. Core v1.1 adds a local memory-management interface, updated in v1.2 with in-memory credential handling.
+- (Updated in v2.7) Read-only tools are now registered and can be invoked by the owner through the tool runtime when `JARVIS_TOOLS_ENABLED=true` (off by default); the orchestrator still never calls tools. Approval workflow, persistent audit storage, and external integrations are not implemented. Core v1.8 adds a small server-side capability policy for existing single-owner operations; it does not add per-user grants, multi-user accounts, PostgreSQL row-level security, semantic retrieval, embeddings, pgvector, automatic extraction, retention scheduling, or memory audit history. Conversation persistence is opt-in and gated by one configured bearer token. Core v1.1 adds a local memory-management interface, updated in v1.2 with in-memory credential handling.
 - `/ready` confirms successful settings/provider/orchestrator construction; it does not probe external systems.
 - The default provider runs without a GPU, API key, or internet. Frontend conversation state is in-memory only.
 - OpenAI selection requires `JARVIS_OPENAI_API_KEY`; setting it does not fall back to mock if calls fail. Requests send user message content to the configured endpoint and may incur charges. No live provider call was performed during tests.
@@ -539,3 +539,23 @@ See `docs/BROWSER_INTELLIGENCE.md` for the design, configuration, API, security 
 - Real Chromium: `tests/test_browser_chromium.py` (8 tests) drives headless Chromium 156.0.8078.4 against a local loopback server: startup/shutdown, JavaScript-rendered DOM and accessible labels, redirect allowed/blocked, type/select/click/scroll, PNG screenshot, consequential submit never sent (server saw no POST), subresource blocking (metadata image and disallowed script aborted before reaching the server), navigation timeout, browser disconnect, and per-session cookie isolation. The Playwright adapter now reports a policy-blocked redirect hop as `blocked` rather than a generic failure.
 - DNS rebinding: the HTTP provider's default transport validates and connects to the same resolved address (`jarvis/browser/guarded_transport.py`); `URLPolicy.allowed_addresses` is shared by URL checks and connection-time checks. `tests/test_browser_rebinding.py` (10 tests; fake network backend plus real loopback server) covers rebinding after check, mixed answers, redirects to rebinding and internal hosts, legitimate redirect chains, Host/SNI preservation, literal private addresses, and Unix sockets. A negative control showed the unguarded pool connecting where the guarded transport refuses.
 - Remaining: Chromium performs its own DNS resolution, so the Playwright provider applies the policy per request URL but does not pin the connected address. Consequential actions remain unexecuted; no approval-and-execute path exists.
+
+## Core v2.7 — Capability registry and read-only tool runtime (implemented; uncommitted; owner acceptance pending)
+
+### Baseline and working copy
+
+- Started from `jarvis/integration-acceptance-v26` at `a0dc5bea4161711cf215bbaa8d027afb08315ca0`. Work is on `claude/jarvis-v2.7-capability-runtime` in the worktree `D:\Project_Jarvis_worktrees\tools-v27`; the shared checkout and the v2.6 integration branch were not modified. Nothing is committed or pushed.
+
+### Implemented
+
+See `docs/TOOL_RUNTIME.md`. New: `jarvis/tools/{models,calculator,handlers,runtime}.py`, `jarvis/api/routes/tools.py`, the populated `jarvis/orchestration/config/tools.json` (8 read-only tools, decision D1), the Capabilities frontend view, and tests. Shared files touched minimally: `jarvis/core/config.py` (tool settings and validation), `jarvis/security/policy.py` (`tools.read`, `tools.invoke`), `jarvis/main.py` (runtime wiring, router, shutdown), `frontend/src/App.tsx`, `frontend/src/services/api.ts`.
+
+Three existing tests asserted an empty tool registry (`test_coding.py`, `test_e2e_workflows.py`, `test_memory_context.py`). Under D1 they now assert the stronger invariant that every registered tool is read-only, low-risk, and non-autonomous, that `ToolRegistry.execution_enabled` is still `False`, and that `JARVIS_TOOLS_ENABLED` defaults to `False`.
+
+### Decisions applied
+
+D1 registry populated, runtime off by default; D2 no consequential execution; D3 no model-proposed calls (v2.8); D6 pgvector deferred and documented as not implemented; D7 v2.7 audit is in-memory and labelled `durable: false` (PostgreSQL audit is v2.9).
+
+### Dependencies for v2.8
+
+v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and the live policy), `CapabilityDescriptor` schemas for model-facing tool descriptions, and `ToolResult.evidence` for verification. Model-proposed calls must still pass the same enforcement order; `executable` in `tools.json` must remain `false` until v2.8 deliberately changes orchestrator behavior.

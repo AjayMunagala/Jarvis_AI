@@ -1,4 +1,866 @@
 {
-  "version": 1,
-  "tools": []
+  "tools": [
+    {
+      "description": "Fetches and observes one policy-checked page as untrusted content.",
+      "executable": false,
+      "id": "browser.observe",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "BrowserObserveArgs",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "BrowserLink": {
+            "additionalProperties": false,
+            "properties": {
+              "href": {
+                "title": "Href",
+                "type": "string"
+              },
+              "label": {
+                "title": "Label",
+                "type": "string"
+              }
+            },
+            "required": [
+              "label",
+              "href"
+            ],
+            "title": "BrowserLink",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "content_sha256": {
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "http_status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Http Status"
+          },
+          "javascript_executed": {
+            "title": "Javascript Executed",
+            "type": "boolean"
+          },
+          "links": {
+            "items": {
+              "$ref": "#/$defs/BrowserLink"
+            },
+            "maxItems": 20,
+            "title": "Links",
+            "type": "array"
+          },
+          "retrieved_at": {
+            "title": "Retrieved At",
+            "type": "string"
+          },
+          "text_excerpt": {
+            "title": "Text Excerpt",
+            "type": "string"
+          },
+          "text_truncated": {
+            "title": "Text Truncated",
+            "type": "boolean"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "untrusted": {
+            "const": true,
+            "default": true,
+            "title": "Untrusted",
+            "type": "boolean"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "title",
+          "http_status",
+          "retrieved_at",
+          "content_sha256",
+          "text_excerpt",
+          "text_truncated",
+          "links",
+          "javascript_executed"
+        ],
+        "title": "BrowserObserveOutput",
+        "type": "object"
+      },
+      "read_only": true,
+      "risk": "low",
+      "version": "1"
+    },
+    {
+      "description": "Evaluates bounded arithmetic (numbers, + - * / // % **, abs/min/max/round/sqrt).",
+      "executable": false,
+      "id": "calculator",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "expression": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Expression",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expression"
+        ],
+        "title": "CalculatorArgs",
+        "type": "object"
+      },
+      "output_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "expression": {
+            "title": "Expression",
+            "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Result"
+          },
+          "result_type": {
+            "enum": [
+              "integer",
+              "decimal"
+            ],
+            "title": "Result Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expression",
+          "result",
+          "result_type"
+        ],
+        "title": "CalculatorOutput",
+        "type": "object"
+      },
+      "read_only": true,
+      "risk": "low",
+      "version": "1"
+    },
+    {
+      "description": "Per-file insertion/deletion counts for uncommitted changes; no diff content.",
+      "executable": false,
+      "id": "git.diff_summary",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "NoArgs",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "GitDiffEntryOut": {
+            "additionalProperties": false,
+            "properties": {
+              "deletions": {
+                "title": "Deletions",
+                "type": "integer"
+              },
+              "insertions": {
+                "title": "Insertions",
+                "type": "integer"
+              },
+              "is_binary": {
+                "title": "Is Binary",
+                "type": "boolean"
+              },
+              "path": {
+                "title": "Path",
+                "type": "string"
+              },
+              "status": {
+                "title": "Status",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "status",
+              "insertions",
+              "deletions",
+              "is_binary"
+            ],
+            "title": "GitDiffEntryOut",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "content_included": {
+            "const": false,
+            "default": false,
+            "title": "Content Included",
+            "type": "boolean"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/$defs/GitDiffEntryOut"
+            },
+            "maxItems": 100,
+            "title": "Files",
+            "type": "array"
+          },
+          "head_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head Commit"
+          },
+          "total_deletions": {
+            "title": "Total Deletions",
+            "type": "integer"
+          },
+          "total_insertions": {
+            "title": "Total Insertions",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "branch",
+          "head_commit",
+          "files",
+          "total_insertions",
+          "total_deletions"
+        ],
+        "title": "GitDiffSummaryOutput",
+        "type": "object"
+      },
+      "read_only": true,
+      "risk": "low",
+      "version": "1"
+    },
+    {
+      "description": "Reads branch, HEAD, and working-tree file status (read-only).",
+      "executable": false,
+      "id": "git.status",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "NoArgs",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "GitFile": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "title": "Path",
+                "type": "string"
+              },
+              "status": {
+                "title": "Status",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "status"
+            ],
+            "title": "GitFile",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "head_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head Commit"
+          },
+          "is_repo": {
+            "title": "Is Repo",
+            "type": "boolean"
+          },
+          "staged": {
+            "items": {
+              "$ref": "#/$defs/GitFile"
+            },
+            "maxItems": 100,
+            "title": "Staged",
+            "type": "array"
+          },
+          "unstaged": {
+            "items": {
+              "$ref": "#/$defs/GitFile"
+            },
+            "maxItems": 100,
+            "title": "Unstaged",
+            "type": "array"
+          },
+          "untracked": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Untracked",
+            "type": "array"
+          }
+        },
+        "required": [
+          "is_repo",
+          "branch",
+          "head_commit",
+          "staged",
+          "unstaged",
+          "untracked",
+          "error"
+        ],
+        "title": "GitStatusOutput",
+        "type": "object"
+      },
+      "read_only": true,
+      "risk": "low",
+      "version": "1"
+    },
+    {
+      "description": "Lexical search over the owner's saved memories and imported documents.",
+      "executable": false,
+      "id": "memory.search",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 5,
+            "maximum": 10,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "query": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "MemorySearchArgs",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "MemoryHit": {
+            "additionalProperties": false,
+            "properties": {
+              "category": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Category"
+              },
+              "excerpt": {
+                "title": "Excerpt",
+                "type": "string"
+              },
+              "id": {
+                "format": "uuid",
+                "title": "Id",
+                "type": "string"
+              },
+              "source_kind": {
+                "enum": [
+                  "memory",
+                  "document"
+                ],
+                "title": "Source Kind",
+                "type": "string"
+              },
+              "source_reference": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Source Reference"
+              },
+              "updated_at": {
+                "title": "Updated At",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "source_kind",
+              "category",
+              "source_reference",
+              "excerpt",
+              "updated_at"
+            ],
+            "title": "MemoryHit",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "hits": {
+            "items": {
+              "$ref": "#/$defs/MemoryHit"
+            },
+            "maxItems": 10,
+            "title": "Hits",
+            "type": "array"
+          },
+          "query": {
+            "title": "Query",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query",
+          "total",
+          "hits"
+        ],
+        "title": "MemorySearchOutput",
+        "type": "object"
+      },
+      "read_only": true,
+      "risk": "low",
+      "version": "1"
+    },
+    {
+      "description": "Bounded text or filename search in the configured repository (no regex).",
+      "executable": false,
+      "id": "repo.search",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_results": {
+            "default": 20,
+            "maximum": 50,
+            "minimum": 1,
+            "title": "Max Results",
+            "type": "integer"
+          },
+          "path_filter": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Path Filter"
+          },
+          "query": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          },
+          "search_type": {
+            "default": "text",
+            "enum": [
+              "text",
+              "filename"
+            ],
+            "title": "Search Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "RepoSearchArgs",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "RepoMatch": {
+            "additionalProperties": false,
+            "properties": {
+              "line_number": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Line Number"
+              },
+              "line_text": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Line Text"
+              },
+              "matched_text": {
+                "title": "Matched Text",
+                "type": "string"
+              },
+              "path": {
+                "title": "Path",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "line_number",
+              "matched_text",
+              "line_text"
+            ],
+            "title": "RepoMatch",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "matched_files_count": {
+            "title": "Matched Files Count",
+            "type": "integer"
+          },
+          "matches": {
+            "items": {
+              "$ref": "#/$defs/RepoMatch"
+            },
+            "maxItems": 50,
+            "title": "Matches",
+            "type": "array"
+          },
+          "query": {
+            "title": "Query",
+            "type": "string"
+          },
+          "search_type": {
+            "title": "Search Type",
+            "type": "string"
+          },
+          "total_matches": {
+            "title": "Total Matches",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "query",
+          "search_type",
+          "total_matches",
+          "matched_files_count",
+          "truncated",
+          "matches"
+        ],
+        "title": "RepoSearchOutput",
+        "type": "object"
+      },
+      "read_only": true,
+      "risk": "low",
+      "version": "1"
+    },
+    {
+      "description": "Finds classes, functions, and routes by name in the configured repository.",
+      "executable": false,
+      "id": "repo.symbols",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_results": {
+            "default": 20,
+            "maximum": 50,
+            "minimum": 1,
+            "title": "Max Results",
+            "type": "integer"
+          },
+          "path_filter": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Path Filter"
+          },
+          "query": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "RepoSymbolsArgs",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "RepoSymbol": {
+            "additionalProperties": false,
+            "properties": {
+              "line_number": {
+                "title": "Line Number",
+                "type": "integer"
+              },
+              "name": {
+                "title": "Name",
+                "type": "string"
+              },
+              "path": {
+                "title": "Path",
+                "type": "string"
+              },
+              "signature": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Signature"
+              },
+              "symbol_type": {
+                "title": "Symbol Type",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "symbol_type",
+              "path",
+              "line_number",
+              "signature"
+            ],
+            "title": "RepoSymbol",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "title": "Query",
+            "type": "string"
+          },
+          "symbols": {
+            "items": {
+              "$ref": "#/$defs/RepoSymbol"
+            },
+            "maxItems": 50,
+            "title": "Symbols",
+            "type": "array"
+          }
+        },
+        "required": [
+          "query",
+          "symbols"
+        ],
+        "title": "RepoSymbolsOutput",
+        "type": "object"
+      },
+      "read_only": true,
+      "risk": "low",
+      "version": "1"
+    },
+    {
+      "description": "Plans verification checks for paths; never executes them.",
+      "executable": false,
+      "id": "verification.plan",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "default": "Verification plan requested through the tool runtime",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "target_paths": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Target Paths",
+            "type": "array"
+          }
+        },
+        "title": "VerificationPlanArgs",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "PlannedCheck": {
+            "additionalProperties": false,
+            "properties": {
+              "check_id": {
+                "title": "Check Id",
+                "type": "string"
+              },
+              "name": {
+                "title": "Name",
+                "type": "string"
+              },
+              "profile_id": {
+                "title": "Profile Id",
+                "type": "string"
+              },
+              "scope": {
+                "title": "Scope",
+                "type": "string"
+              },
+              "target": {
+                "title": "Target",
+                "type": "string"
+              }
+            },
+            "required": [
+              "check_id",
+              "name",
+              "scope",
+              "target",
+              "profile_id"
+            ],
+            "title": "PlannedCheck",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "checks": {
+            "items": {
+              "$ref": "#/$defs/PlannedCheck"
+            },
+            "maxItems": 10,
+            "title": "Checks",
+            "type": "array"
+          },
+          "executed": {
+            "const": false,
+            "default": false,
+            "title": "Executed",
+            "type": "boolean"
+          },
+          "plan_id": {
+            "title": "Plan Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id",
+          "checks"
+        ],
+        "title": "VerificationPlanOutput",
+        "type": "object"
+      },
+      "read_only": true,
+      "risk": "low",
+      "version": "1"
+    }
+  ],
+  "version": 1
 }

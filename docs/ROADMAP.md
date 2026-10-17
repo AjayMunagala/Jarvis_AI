@@ -244,6 +244,12 @@ Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remain
 - Add `/browser` routes with new `browser.read` / `browser.interact` capabilities, evidence-first research over supplied URLs, and browser checks using the accepted v2.5 `VerificationReport` contracts (execution gated by `JARVIS_BROWSER_CHECKS_ENABLED`, default false). Add a frontend Browser workspace.
 - Follow-up: optional `browser` extra (`playwright==1.64.0`, owner-authorized) verified against real headless Chromium; HTTP-provider DNS-rebinding protection enforces the policy at connection time. Details: `docs/BROWSER_INTELLIGENCE.md`.
 
+## Core v2.7 — Capability registry and read-only tool runtime (implemented; owner acceptance pending)
+
+- Master Phase 4. Typed capability/tool/result/audit contracts, risk classes, strict input validation, server-side permission enforcement, timeouts and output limits, and audit events for every call.
+- Registry populated with 8 read-only tools wrapping existing services (calculator, memory search, repository search and symbols, git status and diff summary, verification plan, browser observe); `JARVIS_TOOLS_ENABLED=false` by default; the orchestrator does not call tools yet (v2.8).
+- `GET /capabilities`, `POST /tools/calls`, `GET /tools/audit` (in-memory, non-durable) and a Capabilities frontend view. pgvector remains deferred (D6). Details: `docs/TOOL_RUNTIME.md`.
+
 ## Later milestones
 
 1. Identity and memory governance: authenticated users, explicit ownership, access controls, retention/export/revocation, and user-visible memory controls before exposing memory in shared deployments.

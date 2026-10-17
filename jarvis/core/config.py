@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     browser_max_text_chars: int = Field(default=20_000, ge=1_000, le=50_000)
     browser_max_elements: int = Field(default=150, ge=10, le=300)
     browser_checks_enabled: bool = False
+    # Read-only tool runtime (v2.7). Off by default; the orchestrator never calls tools in v2.7.
+    tools_enabled: bool = False
+    tools_max_concurrent: int = Field(default=2, ge=1, le=4)
+    tools_max_timeout_seconds: float = Field(default=20.0, ge=1.0, le=30.0)
+    tools_max_output_bytes: int = Field(default=32_768, ge=1_024, le=131_072)
+    tools_max_argument_bytes: int = Field(default=8_192, ge=512, le=65_536)
 
     @model_validator(mode="after")
     def validate_provider_configuration(self) -> "Settings":
@@ -133,6 +139,10 @@ class Settings(BaseSettings):
                 )
         if self.browser_allow_private_network and self.environment == "production":
             raise ValueError("JARVIS_BROWSER_ALLOW_PRIVATE_NETWORK must not be enabled in production.")
+        if self.tools_enabled:
+            token = self.local_auth_token.get_secret_value() if self.local_auth_token else ""
+            if len(token) < 32 or self.owner_id is None or self.owner_id.int == 0:
+                raise ValueError("JARVIS_TOOLS_ENABLED=true requires JARVIS_LOCAL_AUTH_TOKEN and JARVIS_OWNER_ID.")
         if self.browser_checks_enabled and not self.browser_enabled:
             raise ValueError("JARVIS_BROWSER_CHECKS_ENABLED=true requires JARVIS_BROWSER_ENABLED=true.")
         return self

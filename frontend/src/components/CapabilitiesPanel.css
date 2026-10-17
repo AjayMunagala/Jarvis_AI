@@ -1,0 +1,31 @@
+.capabilities-panel { max-width: 1000px; margin: 0 auto; padding: 32px; line-height: 1.6; overflow-wrap: anywhere; }
+.capabilities-panel h1 { font-size: 28px; }
+.capabilities-panel h2 { font-size: 20px; margin-top: 20px; }
+.capabilities-kicker { margin: 0; color: #85d5e6; font-size: 11px; letter-spacing: .12em; }
+.capabilities-panel textarea { width: 100%; min-height: 110px; padding: 10px; color: inherit; background: #131a22; border: 1px solid #405064; border-radius: 8px; font: 13px/1.5 ui-monospace, monospace; }
+.capabilities-panel button { padding: 7px 14px; color: inherit; background: #23364a; border: 1px solid #526b87; border-radius: 8px; cursor: pointer; }
+.capabilities-panel button:disabled { opacity: .55; cursor: not-allowed; }
+.capabilities-panel :focus-visible { outline: 2px solid #a5d3ff; outline-offset: 3px; }
+.capabilities-panel [role="alert"] { color: #ffb6b6; }
+.capabilities-panel pre { max-height: 360px; overflow: auto; padding: 12px; background: #10161f; border: 1px solid #344052; border-radius: 8px; white-space: pre-wrap; }
+.capabilities-status, .capabilities-meta { color: #9fb0bf; font-size: 13px; }
+.capabilities-list { list-style: none; padding-left: 0; display: grid; gap: 10px; }
+.capabilities-list li { display: grid; gap: 4px; padding: 12px; background: #0c1219; border: 1px solid #344052; border-radius: 8px; }
+.capabilities-list li button { justify-self: start; }
+.capabilities-list small { color: #8fa7b3; }
+.capabilities-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.capabilities-head code { color: #8fa7b3; font-size: 12px; }
+.capabilities-risk, .capabilities-tag { padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.capabilities-risk-low { background: #133820; color: #6ee7b7; }
+.capabilities-risk-medium, .capabilities-risk-high, .capabilities-risk-critical { background: #382d12; color: #fde047; }
+.capabilities-tag { background: #1e293b; color: #94a3b8; }
+.capabilities-ok { color: #6ee7b7; font-size: 12px; }
+.capabilities-off { color: #fca5a5; font-size: 12px; }
+.capabilities-call { display: grid; gap: 10px; margin-top: 16px; padding: 16px; border: 1px solid #344052; border-radius: 8px; }
+.capabilities-result { margin-top: 16px; padding: 16px; border: 1px solid #344052; border-radius: 8px; background: #0c1219; }
+.capabilities-status-succeeded { color: #6ee7b7; }
+.capabilities-status-failed, .capabilities-status-denied, .capabilities-status-invalid_input { color: #fca5a5; }
+.capabilities-status-approval_required, .capabilities-status-timed_out, .capabilities-status-unavailable, .capabilities-status-partial { color: #fde047; }
+.capabilities-warning { color: #e6b86d; }
+.capabilities-audit { padding-left: 20px; font-size: 13px; }
+@media (max-width: 600px) { .capabilities-panel { padding: 18px; } }

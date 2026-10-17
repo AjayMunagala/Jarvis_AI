@@ -79,6 +79,10 @@ Apply migration `0005_memory_source_kind.sql` (`database\install_db.bat` applies
 
 `JARVIS_BROWSER_ENABLED=true` (with the owner token configured) enables a bounded browser workspace: open and observe pages as untrusted evidence, follow links, type into non-sensitive fields, select options, capture screenshots (mock/Playwright), run evidence-backed browser checks, and research supplied URLs. Submissions, payments, deletions, and other consequential actions are never performed; they are reported as `approval_required`. Providers: `mock` (offline demo pages), `http` (default when enabled; no JavaScript; connection-time DNS-rebinding protection), and `playwright` (optional `browser` extra, verified against real headless Chromium). See `docs/BROWSER_INTELLIGENCE.md`.
 
+## Core v2.7 — Capability registry and read-only tools (implemented; owner acceptance pending)
+
+`JARVIS_TOOLS_ENABLED=true` (with the owner token configured) lets the owner run registered **read-only** tools through `POST /tools/calls` or the **Capabilities** view: calculator, memory search, repository search and symbols, git status and diff summary, verification planning (never execution), and browser observation. Every call is schema-validated, permission-checked server-side, time- and size-bounded, and audited (in memory; not durable). Medium- or higher-risk tools are never executed. JARVIS's chat does not call tools on its own in this version. pgvector/semantic retrieval is not implemented. See `docs/TOOL_RUNTIME.md`.
+
 ## Prerequisites
 
 - Windows 10/11 and Python 3.11 or newer (developed with Python 3.12.10).

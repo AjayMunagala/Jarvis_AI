@@ -18,6 +18,9 @@ class Capability(StrEnum):
     # Browser reading (observe, navigate, research) and non-consequential interaction.
     BROWSER_READ = "browser.read"
     BROWSER_INTERACT = "browser.interact"
+    # Tool runtime (v2.7): list capabilities/audit, and invoke registered read-only tools.
+    TOOLS_READ = "tools.read"
+    TOOLS_INVOKE = "tools.invoke"
     EXTERNAL_ACTION_EXECUTE = "external_action.execute"
 
 
@@ -31,6 +34,8 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.VERIFY_READ,
     Capability.BROWSER_READ,
     Capability.BROWSER_INTERACT,
+    Capability.TOOLS_READ,
+    Capability.TOOLS_INVOKE,
 })
 
 

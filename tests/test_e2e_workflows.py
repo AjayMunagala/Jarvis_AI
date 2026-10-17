@@ -110,7 +110,9 @@ def test_authenticated_document_to_memory_search_chat_and_history_workflow():
     )
     provider = RecordingMockProvider()
     app = create_app(settings=settings, provider=provider)
-    assert app.state.orchestration_service.tool_registry.config.tools == ()
+    # v2.7 (owner decision D1): only read-only, low-risk, non-autonomous tools are registered.
+    assert all(tool.read_only and not tool.executable and tool.risk == "low" for tool in app.state.orchestration_service.tool_registry.config.tools)
+    assert app.state.settings.tools_enabled is False
     assert app.state.orchestration_service.tool_registry.execution_enabled is False
     memories = InMemoryMemoryRepository()
     conversations = InMemoryConversationRepository()

@@ -242,7 +242,9 @@ def test_authenticated_api_and_disabled_tools(api):
     assert response.status_code == 200, response.text
     assert response.json()["verification_status"] == "not_run"
     assert response.json()["execution_enabled"] is False
-    assert not app.state.orchestration_service.tool_registry.config.tools
+    # v2.7 (owner decision D1): only read-only, low-risk, non-autonomous tools are registered.
+    assert all(tool.read_only and not tool.executable and tool.risk == "low" for tool in app.state.orchestration_service.tool_registry.config.tools)
+    assert app.state.settings.tools_enabled is False
     assert app.state.orchestration_service.tool_registry.execution_enabled is False
 
 

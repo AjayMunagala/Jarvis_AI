@@ -15,6 +15,7 @@ from jarvis.api.routes.conversations import router as conversations_router
 from jarvis.api.routes.health import router as health_router
 from jarvis.api.routes.memories import router as memories_router
 from jarvis.api.routes.repo import router as repo_router
+from jarvis.api.routes.tools import router as tools_router
 from jarvis.api.routes.verification import router as verification_router
 from jarvis.browser.service import BrowserService
 from jarvis.core.config import Settings, get_settings
@@ -27,6 +28,7 @@ from jarvis.persistence.postgres import PostgresConversationRepository
 from jarvis.persistence.memory_postgres import PostgresMemoryRepository
 from jarvis.repo.service import RepoIntelligenceService
 from jarvis.security.policy import CapabilityPolicy
+from jarvis.tools.runtime import ToolRuntime
 from jarvis.verification.service import VerificationService
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,7 @@ def create_app(
         yield
         # Browser contexts hold page state; close every session on shutdown.
         app.state.browser_service.close_all()
+        app.state.tool_runtime.close()
         logger.info("JARVIS shutting down")
 
     app = FastAPI(
@@ -89,6 +92,11 @@ def create_app(
     # Constructed even when disabled so /browser/status can report configuration;
     # providers import optional engines lazily and open nothing at startup.
     app.state.browser_service = BrowserService(resolved_settings)
+    # The runtime binds registry entries to allowlisted handlers; it is constructed
+    # even when disabled so /capabilities can describe the registry.
+    app.state.tool_runtime = ToolRuntime(
+        resolved_settings, orchestration_service.tool_registry, app.state.authorization_policy,
+    )
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=resolved_settings.max_request_body_bytes,
@@ -101,6 +109,7 @@ def create_app(
     app.include_router(coding_router)
     app.include_router(verification_router)
     app.include_router(browser_router)
+    app.include_router(tools_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

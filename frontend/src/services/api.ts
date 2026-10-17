@@ -145,8 +145,8 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
     throw new Error('Workspace locked. Enter your local access token again.')
   }
   if (response.status === 204) return undefined as T
-  if (!response.ok && path.startsWith('/browser')) {
-    // Browser routes return short, sanitized policy messages that explain blocks.
+  if (!response.ok && (path.startsWith('/browser') || path.startsWith('/tools') || path === '/capabilities')) {
+    // Browser and tool routes return short, sanitized policy messages that explain blocks.
     let detail = ''
     try {
       const data = await response.clone().json() as { detail?: unknown }
@@ -620,4 +620,75 @@ export function getBrowserScreenshot(sessionId: string, screenshotId: string, au
 
 export function runBrowserResearch(body: { question: string; urls: string[]; include_model_interpretation: boolean }, auth?: ApiAuth): Promise<ResearchReport> {
   return request<ResearchReport>('/browser/research', json(body), false, auth)
+}
+
+// ------------------------------------------------- capabilities and tools (v2.7)
+
+export type ToolRisk = 'low' | 'medium' | 'high' | 'critical'
+export type ToolStatus = 'succeeded' | 'failed' | 'timed_out' | 'unavailable' | 'denied' | 'invalid_input' | 'partial' | 'approval_required'
+export interface CapabilityDescriptor {
+  tool_id: string
+  version: string
+  title: string
+  description: string
+  risk: ToolRisk
+  read_only: boolean
+  side_effects: 'none'
+  required_permissions: string[]
+  input_schema: { properties?: Record<string, { type?: string; description?: string; default?: unknown }>; required?: string[] } & Record<string, unknown>
+  output_schema: Record<string, unknown>
+  timeout_seconds: number
+  max_output_bytes: number
+  available: boolean
+  availability_reason: string
+  invocable: boolean
+  autonomous: false
+}
+export interface CapabilitiesResponse { contract_version: string; tools_enabled: boolean; capabilities: CapabilityDescriptor[]; note: string }
+export interface ToolResult {
+  contract_version: string
+  call_id: string
+  tool_id: string
+  tool_version: string | null
+  status: ToolStatus
+  output: Record<string, unknown> | null
+  error: { code: string; message: string } | null
+  evidence: string[]
+  started_at: string
+  completed_at: string
+  duration_ms: number
+  side_effects: 'none'
+  retryable: boolean
+  output_bytes: number
+  audit_event_id: string
+  untrusted_content: boolean
+}
+export interface ToolAuditEvent {
+  event_id: string
+  timestamp: string
+  call_id: string
+  correlation_id: string
+  tool_id: string
+  actor: string
+  decision: 'allowed' | 'denied' | 'approval_required' | 'invalid_input' | 'unavailable' | 'disabled'
+  status: ToolStatus
+  error_code: string | null
+  argument_keys: string[]
+  argument_sha256: string
+  duration_ms: number
+  evidence_count: number
+  durable: false
+}
+export interface ToolAuditPage { durable: false; retention: string; events: ToolAuditEvent[] }
+
+export function getCapabilities(auth?: ApiAuth): Promise<CapabilitiesResponse> {
+  return request<CapabilitiesResponse>('/capabilities', undefined, false, auth)
+}
+
+export function callTool(toolId: string, args: Record<string, unknown>, auth?: ApiAuth): Promise<ToolResult> {
+  return request<ToolResult>('/tools/calls', json({ tool_id: toolId, arguments: args }), false, auth)
+}
+
+export function getToolAudit(limit: number, auth?: ApiAuth): Promise<ToolAuditPage> {
+  return request<ToolAuditPage>(`/tools/audit?limit=${encodeURIComponent(String(limit))}`, undefined, false, auth)
 }
