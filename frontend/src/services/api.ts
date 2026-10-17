@@ -5,6 +5,29 @@ export interface ChatMemoryContext {
   memory_ids: string[]
 }
 
+export type ContextSourceType = 'conversation' | 'memory' | 'document'
+
+export interface ChatContextSource {
+  ref: string
+  source_type: ContextSourceType
+  source_id: string
+  label: string | null
+  role: 'user' | 'assistant' | null
+  timestamp: string | null
+  excerpt_chars: number
+  truncated: boolean
+  cited_in_reply: boolean
+}
+
+export interface ChatContextSummary {
+  history_status: 'included' | 'empty' | 'not_requested' | 'disabled' | 'unavailable'
+  retrieval_status: 'success' | 'empty' | 'fallback' | 'disabled'
+  sources: ChatContextSource[]
+  omitted_count: number
+  total_chars: number
+  unknown_citation_count: number
+}
+
 export interface ChatResponse {
   reply: string
   provider: string
@@ -12,6 +35,7 @@ export interface ChatResponse {
   partial?: boolean
   conversation_id?: string | null
   memory_context?: ChatMemoryContext | null
+  context?: ChatContextSummary
 }
 
 export interface ConversationSummary {
@@ -49,6 +73,7 @@ export interface MemoryRecord {
   content: string
   category: string | null
   source_reference: string | null
+  source_kind?: 'memory' | 'document'
   created_at: string
   updated_at: string
 }

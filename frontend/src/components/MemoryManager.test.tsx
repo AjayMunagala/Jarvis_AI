@@ -10,6 +10,14 @@ const page = { items: [record], total: 1, limit: 20, offset: 0, has_more: false 
 afterEach(() => { cleanup(); vi.clearAllMocks() })
 
 describe('MemoryManager', () => {
+  it('marks imported documents distinctly from saved memories', async () => {
+    vi.mocked(listMemories).mockResolvedValue({ ...page, total: 2, items: [record, { ...record, id: 'doc-1', content: 'Runbook text', category: null, source_reference: 'runbook.md', source_kind: 'document' as const }] })
+    render(<MemoryManager />)
+    await screen.findByText('Runbook text')
+    expect(screen.getAllByText('DOCUMENT')).toHaveLength(1)
+    expect(screen.getByText('project')).toBeInTheDocument()
+  })
+
   it('shows loading and advances through a paginated list', async () => {
     let resolveFirst!: (value: typeof page) => void
     vi.mocked(listMemories).mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
@@ -67,7 +75,7 @@ describe('MemoryManager', () => {
     await userEvent.upload(screen.getByLabelText(/Import one/), file)
     await userEvent.click(screen.getByRole('button', { name: 'Import document' }))
     await waitFor(() => expect(ingestDocument).toHaveBeenCalledWith(file, undefined))
-    expect(await screen.findByRole('status')).toHaveTextContent('Imported project-notes.md as one memory.')
+    expect(await screen.findByRole('status')).toHaveTextContent('Imported project-notes.md as one document record.')
     expect(listMemories).toHaveBeenCalledTimes(2)
   })
   it('rejects unsupported files locally and presents server import errors', async () => {

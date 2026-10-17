@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     owner_id: UUID | None = None
     memory_retrieval_enabled: bool = False
     memory_retrieval_limit: int = Field(default=3, ge=1, le=5)
+    # Context assembly bounds use characters, not provider tokens: tokenization
+    # differs by provider, so these are conservative, provider-neutral limits.
+    document_retrieval_limit: int = Field(default=2, ge=0, le=5)
+    context_history_messages: int = Field(default=6, ge=0, le=20)
+    context_excerpt_max_chars: int = Field(default=1500, ge=200, le=4000)
+    context_max_chars: int = Field(default=12000, ge=2000, le=40000)
 
     @model_validator(mode="after")
     def validate_provider_configuration(self) -> "Settings":

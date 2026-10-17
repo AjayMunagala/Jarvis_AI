@@ -202,6 +202,15 @@ Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remain
 - Expose authenticated, read-only API endpoints under `/repo` (`/inventory`, `/search`, `/symbols`, `/git`, `/config`, `/tests`, `/diagnostics`) requiring bearer authentication and `Capability.REPO_READ`.
 - The subsystem is strictly read-only, does not execute arbitrary code, does not modify files, does not change Git state, and keeps `execution_enabled=False`.
 
+## Memory, context continuity, and knowledge phase (implemented; live PostgreSQL verification pending)
+
+- Separate explicit memories from ingested documents with `source_kind` (migration 0005, no backfill); owner-scoped exact-duplicate document imports return the existing record (HTTP 200).
+- Replace chat retrieval's all-words `plainto_tsquery` match with stopword-filtered, suffix-trimmed OR-prefix candidate matching in PostgreSQL plus deterministic Python ranking (coverage, phrase, density, recency, UUID), weak-match filtering, de-duplication, and per-kind limits. The explicit `/memories/search` API keeps all-words semantics.
+- Add a pure, bounded context assembler: recent same-conversation turns, memories, and document excerpts with character budgets, deterministic ordering, `H/M/D` refs, and escaped-JSON untrusted framing. Unknown conversations are rejected before any provider call; history requires `conversation.read`; storage failures degrade with an explicit status.
+- Report supplied sources (metadata only) in `ChatResponse.context`, including `cited_in_reply` and a count of invented refs; show them in the chat UI and mark documents in the memory manager.
+- Controlled synthetic evaluation (12 chat-style queries, 16 records): legacy all-words rule hit@3 0.0833; new rule hit@3 1.0, recall@3 1.0, MRR@3 1.0, precision@3 0.7917. This describes only that corpus; it is not a general quality claim.
+- Verification on review branch `jarvis/review-memory-v22` (baseline `3e19fbc`): 394 Python tests passed; 53 frontend tests, TypeScript, `npm run build`, and 9 Playwright E2E scenarios passed. The 5 new opt-in PostgreSQL tests were not executed (no operator credentials available); see `docs/HANDOFF.md`.
+
 ## Later milestones
 
 1. Identity and memory governance: authenticated users, explicit ownership, access controls, retention/export/revocation, and user-visible memory controls before exposing memory in shared deployments.

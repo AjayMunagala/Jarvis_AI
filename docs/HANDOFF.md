@@ -260,3 +260,49 @@ Developer 3 has designed, implemented, and verified a modular, strictly read-onl
 - `npm test -- --run` (in `frontend/`): **48 passed** across 3 test files (zero frontend regressions).
 - `.\.venv-dev\Scripts\python.exe -m compileall -q jarvis tests`: passed with 0 errors.
 - `git diff --check`: passed with 0 whitespace errors.
+
+## Memory, context continuity, and knowledge phase (implemented; live PostgreSQL verification pending)
+
+### Scope and ownership
+
+Developer 2 (Claude) owns memory models/repositories, retrieval, context assembly, ingestion improvements, memory/context API changes, and their tests/docs. Readiness, provider reliability, and the operational status interface (Codex) and repository intelligence (Antigravity) were not changed. Shared touch points, kept minimal and backward compatible: four new `Settings` fields; `ChatResponse.context` (omitted for stateless chat); `PostgresConversationRepository.get_recent_messages` (new method; `get_messages` gained a private outer-deadline parameter); `RequestContext.context`.
+
+### What changed
+
+- `jarvis/memory/query.py`, `ranking.py`, `context.py` (new): term extraction, deterministic ranking, bounded assembly/rendering, citation detection.
+- `jarvis/memory/retrieval.py`: uses `search_context` when available; legacy repositories keep the old path.
+- `jarvis/persistence/memory_postgres.py`: `source_kind` column in all reads/writes, `create_document` (advisory-locked duplicate check), `list(source_kind=…)`, `search_context`.
+- `database/scripts/0005_memory_source_kind.sql`: new column, check constraint, document digest index. **Apply before deploying this code to an existing database**; all memory queries select the new column.
+- `jarvis/api/routes/chat.py`: history first (404 before provider), retrieval with document limit, assembly, `context` summary. `jarvis/api/routes/memories.py`: document import via `create_document` (201 new / 200 duplicate), `source_kind` list filter.
+- `jarvis/memory/ingestion.py`: CRLF/CR → LF before limits. `jarvis/orchestration/experts.py`: renders the assembled context with the new system instruction.
+- Frontend: types, context-source line under assistant messages, DOCUMENT tag in the memory manager, import notice text.
+
+### Verification performed (review branch `jarvis/review-memory-v22`, baseline `3e19fbc`, Windows, Python 3.12.10, Node 24)
+
+- `.venv-dev\Scripts\python.exe -m pytest tests`: **394 passed**, exit 0, 1 existing Starlette/httpx deprecation warning. This includes the 50 memory/context tests plus the baseline, repository-intelligence, and readiness suites already on `3e19fbc`.
+- `pytest tests/test_memory_context.py tests/test_memory_retrieval_evaluation.py`: 50 passed, exit 0. These use in-process doubles and a fake psycopg connection only.
+- `pytest integration_tests` without opt-in: 11 URL-guard tests passed, 21 database tests skipped (including the 5 new ones), exit 0. **No live PostgreSQL test was executed**: the operator's `PGPASSFILE`/admin URL were not available to this session.
+- `compileall` (jarvis, tests, integration_tests, database) and `git diff --check`: exit 0.
+- Frontend: `tsc --noEmit` exit 0; `npx vitest run` 53 passed; `npm run build` exit 0; `npx playwright test` **9 passed** (mock provider, persistence and retrieval disabled — these scenarios do not exercise the new context features or PostgreSQL).
+- Live provider: not tested.
+
+### Operator next step
+
+Run in the operator's configured shell (credentials only via `PGPASSFILE`):
+
+```powershell
+$env:JARVIS_RUN_POSTGRES_INTEGRATION = "1"
+$env:JARVIS_TEST_POSTGRES_ADMIN_URL = "postgresql://<user>@localhost:5432/postgres"
+.venv-dev\Scripts\python.exe -m pytest integration_tests -v
+```
+
+Expected new cases: `test_memory_source_kind_migration_defaults_existing_rows_to_memory`, `test_document_import_deduplicates_per_owner_and_stays_distinct_from_memories`, `test_concurrent_identical_document_imports_store_one_record`, `test_context_search_is_owner_scoped_prefix_matching_and_kind_filtered`, `test_chat_uses_live_history_and_reports_context_sources`.
+
+Full PostgreSQL integration prerequisites and the `PGPASSFILE` setup are in `database/README.md` ("Opt-in PostgreSQL integration tests").
+
+### Integration notes for the project lead
+
+- This branch is built on `3e19fbc` (GitHub `main` and `jarvis/review-repo-intelligence-v23` at publication time). The phase patch was developed in an isolated worktree on `aa735e6` plus the then-uncommitted v1.7–v2.1 work; those prerequisites are now committed in `7b30426` and `e739b03`.
+- Applying the patch to `3e19fbc` needed three manual resolutions: the `frontend/src/App.tsx` import line keeps both `getReadiness` and `ChatContextSummary`; this ARCHITECTURE section and this HANDOFF section are appended after Developer 3's sections.
+- `codex/jarvis-v2.1-consolidated-20261017` (`33c1016`) is based on `aa735e6`, not `3e19fbc`, and was not used. An earlier scratch integration of Codex's isolated v2.1 readiness changes with this phase applied cleanly in code (only the same `App.tsx` import line and documentation appends conflicted) and passed 394 Python, 58 Vitest, and 9 E2E tests; that result predates Codex's published branch and does not verify it.
+- Developer 3's `authenticated_owner` change (any `Authorization` header disables anonymous stateless mock chat; without a configured token it returns 503 `persistence_unavailable`) is outside this phase and is flagged for the project lead's decision.

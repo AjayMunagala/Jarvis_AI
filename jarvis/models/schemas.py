@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 from uuid import UUID
 
 
@@ -19,6 +19,31 @@ class ChatMemoryContext(BaseModel):
     memory_ids: list[UUID]
 
 
+class ChatContextSource(BaseModel):
+    """One record supplied to the model; metadata only, never content."""
+
+    ref: str
+    source_type: Literal["conversation", "memory", "document"]
+    source_id: UUID
+    label: str | None = None
+    role: Literal["user", "assistant"] | None = None
+    timestamp: datetime | None = None
+    excerpt_chars: int = Field(ge=0)
+    truncated: bool
+    # True only when the reply contains this exact "[ref]" marker. It shows
+    # what the model cited, not that the cited fact was used correctly.
+    cited_in_reply: bool
+
+
+class ChatContextSummary(BaseModel):
+    history_status: Literal["included", "empty", "not_requested", "disabled", "unavailable"]
+    retrieval_status: Literal["success", "empty", "fallback", "disabled"]
+    sources: list[ChatContextSource]
+    omitted_count: int = Field(ge=0)
+    total_chars: int = Field(ge=0)
+    unknown_citation_count: int = Field(ge=0)
+
+
 class ChatResponse(BaseModel):
     reply: str
     provider: str
@@ -26,6 +51,15 @@ class ChatResponse(BaseModel):
     partial: bool = False
     conversation_id: UUID | None = None
     memory_context: ChatMemoryContext | None = None
+    context: ChatContextSummary | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_context(self, handler):
+        # Stateless chat has no context assembly; keep its response shape unchanged.
+        data = handler(self)
+        if isinstance(data, dict) and data.get("context") is None:
+            data.pop("context", None)
+        return data
 
 
 class ConversationHistoryResponse(BaseModel):

@@ -454,4 +454,23 @@ describe('JARVIS chat', () => {
     expect(await screen.findByText('System ready')).toBeInTheDocument()
     unmountOffline()
   })
+
+  it('lists the context sources supplied to the model with cited markers', async () => {
+    sendMock.mockResolvedValue({
+      reply: 'Use backoff [M1].', provider: 'mock', demo: true,
+      context: {
+        history_status: 'unavailable', retrieval_status: 'success', omitted_count: 1, total_chars: 80, unknown_citation_count: 0,
+        sources: [
+          { ref: 'M1', source_type: 'memory', source_id: 'm-1', label: 'decisions', role: null, timestamp: null, excerpt_chars: 40, truncated: false, cited_in_reply: true },
+          { ref: 'D1', source_type: 'document', source_id: 'd-1', label: 'runbook.md', role: null, timestamp: null, excerpt_chars: 40, truncated: true, cited_in_reply: false },
+        ],
+      },
+    })
+    render(<App />)
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'How do retries work?{Enter}')
+    const sources = await screen.findByLabelText('Context supplied to the model')
+    expect(sources).toHaveTextContent('M1 memory · decisions (cited), D1 document · runbook.md')
+    expect(sources).toHaveTextContent('history unavailable')
+    expect(sources).toHaveTextContent('1 omitted for size')
+  })
 })

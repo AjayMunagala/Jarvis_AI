@@ -1404,3 +1404,112 @@ def test_unreachable_postgres_connection_is_sanitized(isolated_postgres):
         repository.save_exchange("question", "answer")
     assert str(error.value) == "Conversation persistence is unavailable."
     assert "127.0.0.1" not in str(error.value)
+
+
+# --- Memory/context phase: source kinds, document de-duplication, context search ---
+
+
+def test_memory_source_kind_migration_defaults_existing_rows_to_memory(isolated_postgres):
+    import psycopg
+
+    legacy_owner = UUID("5f1e8c1e-6f43-4ab9-9a59-0d7a0f3f2c01")
+    legacy_id = UUID("5f1e8c1e-6f43-4ab9-9a59-0d7a0f3f2c02")
+    with psycopg.connect(isolated_postgres.database_url) as connection:
+        connection.execute(
+            "INSERT INTO jarvis_app.memories (id, owner_id, content) VALUES (%s, %s, %s)",
+            (legacy_id, legacy_owner, "legacy import without a kind"),
+        )
+        kind = connection.execute(
+            "SELECT source_kind FROM jarvis_app.memories WHERE id = %s", (legacy_id,)
+        ).fetchone()[0]
+        with pytest.raises(psycopg.errors.CheckViolation):
+            connection.execute(
+                "INSERT INTO jarvis_app.memories (id, owner_id, content, source_kind) VALUES (%s, %s, %s, %s)",
+                (UUID("5f1e8c1e-6f43-4ab9-9a59-0d7a0f3f2c03"), legacy_owner, "bad kind", "secret"),
+            )
+    assert kind == "memory"
+
+
+def test_document_import_deduplicates_per_owner_and_stays_distinct_from_memories(isolated_postgres):
+    owner = UUID("2b9f4d1e-1111-4c4c-9a9a-000000000001")
+    other_owner = UUID("2b9f4d1e-1111-4c4c-9a9a-000000000002")
+    repository = isolated_postgres.memory_repository()
+
+    first, created_first = repository.create_document(owner, "Backup runbook: run nightly.", "backup.md")
+    again, created_again = repository.create_document(owner, "Backup runbook: run nightly.", "renamed.md")
+    foreign, created_foreign = repository.create_document(other_owner, "Backup runbook: run nightly.", "backup.md")
+    memory = repository.create(owner, "Backup runbook: run nightly.", category="ops")
+
+    assert created_first is True and created_again is False and created_foreign is True
+    assert again.id == first.id and again.source_reference == "backup.md"
+    assert foreign.id != first.id
+    assert first.source_kind == "document" and memory.source_kind == "memory"
+    documents = repository.list(owner, limit=20, source_kind="document")
+    memories = repository.list(owner, limit=20, source_kind="memory")
+    assert [item.id for item in documents.items] == [first.id]
+    assert [item.id for item in memories.items] == [memory.id]
+
+
+def test_concurrent_identical_document_imports_store_one_record(isolated_postgres):
+    owner = UUID("2b9f4d1e-1111-4c4c-9a9a-000000000003")
+    repository = isolated_postgres.memory_repository()
+
+    def import_once(_):
+        return repository.create_document(owner, "Concurrent identical import.", "same.md")
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(import_once, range(6)))
+
+    assert sum(created for _, created in results) == 1
+    assert len({record.id for record, _ in results}) == 1
+    assert repository.list(owner, limit=20, source_kind="document").total == 1
+
+
+def test_context_search_is_owner_scoped_prefix_matching_and_kind_filtered(isolated_postgres):
+    from jarvis.memory.query import extract_query_terms
+    from jarvis.memory.retrieval import retrieve_context
+
+    owner = UUID("2b9f4d1e-1111-4c4c-9a9a-000000000004")
+    foreign_owner = UUID("2b9f4d1e-1111-4c4c-9a9a-000000000005")
+    repository = isolated_postgres.memory_repository()
+    decision = repository.create(owner, "We chose PostgreSQL as the persistence database.", category="decisions")
+    runbook, _ = repository.create_document(owner, "Database backups run nightly via backup_db.bat.", "runbook.md")
+    repository.create(owner, "Coffee preferences.")
+    repository.create(foreign_owner, "We chose PostgreSQL as the persistence database. FOREIGN_MARKER")
+
+    terms = extract_query_terms("Which database did we choose for persistence?")
+    candidates = repository.search_context(
+        owner, terms, deadline=None, candidate_limit=40, source_kinds=("memory", "document"),
+    )
+    assert {item.id for item in candidates} == {decision.id, runbook.id}
+    assert all("FOREIGN_MARKER" not in item.content for item in candidates)
+    memories_only = repository.search_context(
+        owner, terms, deadline=None, candidate_limit=40, source_kinds=("memory",),
+    )
+    assert [item.id for item in memories_only] == [decision.id]
+
+    result = retrieve_context(
+        repository, "Which database did we choose for persistence?", owner_id=owner,
+        limit=3, document_limit=2, execution_id="integration",
+    )
+    assert result.outcome == "success"
+    assert result.records[0].id == decision.id
+    # The legacy all-words search still finds nothing for this chat-style query.
+    assert repository.search(owner, "Which database did we choose for persistence?").total == 0
+
+
+def test_chat_uses_live_history_and_reports_context_sources(isolated_postgres):
+    with isolated_postgres.client() as client:
+        first = client.post("/chat", json={"message": "Remember that the deploy window is Tuesday."})
+        assert first.status_code == 200
+        conversation_id = first.json()["conversation_id"]
+        second = client.post("/chat", json={"message": "When is the window?", "conversation_id": conversation_id})
+        missing = client.post(
+            "/chat", json={"message": "hello", "conversation_id": "00000000-0000-4000-8000-00000000abcd"}
+        )
+    assert second.status_code == 200
+    context = second.json()["context"]
+    assert context["history_status"] == "included"
+    assert [source["source_type"] for source in context["sources"]] == ["conversation", "conversation"]
+    assert "deploy window is Tuesday" in second.json()["reply"]  # mock echoes the rendered context
+    assert missing.status_code == 404

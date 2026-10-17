@@ -34,6 +34,14 @@ class InMemoryMemoryRepository:
         self.records[record.id] = (owner_id, record)
         return record
 
+    def create_document(self, owner_id, content, filename):
+        for record_owner, record in self.records.values():
+            if record_owner == owner_id and record.source_kind == "document" and record.content == content:
+                return record, False
+        record = self.create(owner_id, content, None, filename).model_copy(update={"source_kind": "document"})
+        self.records[record.id] = (owner_id, record)
+        return record, True
+
     def search(self, owner_id, query, *, limit=10, offset=0):
         terms = query.casefold().split()
         matches = [

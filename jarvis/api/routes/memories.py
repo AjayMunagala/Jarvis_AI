@@ -13,7 +13,7 @@ from jarvis.memory.ingestion import (
     validate_document,
 )
 from jarvis.memory.models import (
-    MemoryCreate, MemoryPage, MemoryRecord, MemorySearchRequest, MemoryUpdate,
+    MemoryCreate, MemoryPage, MemoryRecord, MemorySearchRequest, MemoryUpdate, SourceKind,
 )
 from jarvis.models.schemas import ErrorResponse
 from jarvis.security.policy import Capability
@@ -67,16 +67,23 @@ async def create_memory(
     response_model=MemoryRecord,
     status_code=status.HTTP_201_CREATED,
     responses={
+        200: {"model": MemoryRecord, "description": "Identical document already imported; existing record returned"},
         413: {"model": ErrorResponse, "description": "Document exceeds an upload limit"},
         503: {"model": ErrorResponse, "description": "Memory persistence unavailable"},
     },
 )
 async def ingest_document(
     request: Request,
+    response: Response,
     filename: str = Header(alias="X-Document-Filename"),
     owner_id: UUID | None = Depends(authenticated_owner),
 ) -> MemoryRecord:
-    """Import one bounded plain-text document as one explicitly owned memory."""
+    """Import one bounded plain-text document as one owner-scoped document record.
+
+    Documents are stored with ``source_kind="document"`` so they stay distinct
+    from explicitly saved memories. Re-importing identical content returns the
+    existing record with HTTP 200 instead of creating a duplicate.
+    """
     repository = _repository(request)
     owner_id = _owner(owner_id)
     enforce_capability(request, owner_id, Capability.MEMORY_WRITE)
@@ -95,11 +102,14 @@ async def ingest_document(
         raise HTTPException(status_code=422, detail=exc.public_message) from exc
 
     try:
-        return await run_in_threadpool(
-            repository.create, owner_id, document.content, None, document.filename
+        record, created = await run_in_threadpool(
+            repository.create_document, owner_id, document.content, document.filename
         )
     except MemoryPersistenceError as exc:
         raise _unavailable() from exc
+    if not created:
+        response.status_code = status.HTTP_200_OK
+    return record
 
 
 @router.post("/search", response_model=MemoryPage)
@@ -125,6 +135,7 @@ async def list_memories(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=1000000),
     category: str | None = Query(default=None, min_length=1, max_length=80),
+    source_kind: SourceKind | None = Query(default=None),
     owner_id: UUID | None = Depends(authenticated_owner),
 ) -> MemoryPage:
     if category is not None and not category.strip():
@@ -132,8 +143,11 @@ async def list_memories(
     repository = _repository(request)
     owner_id = _owner(owner_id)
     enforce_capability(request, owner_id, Capability.MEMORY_READ)
+    filters = {"category": category}
+    if source_kind is not None:
+        filters["source_kind"] = source_kind
     try:
-        return await run_in_threadpool(repository.list, owner_id, limit=limit, offset=offset, category=category)
+        return await run_in_threadpool(repository.list, owner_id, limit=limit, offset=offset, **filters)
     except MemoryPersistenceError as exc:
         raise _unavailable() from exc
 

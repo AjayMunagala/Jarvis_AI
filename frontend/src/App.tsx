@@ -4,7 +4,7 @@ import {
   Clock3, Command, Cpu, FileText, Folder, Menu, MessageSquare, Plus, Search,
   Settings2, ShieldCheck, Sparkles, X,
 } from 'lucide-react'
-import { getConversationMessages, getReadiness, listConversations, sendChatMessage, type ApiAuth, type ChatMemoryContext } from './services/api'
+import { getConversationMessages, getReadiness, listConversations, sendChatMessage, type ApiAuth, type ChatContextSummary, type ChatMemoryContext } from './services/api'
 import MemoryManager from './components/MemoryManager'
 
 const MAX_MESSAGE_LENGTH = 4000
@@ -19,6 +19,7 @@ type Message = {
   demo?: boolean
   partial?: boolean
   memoryContext?: ChatMemoryContext | null
+  context?: ChatContextSummary
 }
 
 type Conversation = {
@@ -307,7 +308,7 @@ export default function App() {
       setReadiness((current) => current !== 'ready' ? 'ready' : current)
       const persistedId = result.conversation_id || conversationId
       setConversations((current) => current.map((conversation) => conversation.id === conversationId
-        ? { ...conversation, id: persistedId, persisted: Boolean(result.conversation_id) || conversation.persisted, updatedAt: Date.now(), messages: [...conversation.messages.filter((message) => !(retryMessageId && message.id === retryMessageId)), { id: createId(), role: 'assistant', content: result.reply, provider: result.provider, demo: result.demo, partial: result.partial, memoryContext: result.memory_context }] }
+        ? { ...conversation, id: persistedId, persisted: Boolean(result.conversation_id) || conversation.persisted, updatedAt: Date.now(), messages: [...conversation.messages.filter((message) => !(retryMessageId && message.id === retryMessageId)), { id: createId(), role: 'assistant', content: result.reply, provider: result.provider, demo: result.demo, partial: result.partial, memoryContext: result.memory_context, context: result.context }] }
         : conversation))
       if (activeIdRef.current === conversationId) setActiveConversationId(persistedId)
       if (result.conversation_id && credential) void loadConversationPage(0)
@@ -428,7 +429,7 @@ export default function App() {
                 {historyHasMore && activeConversation?.persisted && <button className="history-load-older" type="button" disabled={historyLoading} onClick={() => activeConversation && historyBeforeSequence !== null && void loadConversationHistory(activeConversation.id, historyBeforeSequence)}>Load older messages</button>}
                 {messages.map((message) => <article key={message.id} className={`message-row ${message.role === 'user' ? 'message-user' : 'message-assistant'}`}>
                   {message.role === 'assistant' && <div className="message-avatar"><span>J</span></div>}
-                  <div className="message-content-wrap"><div className="message-label">{message.role === 'user' ? 'YOU' : 'JARVIS'}{message.role === 'assistant' && message.provider && <span className="message-demo-tag">{message.demo ? 'DEMO' : 'MODEL'} · {message.provider.toUpperCase()}</span>}{message.partial && <span className="message-partial-tag">PARTIAL RESULT</span>}</div><div className={`message-bubble ${message.error ? 'message-error' : ''}`}>{message.content}</div>{message.error && <small className="retry-warning">A manual retry may duplicate this exchange if the server saved it but the response was lost.</small>}{message.memoryContext && <button className="memory-context-link" type="button" onClick={() => { setInspectMemoryIds(message.memoryContext?.memory_ids ?? []); setActiveView('Memory') }}>Memory context · {message.memoryContext.outcome} · {message.memoryContext.memory_ids.length} record(s){message.memoryContext.memory_ids.length > 0 ? ` · ${message.memoryContext.memory_ids.join(', ')}` : ''}</button>}{message.error && <button className="retry-button" onClick={() => void submitMessage(message.retryText ?? '', message.id)}><Activity size={13} /> Try again</button>}</div>
+                  <div className="message-content-wrap"><div className="message-label">{message.role === 'user' ? 'YOU' : 'JARVIS'}{message.role === 'assistant' && message.provider && <span className="message-demo-tag">{message.demo ? 'DEMO' : 'MODEL'} · {message.provider.toUpperCase()}</span>}{message.partial && <span className="message-partial-tag">PARTIAL RESULT</span>}</div><div className={`message-bubble ${message.error ? 'message-error' : ''}`}>{message.content}</div>{message.error && <small className="retry-warning">A manual retry may duplicate this exchange if the server saved it but the response was lost.</small>}{message.memoryContext && <button className="memory-context-link" type="button" onClick={() => { setInspectMemoryIds(message.memoryContext?.memory_ids ?? []); setActiveView('Memory') }}>Memory context · {message.memoryContext.outcome} · {message.memoryContext.memory_ids.length} record(s){message.memoryContext.memory_ids.length > 0 ? ` · ${message.memoryContext.memory_ids.join(', ')}` : ''}</button>}{message.context && message.context.sources.length > 0 && <small className="context-sources" aria-label="Context supplied to the model">Context supplied: {message.context.sources.map((source) => `${source.ref} ${source.source_type}${source.label ? ` · ${source.label}` : ''}${source.cited_in_reply ? ' (cited)' : ''}`).join(', ')}{message.context.history_status === 'unavailable' ? ' · history unavailable' : ''}{message.context.omitted_count > 0 ? ` · ${message.context.omitted_count} omitted for size` : ''}</small>}{message.error && <button className="retry-button" onClick={() => void submitMessage(message.retryText ?? '', message.id)}><Activity size={13} /> Try again</button>}</div>
                   {message.role === 'user' && <div className="user-avatar">A</div>}
                 </article>)}
                 {pending && <div className="message-row message-assistant" role="status" aria-label="JARVIS is responding"><div className="message-avatar"><span>J</span></div><div className="message-content-wrap"><div className="message-label">JARVIS</div><div className="typing-bubble"><span /><span /><span /><small>Thinking</small></div></div></div>}
