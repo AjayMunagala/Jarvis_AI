@@ -277,7 +277,7 @@ This is a targeted maintenance pass: there is no redesign, and the six versions 
 
 **Limits**
 
-- **Live PostgreSQL behaviour is unverified here.** The SQL, lock order, rollback and error mapping are verified only against a fake connection. The opt-in live tests exist but did not run.
+- **Validated live on PostgreSQL 18.6.** The behaviour was later checked against a real database; see *Live PostgreSQL validation* below. This covered separate connections and two separate OS processes.
 - **Advisory-lock ids are 64-bit hashes.** A hash collision would only make two unrelated keys serialize; it cannot break correctness.
 - **Dangling conflict references remain.** Deleting an entity leaves `conflicts_with` references to the removed relationships on any surviving rivals. Those rivals stay `disputed`, never silently verified, until the owner resolves them.
 - **Lock ordering mixes phases.** `ingest` takes its entity keys first and its relationship keys second, while single writes take relationship keys only. This avoids lock-order cycles in the service's own paths. PostgreSQL deadlock detection remains the backstop, surfacing as 503.
@@ -334,8 +334,65 @@ Apply with `database\install_db.bat`. The runner refuses edited applied migratio
 | `tests/` (full Python suite) | 922 | 0 | 17 (pre-existing Windows symlink skips) | – | unit plus mocked integration |
 | of which `tests/test_intelligence_hardening.py` (new) | 23 | 0 | 0 | – | unit, real-thread concurrency on in-memory stores, PostgreSQL through a fake connection, API with TestClient |
 | v5.1–v5.6 suites (routing 29, graph 20, context 13, multimodal 15, reasoning 23, personalization 11, API 30) | 141 | 0 | 0 | – | regression |
-| `integration_tests/` (live PostgreSQL, opt-in) | 11 | 0 | 27 | **27 unavailable**: `JARVIS_RUN_POSTGRES_INTEGRATION` is not set | The 11 passes are URL-guard and classification unit tests that need no database. The 27 skips include the 5 new live intelligence tests. |
+| `integration_tests/` (live PostgreSQL, opt-in) | 11 | 0 | 27 | **27 unavailable at the time**: `JARVIS_RUN_POSTGRES_INTEGRATION` was not set | Superseded by *Live PostgreSQL validation* below (43 passed). |
 | Frontend: Vitest / tsc and build / Playwright E2E | 126 / pass / 11 | 0 | 0 | – | the frontend changed only by a type widening |
 | Live model-provider tests | – | – | – | **not run** | none claimed |
 
-**No test in this pass used a real PostgreSQL instance.**
+**No test in this pass itself used a real PostgreSQL instance.** The live run is recorded in the next section.
+
+## Live PostgreSQL validation
+
+**Environment**
+- Local PostgreSQL **18.6** (Windows service `postgresql-x64-18`) and psql 18.6.
+- psycopg 3.3.6.
+- Admin URL `postgresql://<admin>@127.0.0.1:5432/postgres`, password-free. libpq reads the credentials from a protected `PGPASSFILE`; the file was never opened or printed.
+
+**Isolation**
+- The session fixture, now in `integration_tests/conftest.py`, creates one generated `jarvis_it_<32 hex>` database per run. It applies every migration with the real runner and drops the database at the end.
+- The upgrade test creates and drops a second generated database.
+- The working `jarvis_AI` database was only read, once, inside a `READ ONLY` transaction. It has no `jarvis_meta.schema_migrations` ledger, meaning the project runner has never been applied to it. It was not modified.
+- After the runs, only `jarvis_AI` remained.
+
+**Command** (PowerShell equivalent; no secret appears in any variable or argument):
+
+```
+$env:PGPASSFILE = "$env:APPDATA\postgresql\pgpass.conf"
+$env:JARVIS_PG_BIN_DIR = "C:\Program Files\PostgreSQL\18\bin"
+$env:JARVIS_TEST_POSTGRES_ADMIN_URL = "postgresql://<admin>@127.0.0.1:5432/postgres"
+$env:JARVIS_RUN_POSTGRES_INTEGRATION = "1"
+.venv-dev\Scripts\python.exe -m pytest integration_tests -v -rs
+```
+
+**Result: 43 passed, 0 failed, 0 skipped, 0 unavailable.**
+- 32 tests come from the existing suite. Of those, 11 are URL-guard and classification checks; the rest are live.
+- 11 tests come from `test_intelligence_postgres_integration.py`, and all of them are live.
+
+**Migration state**
+
+| Database | Before | After |
+|---|---|---|
+| Fixture database | did not exist | ledger matches every local file, 0001–0006, 0052, 0056, 0057 and 0058; checksums verified and the re-run is a no-op (`test_clean_migrations_checksums_and_rerun`) |
+| Upgrade database | ledger 0001–0006 (the v3.0 state), with an existing `tool` audit row | the runner applied only 0052, 0056, 0057 and 0058; `verify` passed; the old row was kept; an `intelligence` row was accepted and an unknown category was rejected (`CheckViolation`) |
+
+**Live intelligence evidence**
+
+| Scenario | Test | Evidence |
+|---|---|---|
+| Restart durability of outdated decisions | `test_outdated_decisions_survive_a_new_store_and_connection` | Decided through one store and connection, then read back through a new store and connection. Owner-scoped. Three concurrent re-decisions were all refused with 409. |
+| Interrupted-add recovery | `test_interrupted_add_is_recovered_by_a_new_process` | The simulated crash came after the memory write and before finalization. The new service sees `applying` with no decision time. It refuses to re-apply (409, writer called once), refuses another owner, and then lets the owner resolve to accepted. |
+| Functional conflicts across sessions | `test_concurrent_conflicting_verified_facts_are_disputed_across_services` | Two services on separate connections: both facts ended `disputed`. |
+| Duplicates and cycles | `test_concurrent_duplicate_entities_and_cycles` | Four concurrent creates produced one entity. Of two racing reverse `depends_on` edges, one was rejected with 422. |
+| Separate OS processes | `test_separate_os_processes_serialize_on_the_same_keys` | Two `python` processes, each with its own connection, released simultaneously. The functional race gave `OK verified` and `OK disputed`, and both rows are now disputed. The cycle race gave `OK verified` and `ERR 422`. |
+| Atomic import and rollback | `test_ingest_rolls_back_entirely_and_cross_owner_edges_are_impossible` | A cycle on the second relationship left the counts unchanged. A cross-owner edge was rejected by the composite foreign key. |
+| Per-owner quotas | `test_per_owner_quota_is_exact_under_concurrent_creation` | With a limit of 3, six concurrent creates gave exactly 3 entities and three 409s. Another owner was unaffected. |
+| Error mapping and durable audit | `test_constraint_violations_map_to_conflicts_and_api_audit_is_durable` | A unique violation surfaced as `StorageConflict`. Over the API with persistence enabled, `/activity?category=intelligence` reports `durable_storage: true`, shows the succeeded upsert and the failed (404) relationship attempt, and contains no entity name. |
+| 0058 category | `test_intelligence_audit_category_is_accepted_by_migration_0058` | `PostgresAuditStore` appended and read an `intelligence` record. |
+
+**Defects found and fixed during validation**
+1. **A stale test in the existing suite** (`test_authenticated_document_imports_create_owner_scoped_memory_records`, unchanged since v3.0). It expected two identical document imports to create two records. Since v2.2, identical re-imports deliberately return the existing record with HTTP 200, as the README documents and the dedupe test asserts. This was a test defect, not an application defect, and the expectation was updated. No application code changed.
+2. **A fixture duplication introduced in the hardening pass.** Importing the session fixture into a second module created a second disposable database per run, and the first database then triggered the "pre-existing generated database" warning. The fixture moved to `integration_tests/conftest.py`, so a run now creates one database and the warning is gone.
+
+**Remaining limits**
+- **Concurrency coverage.** It was tested on one local PostgreSQL 18.6 server with two OS processes. It was not tested on a replica, pooled connections or high contention.
+- **Credential file.** Its Windows ACL was not inspected; the fixture checks only that the file exists.
+- **Not run.** Live model providers. Chat integration is unchanged.
