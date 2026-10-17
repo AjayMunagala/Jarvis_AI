@@ -14,11 +14,29 @@ Re-asserting the same triple merges provenance; an inference can be upgraded
 to verified by verified evidence, a verified fact is never downgraded.
 ``depends_on`` cycles are rejected. Traversal is breadth-first with hard
 depth and size limits.
+
+Concurrency: every read-modify-write runs inside ``store.atomic`` with the
+keys whose invariants it touches, so the same rules hold across server
+processes (PostgreSQL advisory locks) and threads (in-memory key locks):
+
+- ``entity:<type>:<key>``: entity creation and merge (no duplicate entities);
+- ``rel:<subject>:<relation>``: every relationship add or re-assertion,
+  conflict resolution and retraction for that subject and relation, so
+  functional conflicts and verified/inferred precedence are decided on
+  current data;
+- ``dep``: all ``depends_on`` additions of one owner, so cycle checks see
+  every committed edge;
+- ``quota:entities`` / ``quota:relationships``: taken last and only when a
+  new row is created, so per-owner limits are exact.
+
+Keys are per owner; there is no global lock. Deleting an entity is one
+transaction; a relationship write racing with it fails on the foreign key
+and is reported as a conflict (HTTP 409) with nothing changed.
 """
 
 import secrets
-import threading
 from collections import deque
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -26,7 +44,7 @@ from jarvis.knowledge_graph.models import (
     ACTIVE_STATUSES, MAX_PROVENANCE, RELATION_SCHEMA, Entity, EntityInput, IngestResult, KnowledgeRecord,
     Neighborhood, Provenance, Relationship, RelationshipInput,
 )
-from jarvis.knowledge_graph.stores import StorageError
+from jarvis.knowledge_graph.stores import StorageConflict, StorageError
 
 MAX_DEPTH = 3
 MAX_TRAVERSAL_ENTITIES = 100
@@ -51,44 +69,70 @@ def _merge_provenance(existing: tuple[Provenance, ...], new: Provenance) -> tupl
     return (*existing, new)[-MAX_PROVENANCE:]
 
 
+def _entity_key(entity_type: str, key: str) -> str:
+    return f"entity:{entity_type}:{key}"
+
+
+def _rel_key(subject_id: str, relation: str) -> str:
+    return f"rel:{subject_id}:{relation}"
+
+
+_CONFLICT_MESSAGE = "The knowledge graph changed concurrently; nothing was changed. Retry."
+
+
 class GraphService:
     def __init__(self, store, *, max_entities: int = 5000, max_relationships: int = 20_000):
         self.store = store
         self.max_entities = max_entities
         self.max_relationships = max_relationships
-        self._lock = threading.RLock()  # serializes multi-step updates within this process
 
     @property
     def durable(self) -> bool:
         return bool(getattr(self.store, "durable", False))
 
+    @contextmanager
+    def _atomic(self, owner_id: UUID, keys=()):
+        try:
+            with self.store.atomic(owner_id, keys) as tx:
+                yield tx
+        except StorageConflict as exc:
+            raise GraphError(409, _CONFLICT_MESSAGE) from exc
+        except StorageError as exc:
+            raise GraphError(503, "Knowledge graph storage is unavailable.") from exc
+
     def _call(self, func, *args, **kwargs):
         try:
             return func(*args, **kwargs)
+        except StorageConflict as exc:
+            raise GraphError(409, _CONFLICT_MESSAGE) from exc
         except StorageError as exc:
             raise GraphError(503, "Knowledge graph storage is unavailable.") from exc
 
     # ------------------------------------------------------------ entities
 
     def upsert_entity(self, owner_id: UUID, data: EntityInput) -> Entity:
+        with self._atomic(owner_id, (_entity_key(data.entity_type, data.normalized_key),)) as tx:
+            return self._upsert(tx, owner_id, data)
+
+    def _upsert(self, tx, owner_id: UUID, data: EntityInput) -> Entity:
         stamped = data.provenance.model_copy(update={"recorded_at": data.provenance.recorded_at or _now()})
-        with self._lock:
-            current = self._call(self.store.find_entity, owner_id, data.entity_type, data.normalized_key)
-            now = _now()
-            if current is None:
-                if self._call(self.store.count, owner_id)[0] >= self.max_entities:
-                    raise GraphError(409, "The knowledge graph entity limit has been reached.")
-                entity = Entity(entity_id="KE-" + secrets.token_hex(8), owner_id=owner_id, entity_type=data.entity_type,
-                                key=data.normalized_key, name=data.name, aliases=data.aliases,
-                                attributes=data.attributes, provenance=(stamped,), created_at=now, updated_at=now)
-            else:
-                aliases = tuple(dict.fromkeys((*current.aliases, *data.aliases)))[:10]
-                entity = current.model_copy(update={
-                    "aliases": aliases, "attributes": {**current.attributes, **data.attributes},
-                    "provenance": _merge_provenance(current.provenance, stamped), "updated_at": now,
-                })
-            self._call(self.store.save_entity, entity)
-            return entity
+        current = tx.find_entity(owner_id, data.entity_type, data.normalized_key)
+        now = _now()
+        if current is None:
+            tx.lock(("quota:entities",))
+            if tx.count(owner_id)[0] >= self.max_entities:
+                raise GraphError(409, "The knowledge graph entity limit has been reached.")
+            entity = Entity(entity_id="KE-" + secrets.token_hex(8), owner_id=owner_id, entity_type=data.entity_type,
+                            key=data.normalized_key, name=data.name, aliases=data.aliases,
+                            attributes=data.attributes, provenance=(stamped,), created_at=now, updated_at=now)
+        else:
+            aliases = tuple(dict.fromkeys((*current.aliases, *data.aliases)))[:10]
+            entity = current.model_copy(update={
+                "aliases": aliases, "attributes": {**current.attributes, **data.attributes},
+                "provenance": _merge_provenance(current.provenance, stamped), "updated_at": now,
+            })
+        tx.save_entity(entity)
+        return entity
 
     def get_entity(self, owner_id: UUID, entity_id: str) -> Entity:
         entity = self._call(self.store.get_entity, owner_id, entity_id)
@@ -102,8 +146,8 @@ class GraphService:
                           limit=max(1, min(limit, 100)))
 
     def delete_entity(self, owner_id: UUID, entity_id: str) -> int:
-        with self._lock:
-            removed = self._call(self.store.delete_entity, owner_id, entity_id)
+        with self._atomic(owner_id) as tx:
+            removed = tx.delete_entity(owner_id, entity_id)
         if not removed:
             raise GraphError(404, "The entity was not found.")
         return removed
@@ -111,89 +155,100 @@ class GraphService:
     # ------------------------------------------------------- relationships
 
     def add_relationship(self, owner_id: UUID, data: RelationshipInput) -> Relationship:
+        keys = [_rel_key(data.subject_id, data.relation)]
+        if data.relation == "depends_on":
+            keys.append("dep")
+        with self._atomic(owner_id, keys) as tx:
+            return self._add(tx, owner_id, data)
+
+    def _add(self, tx, owner_id: UUID, data: RelationshipInput) -> Relationship:
         provenance = data.provenance.model_copy(update={"recorded_at": data.provenance.recorded_at or _now()})
-        with self._lock:
-            subject = self._call(self.store.get_entity, owner_id, data.subject_id)
-            target = self._call(self.store.get_entity, owner_id, data.object_id)
-            if subject is None or target is None:
-                raise GraphError(404, "Both relationship endpoints must be existing entities of this owner.")
-            subjects, objects, functional = RELATION_SCHEMA[data.relation]
-            if subject.entity_type not in subjects or target.entity_type not in objects:
-                raise GraphError(422, f"{data.relation} cannot connect a {subject.entity_type} to a {target.entity_type}.")
-            if data.relation == "supersedes" and subject.entity_type != target.entity_type:
-                raise GraphError(422, "supersedes must connect two entities of the same type.")
-            if data.relation == "depends_on" and self._reaches(owner_id, data.object_id, data.subject_id):
-                raise GraphError(422, "This dependency would create a cycle.")
+        subject = tx.get_entity(owner_id, data.subject_id)
+        target = tx.get_entity(owner_id, data.object_id)
+        if subject is None or target is None:
+            raise GraphError(404, "Both relationship endpoints must be existing entities of this owner.")
+        subjects, objects, functional = RELATION_SCHEMA[data.relation]
+        if subject.entity_type not in subjects or target.entity_type not in objects:
+            raise GraphError(422, f"{data.relation} cannot connect a {subject.entity_type} to a {target.entity_type}.")
+        if data.relation == "supersedes" and subject.entity_type != target.entity_type:
+            raise GraphError(422, "supersedes must connect two entities of the same type.")
+        if data.relation == "depends_on" and self._reaches(tx, owner_id, data.object_id, data.subject_id):
+            raise GraphError(422, "This dependency would create a cycle.")
 
-            existing = self._call(self.store.find_relationships, owner_id, data.subject_id, data.relation)
-            now = _now()
-            same = next((item for item in existing if item.object_id == data.object_id
-                         and item.status not in {"retracted"}), None)
-            if same is not None:
-                return self._reassert(same, data, provenance, now)
-            if self._call(self.store.count, owner_id)[1] >= self.max_relationships:
-                raise GraphError(409, "The knowledge graph relationship limit has been reached.")
+        existing = tx.find_relationships(owner_id, data.subject_id, data.relation)
+        now = _now()
+        same = next((item for item in existing if item.object_id == data.object_id
+                     and item.status not in {"retracted"}), None)
+        if same is not None:
+            return self._reassert(tx, same, data, provenance, now)
+        tx.lock(("quota:relationships",))
+        if tx.count(owner_id)[1] >= self.max_relationships:
+            raise GraphError(409, "The knowledge graph relationship limit has been reached.")
 
-            relationship = Relationship(
-                relationship_id="KR-" + secrets.token_hex(8), owner_id=owner_id, subject_id=data.subject_id,
-                relation=data.relation, object_id=data.object_id, status=data.status, confidence=data.confidence,
-                provenance=(provenance,), created_at=now, updated_at=now,
-            )
-            rivals = [item for item in existing if functional and item.status in ACTIVE_STATUSES
-                      and item.object_id != data.object_id]
-            updates: list[Relationship] = []
-            for rival in rivals:
-                if rival.status == "verified" and data.status == "inferred":
-                    relationship = self._link(relationship, rival, status="disputed")
-                elif rival.status == "inferred" and data.status == "verified":
-                    updates.append(rival.model_copy(update={"status": "superseded",
-                                                            "superseded_by": relationship.relationship_id,
-                                                            "updated_at": now}))
-                else:
-                    relationship = self._link(relationship, rival, status="disputed")
-                    updates.append(self._link(rival, relationship, status="disputed"))
-            self._call(self.store.save_relationship, relationship)
-            for item in updates:
-                self._call(self.store.save_relationship, item)
-            return relationship
+        relationship = Relationship(
+            relationship_id="KR-" + secrets.token_hex(8), owner_id=owner_id, subject_id=data.subject_id,
+            relation=data.relation, object_id=data.object_id, status=data.status, confidence=data.confidence,
+            provenance=(provenance,), created_at=now, updated_at=now,
+        )
+        rivals = [item for item in existing if functional and item.status in ACTIVE_STATUSES
+                  and item.object_id != data.object_id]
+        updates: list[Relationship] = []
+        for rival in rivals:
+            if rival.status == "verified" and data.status == "inferred":
+                relationship = self._link(relationship, rival, status="disputed")
+            elif rival.status == "inferred" and data.status == "verified":
+                updates.append(rival.model_copy(update={"status": "superseded",
+                                                        "superseded_by": relationship.relationship_id,
+                                                        "updated_at": now}))
+            else:
+                relationship = self._link(relationship, rival, status="disputed")
+                updates.append(self._link(rival, relationship, status="disputed"))
+        tx.save_relationship(relationship)
+        for item in updates:
+            tx.save_relationship(item)
+        return relationship
 
     @staticmethod
     def _link(item: Relationship, other: Relationship, *, status: str) -> Relationship:
         conflicts = tuple(dict.fromkeys((*item.conflicts_with, other.relationship_id)))[:10]
         return item.model_copy(update={"status": status, "conflicts_with": conflicts, "updated_at": _now()})
 
-    def _reassert(self, current: Relationship, data: RelationshipInput, provenance: Provenance, now: str) -> Relationship:
+    @staticmethod
+    def _reassert(tx, current: Relationship, data: RelationshipInput, provenance: Provenance, now: str) -> Relationship:
         update = {"provenance": _merge_provenance(current.provenance, provenance), "updated_at": now}
         if data.status == "verified" and current.status in {"inferred", "superseded"} and not current.conflicts_with:
             update.update(status="verified", confidence=1.0, superseded_by=None)
         elif current.status == "inferred":
             update["confidence"] = max(current.confidence, data.confidence)
         updated = current.model_copy(update=update)
-        self._call(self.store.save_relationship, updated)
+        tx.save_relationship(updated)
         return updated
 
-    def _reaches(self, owner_id: UUID, start: str, goal: str) -> bool:
+    @staticmethod
+    def _reaches(tx, owner_id: UUID, start: str, goal: str) -> bool:
         seen, queue = {start}, deque([start])
         while queue and len(seen) < _CYCLE_SEARCH_LIMIT:
             node = queue.popleft()
             if node == goal:
                 return True
-            for edge in self._call(self.store.find_relationships, owner_id, node, "depends_on"):
+            for edge in tx.find_relationships(owner_id, node, "depends_on"):
                 if edge.status in ACTIVE_STATUSES and edge.object_id not in seen:
                     seen.add(edge.object_id)
                     queue.append(edge.object_id)
         return goal in seen
 
-    def _relationship(self, owner_id: UUID, relationship_id: str) -> Relationship:
-        item = self._call(self.store.get_relationship, owner_id, relationship_id)
+    def _relationship(self, owner_id: UUID, relationship_id: str, tx=None) -> Relationship:
+        item = tx.get_relationship(owner_id, relationship_id) if tx is not None else \
+            self._call(self.store.get_relationship, owner_id, relationship_id)
         if item is None:
             raise GraphError(404, "The relationship was not found.")
         return item
 
     def resolve_conflict(self, owner_id: UUID, keep_id: str, *, note: str | None = None) -> Relationship:
         """The owner confirms one disputed assertion; its rivals are superseded."""
-        with self._lock:
-            keep = self._relationship(owner_id, keep_id)
+        first = self._relationship(owner_id, keep_id)
+        with self._atomic(owner_id, (_rel_key(first.subject_id, first.relation),)) as tx:
+            keep = self._relationship(owner_id, keep_id, tx)  # re-read under the lock
             if keep.status != "disputed":
                 raise GraphError(409, "Only disputed relationships can be resolved.")
             now = _now()
@@ -202,18 +257,19 @@ class GraphService:
             resolved = keep.model_copy(update={"status": "verified", "confidence": 1.0, "conflicts_with": (),
                                                "provenance": _merge_provenance(keep.provenance, proof), "updated_at": now})
             for rival_id in keep.conflicts_with:
-                rival = self._call(self.store.get_relationship, owner_id, rival_id)
+                rival = tx.get_relationship(owner_id, rival_id)
                 if rival is not None and rival.status in ACTIVE_STATUSES:
-                    self._call(self.store.save_relationship, rival.model_copy(update={
+                    tx.save_relationship(rival.model_copy(update={
                         "status": "superseded", "superseded_by": keep_id, "conflicts_with": (), "updated_at": now}))
-            self._call(self.store.save_relationship, resolved)
+            tx.save_relationship(resolved)
             return resolved
 
     def retract(self, owner_id: UUID, relationship_id: str) -> Relationship:
-        with self._lock:
-            item = self._relationship(owner_id, relationship_id)
+        first = self._relationship(owner_id, relationship_id)
+        with self._atomic(owner_id, (_rel_key(first.subject_id, first.relation),)) as tx:
+            item = self._relationship(owner_id, relationship_id, tx)
             retracted = item.model_copy(update={"status": "retracted", "updated_at": _now()})
-            self._call(self.store.save_relationship, retracted)
+            tx.save_relationship(retracted)
             return retracted
 
     # ----------------------------------------------------------- traversal
@@ -259,10 +315,11 @@ class GraphService:
     # ----------------------------------------------------------- ingestion
 
     def ingest(self, owner_id: UUID, record: KnowledgeRecord) -> IngestResult:
-        """Store a normalized record; each item gets the record's source as provenance.
+        """Store a normalized record atomically; each item gets the record's source as provenance.
 
-        All entities and relationship endpoints are validated before anything is
-        written, so a record with an invalid relationship type is rejected whole.
+        Endpoint types are validated before any lock is taken; everything is then
+        written in one transaction, so a record that fails part-way (for example a
+        dependency cycle) leaves no partial writes.
         """
         types = {item.ref: item.entity_type for item in record.entities}
         for rel in record.relationships:
@@ -271,20 +328,22 @@ class GraphService:
                 raise GraphError(422, f"{rel.relation} cannot connect a {types[rel.subject_ref]} to a {types[rel.object_ref]}.")
             if rel.status == "verified" and record.extractor == "model":
                 raise GraphError(422, "model-extracted relationships can only be inferred")
-        with self._lock:
-            ids = {}
-            for item in record.entities:
-                entity = self.upsert_entity(owner_id, EntityInput(
-                    entity_type=item.entity_type, name=item.name, key=item.key, aliases=item.aliases,
-                    attributes=item.attributes, provenance=Provenance(source_kind=record.source_kind,
-                                                                      source_ref=record.source_ref,
-                                                                      extractor=record.extractor)))
-                ids[item.ref] = entity.entity_id
-            stored = []
-            for rel in record.relationships:
-                stored.append(self.add_relationship(owner_id, RelationshipInput(
-                    subject_id=ids[rel.subject_ref], relation=rel.relation, object_id=ids[rel.object_ref],
-                    status=rel.status, confidence=rel.confidence, provenance=Provenance(
-                        source_kind=record.source_kind, source_ref=record.source_ref, extractor=record.extractor,
-                        excerpt=rel.excerpt))))
+        inputs = {item.ref: EntityInput(
+            entity_type=item.entity_type, name=item.name, key=item.key, aliases=item.aliases,
+            attributes=item.attributes, provenance=Provenance(source_kind=record.source_kind,
+                                                              source_ref=record.source_ref,
+                                                              extractor=record.extractor))
+            for item in record.entities}
+        entity_keys = [_entity_key(item.entity_type, item.normalized_key) for item in inputs.values()]
+        with self._atomic(owner_id, entity_keys) as tx:
+            ids = {ref: self._upsert(tx, owner_id, data).entity_id for ref, data in inputs.items()}
+            rel_keys = {_rel_key(ids[rel.subject_ref], rel.relation) for rel in record.relationships}
+            if any(rel.relation == "depends_on" for rel in record.relationships):
+                rel_keys.add("dep")
+            tx.lock(rel_keys)
+            stored = [self._add(tx, owner_id, RelationshipInput(
+                subject_id=ids[rel.subject_ref], relation=rel.relation, object_id=ids[rel.object_ref],
+                status=rel.status, confidence=rel.confidence, provenance=Provenance(
+                    source_kind=record.source_kind, source_ref=record.source_ref, extractor=record.extractor,
+                    excerpt=rel.excerpt))) for rel in record.relationships]
         return IngestResult(entity_ids=ids, relationships=tuple(stored))
