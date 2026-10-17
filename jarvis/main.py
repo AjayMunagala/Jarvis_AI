@@ -23,6 +23,7 @@ from jarvis.api.routes.verification import router as verification_router
 from jarvis.api.routes.workflow import router as workflow_router
 from jarvis.api.routes.knowledge import router as knowledge_router
 from jarvis.api.routes.research import router as research_router
+from jarvis.api.routes.scheduler import router as scheduler_router
 from jarvis.assistant.service import AssistantService
 from jarvis.assistant.stores import MemoryAssistantStore, PostgresAssistantStore
 from jarvis.workflow.service import WorkflowService
@@ -31,6 +32,8 @@ from jarvis.knowledge.service import KnowledgeService
 from jarvis.knowledge.stores import MemoryKnowledgeStore, PostgresKnowledgeStore
 from jarvis.research.service import ResearchService
 from jarvis.research.stores import MemoryResearchStore, PostgresResearchStore
+from jarvis.scheduler.service import SchedulerService
+from jarvis.scheduler.stores import MemorySchedulerStore, PostgresSchedulerStore
 from jarvis.audit.service import ApprovalService, AuditService
 from jarvis.audit.stores import (
     MemoryApprovalStore, MemoryAuditStore, PostgresApprovalStore, PostgresAuditStore,
@@ -141,11 +144,13 @@ def create_app(
         workflow_store = PostgresWorkflowStore(url, **timeouts)
         knowledge_store = PostgresKnowledgeStore(url, **timeouts)
         research_store = PostgresResearchStore(url, **timeouts)
+        scheduler_store = PostgresSchedulerStore(url, **timeouts)
     else:
         assistant_store = MemoryAssistantStore()
         workflow_store = MemoryWorkflowStore()
         knowledge_store = MemoryKnowledgeStore()
         research_store = MemoryResearchStore()
+        scheduler_store = MemorySchedulerStore()
     app.state.assistant_service = AssistantService(assistant_store, audit_service=app.state.audit_service)
     app.state.workflow_service = WorkflowService(
         workflow_store,
@@ -158,6 +163,10 @@ def create_app(
     )
     app.state.research_service = ResearchService(
         research_store,
+        audit_service=app.state.audit_service,
+    )
+    app.state.scheduler_service = SchedulerService(
+        scheduler_store,
         audit_service=app.state.audit_service,
     )
 
@@ -180,6 +189,7 @@ def create_app(
     app.include_router(workflow_router)
     app.include_router(knowledge_router)
     app.include_router(research_router)
+    app.include_router(scheduler_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

@@ -37,6 +37,9 @@ class Capability(StrEnum):
     # Research & document intelligence (v3.4): document parsing and synthesis.
     RESEARCH_READ = "research.read"
     RESEARCH_WRITE = "research.write"
+    # Proactive assistance & scheduling (v3.5): background jobs and notifications.
+    SCHEDULER_READ = "scheduler.read"
+    SCHEDULER_WRITE = "scheduler.write"
     EXTERNAL_ACTION_EXECUTE = "external_action.execute"
 
 
@@ -63,6 +66,8 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.KNOWLEDGE_WRITE,
     Capability.RESEARCH_READ,
     Capability.RESEARCH_WRITE,
+    Capability.SCHEDULER_READ,
+    Capability.SCHEDULER_WRITE,
 })
 
 
