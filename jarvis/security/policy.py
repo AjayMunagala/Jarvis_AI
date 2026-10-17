@@ -25,6 +25,9 @@ class Capability(StrEnum):
     AUDIT_READ = "audit.read"
     APPROVALS_READ = "approvals.read"
     APPROVALS_DECIDE = "approvals.decide"
+    # Personal assistant foundation (v3.1): tasks, notes, reminders, local calendar.
+    ASSISTANT_READ = "assistant.read"
+    ASSISTANT_WRITE = "assistant.write"
     EXTERNAL_ACTION_EXECUTE = "external_action.execute"
 
 
@@ -43,6 +46,8 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.AUDIT_READ,
     Capability.APPROVALS_READ,
     Capability.APPROVALS_DECIDE,
+    Capability.ASSISTANT_READ,
+    Capability.ASSISTANT_WRITE,
 })
 
 

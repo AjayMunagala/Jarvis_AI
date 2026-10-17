@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import {
-  Activity, ArrowDown, ArrowUp, AudioLines, Check, ChevronDown, CircleHelp,
+  Activity, ArrowDown, ArrowUp, AudioLines, Check, CheckSquare, ChevronDown, CircleHelp,
   Clock3, Command, Compass, Cpu, FileText, Folder, Menu, MessageSquare, Plus, Search,
   Settings2, ShieldCheck, Sparkles, X,
 } from 'lucide-react'
@@ -10,6 +10,7 @@ import CodingPanel from './components/CodingPanel'
 import BrowserPanel from './components/BrowserPanel'
 import CapabilitiesPanel from './components/CapabilitiesPanel'
 import ActivityPanel from './components/ActivityPanel'
+import AssistantPanel from './components/AssistantPanel'
 import VoiceControls from './voice/VoiceControls'
 import { createBrowserSpeechProvider, type SpeechProvider } from './voice/speech'
 
@@ -46,6 +47,7 @@ const suggestions = [
 
 const navItems = [
   { label: 'Chat', icon: MessageSquare, active: true },
+  { label: 'Assistant', icon: CheckSquare },
   { label: 'Capabilities', icon: Sparkles },
   { label: 'Memory', icon: Folder },
   { label: 'Coding', icon: Command },
@@ -73,7 +75,7 @@ export default function App() {
   const [pending, setPending] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [notice, setNotice] = useState('')
-  const [activeView, setActiveView] = useState<'Chat' | 'Memory' | 'Coding' | 'Browser' | 'Capabilities' | 'Activity'>('Chat')
+  const [activeView, setActiveView] = useState<'Chat' | 'Assistant' | 'Memory' | 'Coding' | 'Browser' | 'Capabilities' | 'Activity'>('Chat')
   const [inspectMemoryIds, setInspectMemoryIds] = useState<string[]>([])
   const [providerInfo, setProviderInfo] = useState<{ provider: string; demo: boolean } | null>(null)
   const [credential, setCredential] = useState('')
@@ -444,7 +446,7 @@ export default function App() {
           <div className="topbar-right"><div className="provider-pill"><span className="provider-dot" /><span>{providerInfo ? `${providerInfo.demo ? 'DEMO' : 'MODEL'} · ${providerInfo.provider.toUpperCase()}` : 'PROVIDER MODE'}</span></div>{credential && <button type="button" className="workspace-lock" onClick={lockWorkspace}>Lock workspace</button>}<span className="topbar-divider" /><div className={`system-status ${readiness !== 'ready' && readiness !== 'loading' ? 'system-status-clickable' : ''}`} aria-label={`System status: ${readiness === 'ready' ? 'ready' : readiness === 'not_ready' ? 'not ready' : readiness === 'unreachable' ? 'offline' : 'checking'}`} onClick={readiness !== 'ready' && readiness !== 'loading' ? () => void fetchReadiness() : undefined} title={readiness === 'ready' ? 'System ready' : readiness === 'not_ready' ? 'System not ready — click to refresh' : readiness === 'unreachable' ? 'System offline — click to retry' : 'Checking system readiness…'}><span className={`status-ring status-${readiness}`}>{readiness === 'ready' ? <Check size={11} /> : readiness === 'loading' ? <Clock3 size={11} /> : readiness === 'not_ready' ? <CircleHelp size={11} /> : <X size={11} />}</span><span>{readiness === 'ready' ? 'System ready' : readiness === 'loading' ? 'Checking…' : readiness === 'not_ready' ? 'System not ready' : 'System offline'}</span></div></div>
         </header>
 
-        {activeView === 'Activity' ? <div className="content-area"><ActivityPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Capabilities' ? <div className="content-area"><CapabilitiesPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Browser' ? <div className="content-area"><BrowserPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Coding' ? <div className="content-area"><CodingPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Memory' ? <div className="content-area"><MemoryManager inspectIds={inspectMemoryIds} auth={{ token: credential || undefined, onUnauthorized: handleUnauthorized }} /></div> : <><div className={`content-area ${messages.length ? 'has-messages' : ''}`}>
+        {activeView === 'Assistant' ? <div className="content-area"><AssistantPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Activity' ? <div className="content-area"><ActivityPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Capabilities' ? <div className="content-area"><CapabilitiesPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Browser' ? <div className="content-area"><BrowserPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Coding' ? <div className="content-area"><CodingPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Memory' ? <div className="content-area"><MemoryManager inspectIds={inspectMemoryIds} auth={{ token: credential || undefined, onUnauthorized: handleUnauthorized }} /></div> : <><div className={`content-area ${messages.length ? 'has-messages' : ''}`}>
           {notice && <div className="notice-banner" role="status"><CircleHelp size={16} /><span>{notice}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => setNotice('')}><X size={15} /></button></div>}
           {historyError && <div className="notice-banner conversation-error" role="alert"><CircleHelp size={16} /><span>{historyError}</span><button className="icon-button" aria-label="Dismiss conversation error" onClick={() => setHistoryError('')}><X size={15} /></button></div>}
           {historyLoading && <div className="notice-banner" role="status">Loading conversation history…</div>}

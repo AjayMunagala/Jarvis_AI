@@ -180,7 +180,7 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
   }
   if (response.status === 204) return undefined as T
   if (!response.ok && (path.startsWith('/browser') || path.startsWith('/tools') || path === '/capabilities'
-    || path.startsWith('/approvals') || path.startsWith('/activity'))) {
+    || path.startsWith('/approvals') || path.startsWith('/activity') || path.startsWith('/assistant'))) {
     // Browser and tool routes return short, sanitized policy messages that explain blocks.
     let detail = ''
     try {
@@ -793,3 +793,193 @@ export interface InterfaceConfig {
 export function getInterfaceConfig(): Promise<InterfaceConfig> {
   return request<InterfaceConfig>('/interface/config')
 }
+
+// ------------------------------------------------- assistant (v3.1)
+
+export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled'
+export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent'
+export type ReminderStatus = 'pending' | 'triggered' | 'acknowledged' | 'dismissed'
+
+export interface TaskItem {
+  id: string
+  owner_id: string
+  title: string
+  description: string | null
+  status: TaskStatus
+  priority: TaskPriority
+  due_date: string | null
+  tags: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface TaskPage {
+  items: TaskItem[]
+  total: number
+}
+
+export interface NoteItem {
+  id: string
+  owner_id: string
+  title: string
+  content: string
+  tags: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface NotePage {
+  items: NoteItem[]
+  total: number
+}
+
+export interface ReminderItem {
+  id: string
+  owner_id: string
+  task_id: string | null
+  title: string
+  remind_at: string
+  status: ReminderStatus
+  created_at: string
+  updated_at: string
+}
+
+export interface ReminderPage {
+  items: ReminderItem[]
+  total: number
+}
+
+export interface CalendarEventItem {
+  id: string
+  owner_id: string
+  title: string
+  description: string | null
+  start_time: string
+  end_time: string
+  location: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface CalendarEventPage {
+  items: CalendarEventItem[]
+  total: number
+}
+
+export function listTasks(
+  auth?: ApiAuth,
+  status?: TaskStatus,
+  priority?: TaskPriority,
+  tag?: string,
+  limit = 50,
+  offset = 0,
+): Promise<TaskPage> {
+  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  if (status) query.set('status', status)
+  if (priority) query.set('priority', priority)
+  if (tag) query.set('tag', tag)
+  return request<TaskPage>(`/assistant/tasks?${query.toString()}`, undefined, false, auth)
+}
+
+export function createTask(
+  body: { title: string; description?: string; priority?: TaskPriority; due_date?: string; tags?: string[] },
+  auth?: ApiAuth,
+): Promise<TaskItem> {
+  return request<TaskItem>('/assistant/tasks', json(body), false, auth)
+}
+
+export function updateTask(
+  taskId: string,
+  body: { title?: string; description?: string; status?: TaskStatus; priority?: TaskPriority; due_date?: string; tags?: string[] },
+  auth?: ApiAuth,
+): Promise<TaskItem> {
+  return request<TaskItem>(`/assistant/tasks/${encodeURIComponent(taskId)}`, { method: 'PATCH', ...json(body) }, false, auth)
+}
+
+export function deleteTask(taskId: string, auth?: ApiAuth): Promise<void> {
+  return request<void>(`/assistant/tasks/${encodeURIComponent(taskId)}`, { method: 'DELETE' }, false, auth)
+}
+
+export function listNotes(
+  auth?: ApiAuth,
+  queryParam?: string,
+  tag?: string,
+  limit = 50,
+  offset = 0,
+): Promise<NotePage> {
+  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  if (queryParam) query.set('query', queryParam)
+  if (tag) query.set('tag', tag)
+  return request<NotePage>(`/assistant/notes?${query.toString()}`, undefined, false, auth)
+}
+
+export function createNote(
+  body: { title: string; content: string; tags?: string[] },
+  auth?: ApiAuth,
+): Promise<NoteItem> {
+  return request<NoteItem>('/assistant/notes', json(body), false, auth)
+}
+
+export function updateNote(
+  noteId: string,
+  body: { title?: string; content?: string; tags?: string[] },
+  auth?: ApiAuth,
+): Promise<NoteItem> {
+  return request<NoteItem>(`/assistant/notes/${encodeURIComponent(noteId)}`, { method: 'PATCH', ...json(body) }, false, auth)
+}
+
+export function deleteNote(noteId: string, auth?: ApiAuth): Promise<void> {
+  return request<void>(`/assistant/notes/${encodeURIComponent(noteId)}`, { method: 'DELETE' }, false, auth)
+}
+
+export function listReminders(
+  auth?: ApiAuth,
+  status?: ReminderStatus,
+  limit = 50,
+  offset = 0,
+): Promise<ReminderPage> {
+  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  if (status) query.set('status', status)
+  return request<ReminderPage>(`/assistant/reminders?${query.toString()}`, undefined, false, auth)
+}
+
+export function createReminder(
+  body: { title: string; remind_at: string; task_id?: string },
+  auth?: ApiAuth,
+): Promise<ReminderItem> {
+  return request<ReminderItem>('/assistant/reminders', json(body), false, auth)
+}
+
+export function updateReminder(
+  reminderId: string,
+  body: { title?: string; remind_at?: string; status?: ReminderStatus },
+  auth?: ApiAuth,
+): Promise<ReminderItem> {
+  return request<ReminderItem>(`/assistant/reminders/${encodeURIComponent(reminderId)}`, { method: 'PATCH', ...json(body) }, false, auth)
+}
+
+export function deleteReminder(reminderId: string, auth?: ApiAuth): Promise<void> {
+  return request<void>(`/assistant/reminders/${encodeURIComponent(reminderId)}`, { method: 'DELETE' }, false, auth)
+}
+
+export function listCalendarEvents(
+  startRange: string,
+  endRange: string,
+  auth?: ApiAuth,
+  limit = 100,
+): Promise<CalendarEventPage> {
+  const query = new URLSearchParams({ start_range: startRange, end_range: endRange, limit: String(limit) })
+  return request<CalendarEventPage>(`/assistant/calendar/events?${query.toString()}`, undefined, false, auth)
+}
+
+export function createCalendarEvent(
+  body: { title: string; start_time: string; end_time: string; description?: string; location?: string },
+  auth?: ApiAuth,
+): Promise<CalendarEventItem> {
+  return request<CalendarEventItem>('/assistant/calendar/events', json(body), false, auth)
+}
+
+export function deleteCalendarEvent(eventId: string, auth?: ApiAuth): Promise<void> {
+  return request<void>(`/assistant/calendar/events/${encodeURIComponent(eventId)}`, { method: 'DELETE' }, false, auth)
+}
+

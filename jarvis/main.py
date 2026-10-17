@@ -9,6 +9,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from jarvis import __version__
 from jarvis.api.routes.activity import router as activity_router
+from jarvis.api.routes.assistant import router as assistant_router
 from jarvis.api.routes.browser import router as browser_router
 from jarvis.api.routes.chat import router as chat_router
 from jarvis.api.routes.coding import router as coding_router
@@ -19,6 +20,8 @@ from jarvis.api.routes.memories import router as memories_router
 from jarvis.api.routes.repo import router as repo_router
 from jarvis.api.routes.tools import router as tools_router
 from jarvis.api.routes.verification import router as verification_router
+from jarvis.assistant.service import AssistantService
+from jarvis.assistant.stores import MemoryAssistantStore, PostgresAssistantStore
 from jarvis.audit.service import ApprovalService, AuditService
 from jarvis.audit.stores import (
     MemoryApprovalStore, MemoryAuditStore, PostgresApprovalStore, PostgresAuditStore,
@@ -119,6 +122,17 @@ def create_app(
     for component in (app.state.tool_runtime, app.state.browser_service):
         component.audit_service = app.state.audit_service
         component.approval_service = app.state.approval_service
+
+    # v3.1 personal assistant: tasks, notes, reminders, local calendar.
+    if resolved_settings.persistence_enabled:
+        url = resolved_settings.persistence_database_url.get_secret_value()
+        timeouts = dict(connect_timeout_seconds=resolved_settings.persistence_connect_timeout_seconds,
+                        operation_timeout_seconds=resolved_settings.persistence_operation_timeout_seconds)
+        assistant_store = PostgresAssistantStore(url, **timeouts)
+    else:
+        assistant_store = MemoryAssistantStore()
+    app.state.assistant_service = AssistantService(assistant_store, audit_service=app.state.audit_service)
+
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=resolved_settings.max_request_body_bytes,
@@ -134,6 +148,7 @@ def create_app(
     app.include_router(tools_router)
     app.include_router(activity_router)
     app.include_router(interface_router)
+    app.include_router(assistant_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

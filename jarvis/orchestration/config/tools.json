@@ -176,6 +176,105 @@
       "version": "1"
     },
     {
+      "description": "Lists local calendar events within a date range.",
+      "executable": false,
+      "id": "calendar.list",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "end_range": {
+            "title": "End Range",
+            "type": "string"
+          },
+          "limit": {
+            "default": 20,
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "start_range": {
+            "title": "Start Range",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start_range",
+          "end_range"
+        ],
+        "title": "CalendarListArgs",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "CalendarEventSummaryItem": {
+            "additionalProperties": false,
+            "properties": {
+              "end_time": {
+                "title": "End Time",
+                "type": "string"
+              },
+              "id": {
+                "title": "Id",
+                "type": "string"
+              },
+              "location": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Location"
+              },
+              "start_time": {
+                "title": "Start Time",
+                "type": "string"
+              },
+              "title": {
+                "title": "Title",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "start_time",
+              "end_time"
+            ],
+            "title": "CalendarEventSummaryItem",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/$defs/CalendarEventSummaryItem"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "events",
+          "total"
+        ],
+        "title": "CalendarListOutput",
+        "type": "object"
+      },
+      "read_only": true,
+      "risk": "low",
+      "version": "1"
+    },
+    {
       "description": "Per-file insertion/deletion counts for uncommitted changes; no diff content.",
       "executable": false,
       "id": "git.diff_summary",
@@ -515,6 +614,108 @@
       "version": "1"
     },
     {
+      "description": "Searches personal notes by title, tag, or content.",
+      "executable": false,
+      "id": "notes.search",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 10,
+            "maximum": 50,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Query"
+          },
+          "tag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tag"
+          }
+        },
+        "title": "NotesSearchArgs",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "NoteSummaryItem": {
+            "additionalProperties": false,
+            "properties": {
+              "content_excerpt": {
+                "title": "Content Excerpt",
+                "type": "string"
+              },
+              "id": {
+                "title": "Id",
+                "type": "string"
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Tags",
+                "type": "array"
+              },
+              "title": {
+                "title": "Title",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "content_excerpt",
+              "tags"
+            ],
+            "title": "NoteSummaryItem",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "notes": {
+            "items": {
+              "$ref": "#/$defs/NoteSummaryItem"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "notes",
+          "total"
+        ],
+        "title": "NotesSearchOutput",
+        "type": "object"
+      },
+      "read_only": true,
+      "risk": "low",
+      "version": "1"
+    },
+    {
       "description": "Bounded text or filename search in the configured repository (no regex).",
       "executable": false,
       "id": "repo.search",
@@ -759,6 +960,105 @@
           "symbols"
         ],
         "title": "RepoSymbolsOutput",
+        "type": "object"
+      },
+      "read_only": true,
+      "risk": "low",
+      "version": "1"
+    },
+    {
+      "description": "Lists personal assistant tasks by status and due date.",
+      "executable": false,
+      "id": "tasks.list",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 20,
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          }
+        },
+        "title": "TasksListArgs",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "TaskSummaryItem": {
+            "additionalProperties": false,
+            "properties": {
+              "due_date": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Due Date"
+              },
+              "id": {
+                "title": "Id",
+                "type": "string"
+              },
+              "priority": {
+                "title": "Priority",
+                "type": "string"
+              },
+              "status": {
+                "title": "Status",
+                "type": "string"
+              },
+              "title": {
+                "title": "Title",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "status",
+              "priority"
+            ],
+            "title": "TaskSummaryItem",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "tasks": {
+            "items": {
+              "$ref": "#/$defs/TaskSummaryItem"
+            },
+            "title": "Tasks",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tasks",
+          "total"
+        ],
+        "title": "TasksListOutput",
         "type": "object"
       },
       "read_only": true,

@@ -8,6 +8,7 @@ reported unavailable and never runs.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable, Literal
 from uuid import UUID
 
@@ -36,6 +37,7 @@ class ToolContext:
     repo_service: Any = None
     verification_service: Any = None
     browser_service: Any = None
+    assistant_service: Any = None
 
 
 def build_tool_context(state, owner_id: UUID) -> "ToolContext":
@@ -46,6 +48,7 @@ def build_tool_context(state, owner_id: UUID) -> "ToolContext":
         repo_service=getattr(state, "repo_service", None),
         verification_service=getattr(state, "verification_service", None),
         browser_service=getattr(state, "browser_service", None),
+        assistant_service=getattr(state, "assistant_service", None),
     )
 
 
@@ -361,6 +364,108 @@ def _browser_observe(context: ToolContext, args: BrowserObserveArgs) -> HandlerR
     ), evidence=(f"url:{page.url}", f"sha256:{page.content_sha256}"), untrusted_content=True)
 
 
+# ----------------------------------------------------------- assistant (v3.1)
+
+class TasksListArgs(Args):
+    status: StrictStr | None = None
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class TaskSummaryItem(Output):
+    id: StrictStr
+    title: StrictStr
+    status: StrictStr
+    priority: StrictStr
+    due_date: StrictStr | None = None
+
+
+class TasksListOutput(Output):
+    tasks: tuple[TaskSummaryItem, ...]
+    total: int
+
+
+class NotesSearchArgs(Args):
+    query: StrictStr | None = None
+    tag: StrictStr | None = None
+    limit: int = Field(default=10, ge=1, le=50)
+
+
+class NoteSummaryItem(Output):
+    id: StrictStr
+    title: StrictStr
+    content_excerpt: StrictStr
+    tags: tuple[StrictStr, ...]
+
+
+class NotesSearchOutput(Output):
+    notes: tuple[NoteSummaryItem, ...]
+    total: int
+
+
+class CalendarListArgs(Args):
+    start_range: StrictStr
+    end_range: StrictStr
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class CalendarEventSummaryItem(Output):
+    id: StrictStr
+    title: StrictStr
+    start_time: StrictStr
+    end_time: StrictStr
+    location: StrictStr | None = None
+
+
+class CalendarListOutput(Output):
+    events: tuple[CalendarEventSummaryItem, ...]
+    total: int
+
+
+def _assistant_available(context: ToolContext) -> tuple[bool, str]:
+    if context.assistant_service is None:
+        return False, "Personal assistant service is not available."
+    return True, ""
+
+
+def _tasks_list(context: ToolContext, args: TasksListArgs) -> HandlerResult:
+    from jarvis.assistant.models import TaskStatus
+    st = TaskStatus(args.status) if args.status else None
+    page = context.assistant_service.list_tasks(context.owner_id, status=st, limit=args.limit)
+    items = tuple(
+        TaskSummaryItem(
+            id=str(t.id), title=t.title, status=t.status.value, priority=t.priority.value,
+            due_date=t.due_date.isoformat() if t.due_date else None,
+        ) for t in page.items
+    )
+    return HandlerResult(TasksListOutput(tasks=items, total=page.total), evidence=("assistant:tasks",))
+
+
+def _notes_search(context: ToolContext, args: NotesSearchArgs) -> HandlerResult:
+    page = context.assistant_service.list_notes(context.owner_id, query=args.query, tag=args.tag, limit=args.limit)
+    items = tuple(
+        NoteSummaryItem(
+            id=str(n.id), title=n.title, content_excerpt=_clip(n.content, 200), tags=tuple(n.tags),
+        ) for n in page.items
+    )
+    return HandlerResult(NotesSearchOutput(notes=items, total=page.total), evidence=("assistant:notes",))
+
+
+def _calendar_list(context: ToolContext, args: CalendarListArgs) -> HandlerResult:
+    try:
+        start_dt = datetime.fromisoformat(args.start_range)
+        end_dt = datetime.fromisoformat(args.end_range)
+    except ValueError:
+        return HandlerResult(CalendarListOutput(events=(), total=0))
+    page = context.assistant_service.list_calendar_events(context.owner_id, start_range=start_dt, end_range=end_dt, limit=args.limit)
+    items = tuple(
+        CalendarEventSummaryItem(
+            id=str(e.id), title=e.title, start_time=e.start_time.isoformat(),
+            end_time=e.end_time.isoformat(), location=e.location,
+        ) for e in page.items
+    )
+    return HandlerResult(CalendarListOutput(events=items, total=page.total), evidence=("assistant:calendar",))
+
+
 HANDLERS: dict[str, ToolHandler] = {item.tool_id: item for item in (
     ToolHandler("calculator", "1", "Calculator", "Evaluates bounded arithmetic (numbers, + - * / // % **, abs/min/max/round/sqrt).",
                 CalculatorArgs, CalculatorOutput, (Capability.CHAT_ADVISORY,), _calculate, _always, timeout_seconds=2.0),
@@ -379,4 +484,10 @@ HANDLERS: dict[str, ToolHandler] = {item.tool_id: item for item in (
     ToolHandler("browser.observe", "1", "Browser observe", "Fetches and observes one policy-checked page as untrusted content.",
                 BrowserObserveArgs, BrowserObserveOutput, (Capability.BROWSER_READ,), _browser_observe, _browser_available,
                 timeout_seconds=20.0),
+    ToolHandler("tasks.list", "1", "List tasks", "Lists personal assistant tasks by status and due date.",
+                TasksListArgs, TasksListOutput, (Capability.ASSISTANT_READ,), _tasks_list, _assistant_available),
+    ToolHandler("notes.search", "1", "Search notes", "Searches personal notes by title, tag, or content.",
+                NotesSearchArgs, NotesSearchOutput, (Capability.ASSISTANT_READ,), _notes_search, _assistant_available),
+    ToolHandler("calendar.list", "1", "List calendar events", "Lists local calendar events within a date range.",
+                CalendarListArgs, CalendarListOutput, (Capability.ASSISTANT_READ,), _calendar_list, _assistant_available),
 )}
