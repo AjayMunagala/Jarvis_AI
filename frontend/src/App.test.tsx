@@ -3,15 +3,16 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import userEvent from '@testing-library/user-event'
 import App from './App'
 import './styles.css'
-import { getConversationMessages, getMemory, listConversations, listMemories, sendChatMessage, type ConversationPage } from './services/api'
+import { getConversationMessages, getMemory, getReadiness, listConversations, listMemories, sendChatMessage, type ConversationPage, type ReadinessResponse } from './services/api'
 
 vi.mock('./services/api', () => ({
   sendChatMessage: vi.fn(), listConversations: vi.fn(), getConversationMessages: vi.fn(), listMemories: vi.fn(), searchMemories: vi.fn(),
-  createMemory: vi.fn(), updateMemory: vi.fn(), deleteMemory: vi.fn(), getMemory: vi.fn(),
+  createMemory: vi.fn(), updateMemory: vi.fn(), deleteMemory: vi.fn(), getMemory: vi.fn(), getReadiness: vi.fn(),
 }))
 const sendMock = vi.mocked(sendChatMessage)
 const listConversationsMock = vi.mocked(listConversations)
 const historyMock = vi.mocked(getConversationMessages)
+const getReadinessMock = vi.mocked(getReadiness)
 
 const emptyConversationPage = { items: [], limit: 20, offset: 0, has_more: false }
 
@@ -30,6 +31,11 @@ async function unlockWithToken(token = 'a'.repeat(32)) {
 beforeEach(() => {
   listConversationsMock.mockResolvedValue(emptyConversationPage)
   historyMock.mockResolvedValue({ conversation_id: 'conversation-1', messages: [], has_more: false, next_before_sequence: null })
+  getReadinessMock.mockResolvedValue({
+    status: 'ready',
+    version: '2.0.0',
+    components: { application: 'ready', provider: 'ready', orchestration: 'ready', authorization: 'ready', persistence: 'disabled', repository_intelligence: 'ready' },
+  })
 })
 
 afterEach(() => {
@@ -400,5 +406,52 @@ describe('JARVIS chat', () => {
     await userEvent.click(await screen.findByRole('button', { name: /Memory context · success · 1 record/ }))
     expect(screen.getByRole('heading', { name: 'Memory' })).toBeInTheDocument()
     expect(screen.getByText(/not a historical snapshot/i)).toBeInTheDocument()
+  })
+
+  it('renders dynamic readiness indicator: ready, loading, not-ready, and recovery', async () => {
+    // 1. Loading state before resolution
+    let resolveReadiness!: (val: ReadinessResponse) => void
+    getReadinessMock.mockReturnValueOnce(new Promise((resolve) => { resolveReadiness = resolve }))
+    const { unmount } = render(<App />)
+    expect(screen.getByText('Checking…')).toBeInTheDocument()
+    expect(screen.getByLabelText(/System status: checking/i)).toBeInTheDocument()
+
+    // Resolve as ready
+    await act(async () => {
+      resolveReadiness({
+        status: 'ready',
+        version: '2.0.0',
+        components: { application: 'ready', provider: 'ready' },
+      })
+    })
+    expect(await screen.findByText('System ready')).toBeInTheDocument()
+    unmount()
+
+    // 2. Not ready state
+    getReadinessMock.mockResolvedValueOnce({
+      status: 'not_ready',
+      version: '2.0.0',
+      components: { application: 'ready', provider: 'unavailable' },
+    })
+    const { unmount: unmountNotReady } = render(<App />)
+    expect(await screen.findByText('System not ready')).toBeInTheDocument()
+    expect(screen.getByLabelText(/System status: not ready/i)).toBeInTheDocument()
+    unmountNotReady()
+
+    // 3. Offline / unreachable state and recovery
+    getReadinessMock.mockRejectedValueOnce(new Error('Network error'))
+    const { unmount: unmountOffline } = render(<App />)
+    expect(await screen.findByText('System offline')).toBeInTheDocument()
+    expect(screen.getByLabelText(/System status: offline/i)).toBeInTheDocument()
+
+    // Clicking the status badge triggers a retry
+    getReadinessMock.mockResolvedValueOnce({
+      status: 'ready',
+      version: '2.0.0',
+      components: { application: 'ready' },
+    })
+    await userEvent.click(screen.getByLabelText(/System status: offline/i))
+    expect(await screen.findByText('System ready')).toBeInTheDocument()
+    unmountOffline()
   })
 })

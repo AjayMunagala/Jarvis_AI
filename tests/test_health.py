@@ -15,6 +15,7 @@ def _wired_state(*, persistence_enabled=False):
         provider=SimpleNamespace(generate_reply=lambda: None, name="private-provider-name"),
         orchestration_service=SimpleNamespace(run=lambda: None),
         authorization_policy=SimpleNamespace(allows=lambda: True),
+        repo_service=SimpleNamespace(get_inventory=lambda: None),
         conversation_repository=object() if persistence_enabled else None,
         memory_repository=object() if persistence_enabled else None,
     )
@@ -29,6 +30,7 @@ def test_readiness_reports_wired_components_and_valid_disabled_persistence():
         "provider": "ready",
         "orchestration": "ready",
         "authorization": "ready",
+        "repository_intelligence": "ready",
         "persistence": "disabled",
     }
 
@@ -39,6 +41,7 @@ def test_readiness_reports_configured_persistence_without_probing_database():
 
     assert response.status == "ready"
     assert response.components["persistence"] == "configured"
+    assert response.components["repository_intelligence"] == "ready"
 
 
 def test_readiness_fails_closed_when_required_components_are_missing():
@@ -50,12 +53,19 @@ def test_readiness_fails_closed_when_required_components_are_missing():
 
     assert isinstance(response, JSONResponse)
     assert response.status_code == 503
-    assert response.body == (
-        b'{"status":"not_ready","version":"2.0.0","components":'
-        b'{"application":"ready","provider":"unavailable",'
-        b'"orchestration":"ready","authorization":"unavailable",'
-        b'"persistence":"disabled"}}'
-    )
+    assert b'"provider":"unavailable"' in response.body
+    assert b'"authorization":"unavailable"' in response.body
+
+
+def test_readiness_fails_closed_when_repo_intelligence_is_missing():
+    state = _wired_state()
+    state.repo_service = None
+
+    response = ready(_request_for(state))
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 503
+    assert b'"repository_intelligence":"unavailable"' in response.body
 
 
 def test_readiness_fails_closed_when_persistence_is_enabled_without_repositories():

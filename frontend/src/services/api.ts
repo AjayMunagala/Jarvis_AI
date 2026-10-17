@@ -67,6 +67,22 @@ export interface MemoryInput {
   source_reference: string | null
 }
 
+export interface ComponentReadiness {
+  application?: 'ready' | 'configured' | 'disabled' | 'unavailable'
+  provider?: 'ready' | 'configured' | 'disabled' | 'unavailable'
+  orchestration?: 'ready' | 'configured' | 'disabled' | 'unavailable'
+  authorization?: 'ready' | 'configured' | 'disabled' | 'unavailable'
+  persistence?: 'ready' | 'configured' | 'disabled' | 'unavailable'
+  repository_intelligence?: 'ready' | 'configured' | 'disabled' | 'unavailable'
+  [key: string]: 'ready' | 'configured' | 'disabled' | 'unavailable' | undefined
+}
+
+export interface ReadinessResponse {
+  status: 'ready' | 'not_ready'
+  version: string
+  components: ComponentReadiness
+}
+
 const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, '')
 const apiBaseUrl = configuredBaseUrl || '/api'
 
@@ -106,8 +122,30 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
   if (response.status === 204) return undefined as T
   if (!response.ok) {
     if (response.status === 503) {
-      if (path.startsWith('/conversations')) throw new Error('Saved conversations are disabled or unavailable. Enable local PostgreSQL persistence to use conversation history.')
-      throw new Error('Memory storage is disabled or unavailable. Enable local PostgreSQL persistence to manage saved memories.')
+      if (path === '/ready' || path.startsWith('/ready')) {
+        try {
+          const data = await response.clone().json() as ReadinessResponse
+          if (data && (data.status === 'not_ready' || data.status === 'ready')) {
+            return data as T
+          }
+        } catch {
+          // fall through to error message
+        }
+        throw new Error('JARVIS services are not ready. Check backend status and try again.')
+      }
+      if (path.startsWith('/conversations')) {
+        throw new Error('Saved conversations are disabled or unavailable. Enable local PostgreSQL persistence to use conversation history.')
+      }
+      if (path.startsWith('/memories')) {
+        throw new Error('Memory storage is disabled or unavailable. Enable local PostgreSQL persistence to manage saved memories.')
+      }
+      if (path.startsWith('/chat')) {
+        throw new Error('Chat service is temporarily unavailable. Check that the provider and local access are configured and try again.')
+      }
+      if (path.startsWith('/repo')) {
+        throw new Error('Repository intelligence service is temporarily unavailable or not configured.')
+      }
+      throw new Error('That service is temporarily unavailable. Please try again later.')
     }
     if (response.status === 404) {
       if (path.startsWith('/conversations/')) throw new Error('That conversation is no longer available. Refresh the list and try again.')
@@ -207,4 +245,12 @@ export function deleteMemory(id: string, auth?: ApiAuth): Promise<void> {
 
 export function getMemory(id: string, auth?: ApiAuth): Promise<MemoryRecord> {
   return request<MemoryRecord>(`/memories/${encodeURIComponent(id)}`, undefined, false, auth)
+}
+
+export function getReadiness(auth?: ApiAuth): Promise<ReadinessResponse> {
+  return request<ReadinessResponse>('/ready', undefined, false, auth)
+}
+
+export function getRepoInventory(auth?: ApiAuth): Promise<unknown> {
+  return request<unknown>('/repo/inventory', undefined, false, auth)
 }

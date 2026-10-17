@@ -18,10 +18,19 @@ def _run_git_cmd(repo_root: Path, args: list[str], timeout_seconds: float = 5.0)
     if not git_bin:
         return -1, "", "git executable not found in PATH."
 
+    # Strip any ambient Git environment overrides (e.g. GIT_DIR, GIT_WORK_TREE,
+    # GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY) that could redirect operations
+    # outside the intended repo_root, while preserving essential system variables.
+    safe_env = {
+        key: val for key, val in os.environ.items()
+        if not key.upper().startswith("GIT_")
+    }
+
     try:
         proc = subprocess.run(
             [git_bin, *args],
             cwd=str(repo_root),
+            env=safe_env,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,

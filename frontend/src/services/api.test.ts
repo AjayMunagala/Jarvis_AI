@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createMemory, deleteMemory, getConversationMessages, ingestDocument, listConversations, listMemories, searchMemories, sendChatMessage, updateMemory } from './api'
+import { createMemory, deleteMemory, getConversationMessages, getReadiness, getRepoInventory, ingestDocument, listConversations, listMemories, searchMemories, sendChatMessage, updateMemory } from './api'
 
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.resetModules() })
 const page = { items: [], total: 0, limit: 20, offset: 0, has_more: false }
@@ -127,5 +127,42 @@ describe('API client', () => {
     await expect(isolatedSend('hello', { token: 'private-token-at-least-32-characters-long' }))
       .rejects.toThrow(/Could not reach JARVIS/)
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('correctly maps 503 errors per endpoint and protects sensitive details', async () => {
+    // 503 on chat
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: 'secret db down' }), { status: 503 })))
+    await expect(sendChatMessage('hello')).rejects.toThrow('Chat service is temporarily unavailable. Check that the provider and local access are configured and try again.')
+
+    // 503 on repo
+    await expect(getRepoInventory()).rejects.toThrow('Repository intelligence service is temporarily unavailable or not configured.')
+
+    // 503 on memories
+    await expect(listMemories()).rejects.toThrow('Memory storage is disabled or unavailable. Enable local PostgreSQL persistence to manage saved memories.')
+
+    // 503 on conversations
+    await expect(listConversations()).rejects.toThrow('Saved conversations are disabled or unavailable. Enable local PostgreSQL persistence to use conversation history.')
+  })
+
+  it('fetches readiness status and returns structured not_ready response on 503', async () => {
+    const readyData = {
+      status: 'ready',
+      version: '2.0.0',
+      components: { application: 'ready', provider: 'ready', repository_intelligence: 'ready' },
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(readyData), { status: 200 })))
+    await expect(getReadiness()).resolves.toEqual(readyData)
+
+    const notReadyData = {
+      status: 'not_ready',
+      version: '2.0.0',
+      components: { application: 'ready', provider: 'unavailable' },
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(notReadyData), { status: 503 })))
+    await expect(getReadiness()).resolves.toEqual(notReadyData)
+
+    // non-json 503 on ready throws safe error
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('bad gateway', { status: 503 })))
+    await expect(getReadiness()).rejects.toThrow('JARVIS services are not ready. Check backend status and try again.')
   })
 })

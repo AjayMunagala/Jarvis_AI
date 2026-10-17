@@ -4,7 +4,7 @@ import {
   Clock3, Command, Cpu, FileText, Folder, Menu, MessageSquare, Plus, Search,
   Settings2, ShieldCheck, Sparkles, X,
 } from 'lucide-react'
-import { getConversationMessages, listConversations, sendChatMessage, type ApiAuth, type ChatMemoryContext } from './services/api'
+import { getConversationMessages, getReadiness, listConversations, sendChatMessage, type ApiAuth, type ChatMemoryContext } from './services/api'
 import MemoryManager from './components/MemoryManager'
 
 const MAX_MESSAGE_LENGTH = 4000
@@ -77,6 +77,7 @@ export default function App() {
   const [historyError, setHistoryError] = useState('')
   const [historyHasMore, setHistoryHasMore] = useState(false)
   const [historyBeforeSequence, setHistoryBeforeSequence] = useState<number | null>(null)
+  const [readiness, setReadiness] = useState<'loading' | 'ready' | 'not_ready' | 'unreachable'>('loading')
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const requestInFlightRef = useRef(false)
@@ -88,6 +89,23 @@ export default function App() {
     activeIdRef.current = id
     setActiveId(id)
   }, [])
+
+  const fetchReadiness = useCallback(async () => {
+    try {
+      const res = await getReadiness()
+      if (res && res.status === 'ready') {
+        setReadiness('ready')
+      } else {
+        setReadiness('not_ready')
+      }
+    } catch {
+      setReadiness('unreachable')
+    }
+  }, [])
+
+  useEffect(() => {
+    void fetchReadiness()
+  }, [fetchReadiness])
 
   const handleUnauthorized = useCallback(() => {
     sessionVersionRef.current += 1
@@ -178,6 +196,7 @@ export default function App() {
       })
       setConversationListOffset(page.offset + page.limit)
       setConversationListHasMore(page.has_more)
+      setReadiness((current) => current !== 'ready' ? 'ready' : current)
     } catch (cause) {
       if (version === sessionVersionRef.current) setConversationListError(cause instanceof Error ? cause.message : 'Could not load saved conversations.')
     } finally {
@@ -285,6 +304,7 @@ export default function App() {
         : await sendChatMessage(text, auth)
       if (version !== sessionVersionRef.current) return
       setProviderInfo({ provider: result.provider, demo: result.demo })
+      setReadiness((current) => current !== 'ready' ? 'ready' : current)
       const persistedId = result.conversation_id || conversationId
       setConversations((current) => current.map((conversation) => conversation.id === conversationId
         ? { ...conversation, id: persistedId, persisted: Boolean(result.conversation_id) || conversation.persisted, updatedAt: Date.now(), messages: [...conversation.messages.filter((message) => !(retryMessageId && message.id === retryMessageId)), { id: createId(), role: 'assistant', content: result.reply, provider: result.provider, demo: result.demo, partial: result.partial, memoryContext: result.memory_context }] }
@@ -383,7 +403,7 @@ export default function App() {
       <main className="main-panel">
         <header className="topbar">
           <div className="topbar-left"><button className="icon-button mobile-menu-button" aria-label="Open navigation" onClick={() => setMobileMenuOpen(true)}><Menu size={20} /></button><div className="breadcrumb"><span>Workspace</span><span className="breadcrumb-sep">/</span><strong>{activeView}</strong></div></div>
-          <div className="topbar-right"><div className="provider-pill"><span className="provider-dot" /><span>{providerInfo ? `${providerInfo.demo ? 'DEMO' : 'MODEL'} · ${providerInfo.provider.toUpperCase()}` : 'PROVIDER MODE'}</span></div>{credential && <button type="button" className="workspace-lock" onClick={lockWorkspace}>Lock workspace</button>}<span className="topbar-divider" /><div className="system-status"><span className="status-ring"><Check size={11} /></span><span>System ready</span></div></div>
+          <div className="topbar-right"><div className="provider-pill"><span className="provider-dot" /><span>{providerInfo ? `${providerInfo.demo ? 'DEMO' : 'MODEL'} · ${providerInfo.provider.toUpperCase()}` : 'PROVIDER MODE'}</span></div>{credential && <button type="button" className="workspace-lock" onClick={lockWorkspace}>Lock workspace</button>}<span className="topbar-divider" /><div className={`system-status ${readiness !== 'ready' && readiness !== 'loading' ? 'system-status-clickable' : ''}`} aria-label={`System status: ${readiness === 'ready' ? 'ready' : readiness === 'not_ready' ? 'not ready' : readiness === 'unreachable' ? 'offline' : 'checking'}`} onClick={readiness !== 'ready' && readiness !== 'loading' ? () => void fetchReadiness() : undefined} title={readiness === 'ready' ? 'System ready' : readiness === 'not_ready' ? 'System not ready — click to refresh' : readiness === 'unreachable' ? 'System offline — click to retry' : 'Checking system readiness…'}><span className={`status-ring status-${readiness}`}>{readiness === 'ready' ? <Check size={11} /> : readiness === 'loading' ? <Clock3 size={11} /> : readiness === 'not_ready' ? <CircleHelp size={11} /> : <X size={11} />}</span><span>{readiness === 'ready' ? 'System ready' : readiness === 'loading' ? 'Checking…' : readiness === 'not_ready' ? 'System not ready' : 'System offline'}</span></div></div>
         </header>
 
         {activeView === 'Memory' ? <div className="content-area"><MemoryManager inspectIds={inspectMemoryIds} auth={{ token: credential || undefined, onUnauthorized: handleUnauthorized }} /></div> : <><div className={`content-area ${messages.length ? 'has-messages' : ''}`}>

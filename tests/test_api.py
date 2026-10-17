@@ -53,6 +53,7 @@ def test_health_and_readiness_include_version():
                 "orchestration": "ready",
                 "authorization": "ready",
                 "persistence": "disabled",
+                "repository_intelligence": "ready",
             },
         }
 

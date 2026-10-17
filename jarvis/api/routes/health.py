@@ -31,11 +31,16 @@ def ready(request: Request) -> ReadinessResponse | JSONResponse:
     orchestration = getattr(app_state, "orchestration_service", None)
     policy = getattr(app_state, "authorization_policy", None)
 
+    repo_service = getattr(app_state, "repo_service", None)
+
     components = {
         "application": "ready",
         "provider": "ready" if callable(getattr(provider, "generate_reply", None)) else "unavailable",
         "orchestration": "ready" if callable(getattr(orchestration, "run", None)) else "unavailable",
         "authorization": "ready" if callable(getattr(policy, "allows", None)) else "unavailable",
+        "repository_intelligence": (
+            "ready" if callable(getattr(repo_service, "get_inventory", None)) else "unavailable"
+        ),
     }
     persistence_enabled = getattr(settings, "persistence_enabled", None)
     if persistence_enabled is False:

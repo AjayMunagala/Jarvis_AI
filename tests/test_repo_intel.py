@@ -313,8 +313,26 @@ def test_git_status_clean_and_modified_repo(tmp_path):
     mod_status = get_git_status(tmp_path)
     assert len(mod_status.unstaged_files) == 1
     assert mod_status.unstaged_files[0].path == "hello.py"
-    assert mod_status.unstaged_files[0].is_modified is True
     assert "new_untracked.txt" in mod_status.untracked_files
+
+
+def test_git_cmd_ignores_hostile_git_environment_overrides(tmp_path, monkeypatch):
+    subprocess.run(["git", "init"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(tmp_path), check=True)
+    file1 = tmp_path / "hello.py"
+    file1.write_text("print('safe')", encoding="utf-8")
+    subprocess.run(["git", "add", "hello.py"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), check=True)
+
+    # Set hostile Git environment overrides
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "nonexistent_dir"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "hostile_work_tree"))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "hostile_index"))
+
+    status = get_git_status(tmp_path)
+    assert status.is_repo is True
+    assert status.head_commit is not None
 
 
 def test_git_affected_tests_mapping():

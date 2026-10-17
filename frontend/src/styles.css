@@ -88,6 +88,12 @@ button:focus-visible, textarea:focus-visible { outline: 2px solid #5bc8e8; outli
 .topbar-divider { height: 18px; width: 1px; background: var(--line-strong); }
 .system-status { display: flex; align-items: center; gap: 7px; color: #8a96a3; font-size: 10px; }
 .status-ring { width: 16px; height: 16px; display: grid; place-items: center; border-radius: 50%; color: #70d5b2; border: 1px solid rgba(92, 199, 162, .25); background: rgba(66, 161, 130, .1); }
+.status-ring.status-ready { color: #70d5b2; border-color: rgba(92, 199, 162, .25); background: rgba(66, 161, 130, .1); }
+.status-ring.status-loading { color: #94a3b8; border-color: rgba(148, 163, 184, .25); background: rgba(148, 163, 184, .1); }
+.status-ring.status-not_ready { color: #f5a623; border-color: rgba(245, 166, 35, .25); background: rgba(245, 166, 35, .1); }
+.status-ring.status-unreachable { color: #f87171; border-color: rgba(248, 113, 113, .25); background: rgba(248, 113, 113, .1); }
+.system-status-clickable { cursor: pointer; user-select: none; }
+.system-status-clickable:hover { color: #d2dbe5; }
 .content-area { flex: 1; min-height: 0; overflow-y: auto; }
 .welcome-view { width: min(740px, calc(100% - 48px)); min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; margin: 0 auto; padding: 25px 0 34px; text-align: center; transform: translateY(-4px); }
 .welcome-orb { position: relative; width: 92px; height: 92px; display: grid; place-items: center; margin-bottom: 22px; }
