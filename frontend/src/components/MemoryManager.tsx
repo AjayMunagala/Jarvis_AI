@@ -1,5 +1,5 @@
-import { useEffect, useState, type FormEvent } from 'react'
-import { createMemory, deleteMemory, getMemory, listMemories, searchMemories, updateMemory, type ApiAuth, type MemoryInput, type MemoryRecord } from '../services/api'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { createMemory, deleteMemory, getMemory, ingestDocument, listMemories, searchMemories, updateMemory, type ApiAuth, type MemoryInput, type MemoryRecord } from '../services/api'
 
 const PAGE_SIZE = 20
 const emptyForm = { content: '', category: '', source_reference: '' }
@@ -18,6 +18,9 @@ export default function MemoryManager({ inspectIds = [], auth }: { inspectIds?: 
   const [form, setForm] = useState<FormState>(emptyForm)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<MemoryRecord | null>(null)
+  const [importTarget, setImportTarget] = useState<File | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const fileInput = useRef<HTMLInputElement>(null)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -70,17 +73,38 @@ export default function MemoryManager({ inspectIds = [], auth }: { inspectIds?: 
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not delete memory. Please try again.') }
     finally { setSaving(false) }
   }
+  function selectDocument(file: File | undefined) {
+    setError(''); setNotice('')
+    if (!file) return
+    if (!/\.(txt|md)$/i.test(file.name)) { setError('Choose a .txt or .md document.'); if (fileInput.current) fileInput.current.value = ''; return }
+    if (file.size > 16 * 1024) { setError('The document exceeds the 16 KiB upload limit.'); if (fileInput.current) fileInput.current.value = ''; return }
+    setImportTarget(file)
+  }
+  async function confirmImport() {
+    if (!importTarget) return
+    setUploading(true); setError(''); setNotice('')
+    try {
+      await ingestDocument(importTarget, auth)
+      setNotice(`Imported ${importTarget.name} as one memory.`)
+      setImportTarget(null)
+      if (fileInput.current) fileInput.current.value = ''
+      await load(0)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not import the document. Please try again.')
+    } finally { setUploading(false) }
+  }
   function applyCategory(event: FormEvent) { event.preventDefault(); const category = categoryInput.trim(); if (categoryInput && !category) { setError('Category must not be blank.'); return }; setActiveSearch(''); setSearchInput(''); setCategoryFilter(category); void load(0, category, '') }
   function applySearch(event: FormEvent) { event.preventDefault(); if (!searchInput.trim()) { setError('Enter a search phrase.'); return }; setCategoryFilter(''); setCategoryInput(''); setActiveSearch(searchInput.trim()); void load(0, '', searchInput.trim()) }
 
   return <section className="memory-view" aria-labelledby="memory-heading">
     <header className="memory-header"><div><p className="memory-kicker">EXPLICITLY MANAGED</p><h1 id="memory-heading">Memory</h1><p>Inspect and manage saved reference records. Chat never creates memories automatically.</p></div><button type="button" className="memory-primary" onClick={beginCreate}>Add memory</button></header>
     <p className="memory-local-note" role="note">Single-owner local prototype: authentication is not PostgreSQL row-level security and does not make this safe for shared or public deployment.</p>
-    {error && <div className="memory-error" role="alert"><span>{error}</span><button type="button" onClick={() => void load()}>Retry</button></div>}
+    {error && !importTarget && <div className="memory-error" role="alert"><span>{error}</span><button type="button" onClick={() => void load()}>Retry</button></div>}
     {notice && <p className="memory-notice" role="status">{notice}</p>}
     {inspectIds.length > 0 && <p className="memory-stale" role="note">Current records for this response’s memory IDs are shown below when available. Records may have changed since that response; this is not a historical snapshot.</p>}
     {missingIds.length > 0 && <p className="memory-stale" role="status">Some referenced memories are no longer available: {missingIds.join(', ')}</p>}
     <div className="memory-columns"><section className="memory-panel" aria-label="Saved memories">
+      <div className="memory-tools"><label htmlFor="memory-document">Import one .txt or .md document (16 KiB maximum)</label><input ref={fileInput} id="memory-document" type="file" accept=".txt,.md,text/plain,text/markdown" disabled={uploading} onChange={(event) => selectDocument(event.currentTarget.files?.[0])} /></div>
       <div className="memory-tools"><form onSubmit={applySearch} className="memory-search"><label htmlFor="memory-search">Lexical search</label><div><input id="memory-search" value={searchInput} onChange={(e) => setSearchInput(e.target.value)} maxLength={200} /><button type="submit">Search</button></div></form>
       <form onSubmit={applyCategory} className="memory-search"><label htmlFor="memory-category">Exact category</label><div><input id="memory-category" value={categoryInput} onChange={(e) => setCategoryInput(e.target.value)} maxLength={80} /><button type="submit">Filter</button></div></form>
       {(activeSearch || categoryFilter) && <button className="memory-clear-filter" type="button" onClick={() => { setActiveSearch(''); setSearchInput(''); setCategoryFilter(''); setCategoryInput(''); void load(0, '', '') }}>Clear filters</button>}</div>
@@ -93,6 +117,15 @@ export default function MemoryManager({ inspectIds = [], auth }: { inspectIds?: 
       <label htmlFor="memory-source">Source reference <span>optional</span></label><input id="memory-source" value={form.source_reference} onChange={(e) => setForm({ ...form, source_reference: e.target.value })} maxLength={512} placeholder="e.g. a document or ticket" />
       <p className="memory-clear-help">Clear an optional field by leaving it empty when saving.</p><div className="memory-editor-actions"><button type="submit" className="memory-primary" disabled={saving}>{saving ? 'Saving…' : editingId ? 'Save changes' : 'Save memory'}</button>{editingId && <button type="button" onClick={beginCreate}>Cancel edit</button>}</div>
     </form></section></div>
+    {importTarget && <div className="memory-dialog-backdrop"><section className="memory-dialog" role="alertdialog" aria-modal="true" aria-labelledby="import-memory-title" aria-describedby="import-memory-description" onKeyDown={(event) => {
+      if (event.key === 'Escape' && !uploading) { event.preventDefault(); setImportTarget(null); if (fileInput.current) fileInput.current.value = ''; return }
+      if (event.key === 'Tab') {
+        const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')
+        const first = buttons[0], last = buttons[buttons.length - 1]
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
+      }
+    }}><h2 id="import-memory-title">Import this document?</h2><p id="import-memory-description">The selected file will be stored as one memory. Its contents are treated as untrusted reference text.</p><p><strong>{importTarget.name}</strong></p>{error && <p role="alert">{error}</p>}{uploading && <p role="status" aria-live="polite">Importing document…</p>}<div><button type="button" autoFocus onClick={() => { setImportTarget(null); if (fileInput.current) fileInput.current.value = '' }} disabled={uploading}>Cancel</button><button type="button" className="memory-primary" onClick={() => void confirmImport()} disabled={uploading}>{uploading ? 'Importing…' : 'Import document'}</button></div></section></div>}
     {deleteTarget && <div className="memory-dialog-backdrop"><section className="memory-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-memory-title" aria-describedby="delete-memory-description" onKeyDown={(event) => {
       if (event.key === 'Escape' && !saving) { event.preventDefault(); setDeleteTarget(null); return }
       if (event.key === 'Tab') {

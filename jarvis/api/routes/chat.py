@@ -8,7 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from starlette.concurrency import run_in_threadpool
 
-from jarvis.api.dependencies import authenticated_owner
+from jarvis.api.dependencies import authenticated_owner, enforce_capability
 from jarvis.models.schemas import ChatMemoryContext, ChatRequest, ChatResponse, ErrorResponse
 from jarvis.memory.base import MemoryDeadlineExceeded
 from jarvis.memory.retrieval import retrieve_context
@@ -19,6 +19,7 @@ from jarvis.orchestration.models import (
     RequestDeadlineExceeded,
 )
 from jarvis.persistence.base import ConversationNotFound, PersistenceError
+from jarvis.security.policy import Capability
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["chat"])
@@ -42,12 +43,19 @@ async def chat(
     response: Response,
     owner_id: UUID | None = Depends(authenticated_owner),
 ) -> ChatResponse:
+    enforce_capability(
+        request, owner_id, Capability.CHAT_ADVISORY, allow_stateless_chat=True
+    )
     if len(body.message) > request.app.state.settings.max_message_length:
         raise HTTPException(status_code=413, detail="Message exceeds the configured size limit.")
     context = RequestContext(message=body.message)
     deadline = monotonic() + request.app.state.settings.request_timeout_seconds
     response.headers["X-JARVIS-Execution-ID"] = context.execution_id
     repository = request.app.state.conversation_repository
+    if repository is not None:
+        enforce_capability(request, owner_id, Capability.CONVERSATION_WRITE)
+        if request.app.state.settings.memory_retrieval_enabled:
+            enforce_capability(request, owner_id, Capability.MEMORY_READ)
     if body.conversation_id is not None and repository is None:
         raise HTTPException(
             status_code=503,

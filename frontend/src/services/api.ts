@@ -1,4 +1,4 @@
-export interface ChatRequest { message: string }
+export interface ChatRequest { message: string; conversation_id?: string }
 
 export interface ChatMemoryContext {
   outcome: 'success' | 'empty' | 'fallback'
@@ -10,7 +10,38 @@ export interface ChatResponse {
   provider: string
   demo: boolean
   partial?: boolean
+  conversation_id?: string | null
   memory_context?: ChatMemoryContext | null
+}
+
+export interface ConversationSummary {
+  conversation_id: string
+  created_at: string
+  last_activity_at: string
+  preview: string | null
+}
+
+export interface ConversationPage {
+  items: ConversationSummary[]
+  limit: number
+  offset: number
+  has_more: boolean
+}
+
+export interface ConversationHistoryMessage {
+  id: string
+  conversation_id: string
+  sequence_number: number
+  role: 'user' | 'assistant'
+  content: string
+  created_at: string
+}
+
+export interface ConversationHistoryPage {
+  conversation_id: string
+  messages: ConversationHistoryMessage[]
+  has_more: boolean
+  next_before_sequence: number | null
 }
 
 export interface MemoryRecord {
@@ -36,15 +67,23 @@ export interface MemoryInput {
   source_reference: string | null
 }
 
+export type ReadinessComponentStatus = 'ready' | 'not_checked' | 'not_required' | 'unavailable'
+export interface ReadinessResponse {
+  status: 'ready' | 'degraded' | 'not_ready'
+  version: string
+  components: Record<string, ReadinessComponentStatus>
+}
+
 const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, '')
 const apiBaseUrl = configuredBaseUrl || '/api'
 
 export interface ApiAuth {
   token?: string
   onUnauthorized?: () => void
+  signal?: AbortSignal
 }
 
-async function request<T>(path: string, init?: RequestInit, allowChatValidation = false, auth: ApiAuth = {}): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, allowChatValidation = false, auth: ApiAuth = {}, allowNotReady = false): Promise<T> {
   let response: Response
   let requestUrl: URL
   try {
@@ -62,7 +101,7 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
       headers.set('Authorization', `Bearer ${auth.token}`)
     }
     response = await fetch(configuredBaseUrl ? requestUrl.href : `${apiBaseUrl}${path}`, {
-      ...init, headers, ...(auth.token ? { redirect: 'error' as RequestRedirect } : {}),
+      ...init, headers, ...(auth.signal ? { signal: auth.signal } : {}), ...(auth.token ? { redirect: 'error' as RequestRedirect } : {}),
     })
   } catch {
     throw new Error('Could not reach JARVIS. Check that the backend is running and try again.')
@@ -72,11 +111,16 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
     throw new Error('Workspace locked. Enter your local access token again.')
   }
   if (response.status === 204) return undefined as T
-  if (!response.ok) {
+  if (!response.ok && !(allowNotReady && response.status === 503)) {
     if (response.status === 503) {
+      if (path.startsWith('/conversations')) throw new Error('Saved conversations are disabled or unavailable. Enable local PostgreSQL persistence to use conversation history.')
       throw new Error('Memory storage is disabled or unavailable. Enable local PostgreSQL persistence to manage saved memories.')
     }
-    if (response.status === 404) throw new Error('That memory is no longer available. Refresh the list and try again.')
+    if (response.status === 404) {
+      if (path.startsWith('/conversations/')) throw new Error('That conversation is no longer available. Refresh the list and try again.')
+      throw new Error('That memory is no longer available. Refresh the list and try again.')
+    }
+    if (response.status === 413) throw new Error('The document exceeds the 16 KiB upload limit.')
     if (response.status === 422) {
       if (allowChatValidation) {
         try {
@@ -97,17 +141,50 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
   }
 }
 
+export async function getReadiness(auth?: ApiAuth): Promise<ReadinessResponse> {
+  const data = await request<ReadinessResponse>('/ready', undefined, false, auth, true)
+  const allowedStatuses = new Set(['ready', 'not_checked', 'not_required', 'unavailable'])
+  const requiredComponents = ['application', 'provider', 'orchestration', 'authorization', 'persistence']
+  if (!data || !['ready', 'degraded', 'not_ready'].includes(data.status)
+    || typeof data.version !== 'string'
+    || !data.components || typeof data.components !== 'object' || Array.isArray(data.components)
+    || requiredComponents.some((component) => !(component in data.components))
+    || Object.values(data.components).some((status) => !allowedStatuses.has(status))) {
+    throw new Error('JARVIS returned an unexpected readiness response.')
+  }
+  return data
+}
+
 const json = (body: unknown): RequestInit => ({
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 })
 
-export function sendChatMessage(message: string, auth?: ApiAuth): Promise<ChatResponse> {
-  return request<ChatResponse>('/chat', json({ message } satisfies ChatRequest), true, auth).then((data) => {
+export function sendChatMessage(message: string, auth?: ApiAuth, conversationId?: string): Promise<ChatResponse> {
+  const body: ChatRequest = conversationId ? { message, conversation_id: conversationId } : { message }
+  return request<ChatResponse>('/chat', json(body), true, auth).then((data) => {
     if (!data || typeof data.reply !== 'string' || typeof data.provider !== 'string' || typeof data.demo !== 'boolean') {
       throw new Error('JARVIS returned an unexpected response. Please try again.')
     }
     return data
   })
+}
+
+export function listConversations(options: { limit?: number; offset?: number } = {}, auth?: ApiAuth): Promise<ConversationPage> {
+  const query = new URLSearchParams()
+  query.set('limit', String(options.limit ?? 20))
+  query.set('offset', String(options.offset ?? 0))
+  return request<ConversationPage>(`/conversations?${query.toString()}`, undefined, false, auth)
+}
+
+export function getConversationMessages(
+  conversationId: string,
+  options: { limit?: number; beforeSequence?: number } = {},
+  auth?: ApiAuth,
+): Promise<ConversationHistoryPage> {
+  const query = new URLSearchParams()
+  query.set('limit', String(options.limit ?? 100))
+  if (options.beforeSequence !== undefined) query.set('before_sequence', String(options.beforeSequence))
+  return request<ConversationHistoryPage>(`/conversations/${encodeURIComponent(conversationId)}/messages?${query.toString()}`, undefined, false, auth)
 }
 
 export function listMemories(options: { limit?: number; offset?: number; category?: string } = {}, auth?: ApiAuth): Promise<MemoryPage> {
@@ -124,6 +201,19 @@ export function searchMemories(query: string, options: { limit?: number; offset?
 
 export function createMemory(input: MemoryInput, auth?: ApiAuth): Promise<MemoryRecord> {
   return request<MemoryRecord>('/memories', json(input), false, auth)
+}
+
+export function ingestDocument(file: File, auth?: ApiAuth): Promise<MemoryRecord> {
+  return request<MemoryRecord>('/memories/ingest', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      // Keep arbitrary Unicode filenames valid in an HTTP header. The server
+      // decodes this value, strips any path, and persists only the basename.
+      'X-Document-Filename': encodeURIComponent(file.name),
+    },
+    body: file,
+  }, false, auth)
 }
 
 export function updateMemory(id: string, input: Partial<MemoryInput>, auth?: ApiAuth): Promise<MemoryRecord> {

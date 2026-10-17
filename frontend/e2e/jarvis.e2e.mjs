@@ -1,0 +1,277 @@
+import { test as base, expect } from '@playwright/test'
+
+const syntheticToken = 'jarvis-e2e-synthetic-token-never-a-secret-0001'
+const conversationOne = '00000000-0000-4000-8000-000000000001'
+const conversationTwo = '00000000-0000-4000-8000-000000000002'
+
+const test = base.extend({
+  pageSafety: [async ({ page }, use) => {
+    const pageErrors = []
+    const externalOrigins = []
+    page.on('pageerror', (error) => pageErrors.push(error.name))
+    page.on('request', (request) => {
+      const url = new URL(request.url())
+      if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) {
+        externalOrigins.push(url.origin)
+      }
+    })
+    await use()
+    expect(pageErrors).toEqual([])
+    expect(externalOrigins).toEqual([])
+  }, { auto: true }],
+})
+
+test.beforeEach(async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: /good to have you here, ajay/i })).toBeVisible()
+})
+
+async function unlock(page) {
+  await page.getByRole('button', { name: /unlock to load saved conversations/i }).click()
+  await page.getByLabel('Local access token').fill(syntheticToken)
+  await page.getByRole('button', { name: 'Unlock', exact: true }).click()
+}
+
+function conversationSummary(id, preview, activity) {
+  return {
+    conversation_id: id,
+    created_at: '2026-01-01T00:00:00Z',
+    last_activity_at: activity,
+    preview,
+  }
+}
+
+function historyPage(id, userText, assistantText) {
+  return {
+    conversation_id: id,
+    messages: [
+      { id: `${id}-user`, conversation_id: id, sequence_number: 1, role: 'user', content: userText, created_at: '2026-01-01T00:00:00Z' },
+      { id: `${id}-assistant`, conversation_id: id, sequence_number: 2, role: 'assistant', content: assistantText, created_at: '2026-01-01T00:01:00Z' },
+    ],
+    has_more: false,
+    next_before_sequence: null,
+  }
+}
+
+async function fulfillConversationList(route, items, offset, hasMore = false) {
+  const authorization = await route.request().headerValue('authorization')
+  expect(typeof authorization === 'string' && authorization.startsWith('Bearer ')).toBe(true)
+  await route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ items, limit: 20, offset, has_more: hasMore }),
+  })
+}
+
+test('starts both local services and renders the application without page errors', async ({ page }) => {
+  await expect(page.getByLabel('Main navigation')).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Message JARVIS' })).toBeVisible()
+})
+
+test('supports anonymous deterministic mock chat without presenting it as persisted', async ({ page }) => {
+  const chatResponse = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/chat')
+  await page.getByRole('textbox', { name: 'Message JARVIS' }).fill('E2E offline check')
+  await page.getByRole('textbox', { name: 'Message JARVIS' }).press('Enter')
+
+  const response = await chatResponse
+  expect(response.status()).toBe(200)
+  const body = await response.json()
+  expect(body).toMatchObject({ provider: 'mock', demo: true, conversation_id: null })
+  await expect(page.getByText('This is a JARVIS demo response, not an AI-generated answer. I received: E2E offline check')).toBeVisible()
+  await expect(page.getByText('DEMO · MOCK').first()).toBeVisible()
+
+  await page.reload()
+  await expect(page.getByText('Your conversations will appear here.')).toBeVisible()
+  await expect(page.getByText('E2E offline check')).toHaveCount(0)
+})
+
+test('loads authenticated conversation pages and history, then sends a follow-up to the backend ID', async ({ page }) => {
+  let releaseFirstPage
+  let announceFirstPage
+  const firstPageGate = new Promise((resolve) => { releaseFirstPage = resolve })
+  const firstPageRequested = new Promise((resolve) => { announceFirstPage = resolve })
+
+  await page.route('**/api/conversations?*', async (route) => {
+    const url = new URL(route.request().url())
+    const offset = Number(url.searchParams.get('offset'))
+    if (offset === 0) {
+      announceFirstPage()
+      await firstPageGate
+      await fulfillConversationList(route, [conversationSummary(conversationOne, 'First saved question', '2026-01-02T00:00:00Z')], 0, true)
+      return
+    }
+    await fulfillConversationList(route, [conversationSummary(conversationTwo, 'Second saved question', '2026-01-01T00:00:00Z')], 20)
+  })
+  await page.route('**/api/conversations/*/messages?*', async (route) => {
+    expect(new URL(route.request().url()).pathname).toContain(conversationOne)
+    await route.fulfill({ json: historyPage(conversationOne, 'Original saved question', 'Earlier saved answer') })
+  })
+  await page.route('**/api/chat', async (route) => {
+    const body = route.request().postDataJSON()
+    expect(body).toMatchObject({ message: 'Continue saved conversation', conversation_id: conversationOne })
+    await route.fulfill({ json: { reply: 'Follow-up response', provider: 'mock', demo: true, conversation_id: conversationOne } })
+  })
+
+  await unlock(page)
+  await firstPageRequested
+  await expect(page.getByText('Loading saved conversations…')).toBeVisible()
+  releaseFirstPage()
+  await expect(page.getByTitle('First saved question')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Load more' }).click()
+  await expect(page.getByTitle('Second saved question')).toBeVisible()
+  await page.getByTitle('First saved question').click()
+  await expect(page.getByText('Original saved question')).toBeVisible()
+  await expect(page.getByText('Earlier saved answer')).toBeVisible()
+
+  await page.getByRole('textbox', { name: 'Message JARVIS' }).fill('Continue saved conversation')
+  await page.getByRole('button', { name: 'Send message' }).click()
+  await expect(page.getByText('Follow-up response')).toBeVisible()
+})
+
+test('renders the empty state after an authenticated empty conversation list', async ({ page }) => {
+  await page.route('**/api/conversations?*', (route) => fulfillConversationList(route, [], 0))
+  await unlock(page)
+  await expect(page.getByText('No saved conversations yet.')).toBeVisible()
+})
+
+test('locking clears the token, draft, selected conversation, and late history responses', async ({ page }) => {
+  let releaseHistory
+  let announceHistory
+  const historyGate = new Promise((resolve) => { releaseHistory = resolve })
+  const historyRequested = new Promise((resolve) => { announceHistory = resolve })
+
+  await page.route('**/api/conversations?*', (route) => fulfillConversationList(
+    route, [conversationSummary(conversationOne, 'Sensitive sidebar preview', '2026-01-02T00:00:00Z')], 0,
+  ))
+  await page.route('**/api/conversations/*/messages?*', async (route) => {
+    announceHistory()
+    await historyGate
+    try {
+      await route.fulfill({ json: historyPage(conversationOne, 'Sensitive old message', 'Late response content') })
+    } catch {
+      // Locking aborts the in-flight browser request; the stale result must not restore UI state.
+    }
+  })
+
+  await unlock(page)
+  await page.getByTitle('Sensitive sidebar preview').click()
+  await historyRequested
+  await page.getByRole('textbox', { name: 'Message JARVIS' }).fill('Draft to clear')
+  await page.getByRole('button', { name: 'Lock workspace' }).click()
+  await expect(page.getByRole('heading', { name: 'Unlock local workspace' })).toBeVisible()
+  await expect(page.getByLabel('Local access token')).toHaveValue('')
+  await expect(page.getByTitle('Sensitive sidebar preview')).toHaveCount(0)
+  await expect(page.getByText('Sensitive old message')).toHaveCount(0)
+  await expect(page.getByRole('textbox', { name: 'Message JARVIS' })).toHaveValue('')
+
+  releaseHistory()
+  await expect(page.getByText('Late response content')).toHaveCount(0)
+  await expect(page.getByTitle('Sensitive sidebar preview')).toHaveCount(0)
+})
+
+test('an HTTP 401 clears displayed conversation data and requires authentication again', async ({ page }) => {
+  await page.route('**/api/conversations?*', (route) => fulfillConversationList(
+    route, [conversationSummary(conversationOne, 'Protected preview', '2026-01-02T00:00:00Z')], 0,
+  ))
+  await page.route('**/api/conversations/*/messages?*', (route) => route.fulfill({
+    status: 401,
+    contentType: 'application/json',
+    headers: { 'WWW-Authenticate': 'Bearer' },
+    body: JSON.stringify({ error: 'unauthorized', detail: 'A valid bearer credential is required.' }),
+  }))
+
+  await unlock(page)
+  await page.getByTitle('Protected preview').click()
+  await expect(page.getByRole('heading', { name: 'Unlock local workspace' })).toBeVisible()
+  await expect(page.getByLabel('Local access token')).toHaveValue('')
+  await expect(page.getByTitle('Protected preview')).toHaveCount(0)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+})
+
+test('a stale response for one conversation cannot replace the newly selected conversation', async ({ page }) => {
+  let releaseFirstHistory
+  let announceFirstHistory
+  const firstHistoryGate = new Promise((resolve) => { releaseFirstHistory = resolve })
+  const firstHistoryRequested = new Promise((resolve) => { announceFirstHistory = resolve })
+
+  await page.route('**/api/conversations?*', (route) => fulfillConversationList(route, [
+    conversationSummary(conversationOne, 'Conversation A', '2026-01-02T00:00:00Z'),
+    conversationSummary(conversationTwo, 'Conversation B', '2026-01-01T00:00:00Z'),
+  ], 0))
+  await page.route('**/api/conversations/*/messages?*', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path.includes(conversationOne)) {
+      announceFirstHistory()
+      await firstHistoryGate
+      await route.fulfill({ json: historyPage(conversationOne, 'Conversation A private body', 'Conversation A response') })
+      return
+    }
+    await route.fulfill({ json: historyPage(conversationTwo, 'Conversation B private body', 'Conversation B response') })
+  })
+
+  await unlock(page)
+  await page.getByTitle('Conversation A').click()
+  await firstHistoryRequested
+  await page.getByTitle('Conversation B').click()
+  await expect(page.getByText('Conversation B private body')).toBeVisible()
+  await expect(page.getByText('Conversation B response')).toBeVisible()
+  releaseFirstHistory()
+  await expect(page.getByText('Conversation A private body')).toHaveCount(0)
+  await expect(page.getByText('Conversation B private body')).toBeVisible()
+})
+
+test('shows safe missing-conversation and provider errors, with only explicit manual retry', async ({ page }) => {
+  let chatCalls = 0
+  await page.route('**/api/conversations?*', (route) => fulfillConversationList(
+    route, [conversationSummary(conversationOne, 'Conversation no longer present', '2026-01-02T00:00:00Z')], 0,
+  ))
+  await page.route('**/api/conversations/*/messages?*', (route) => route.fulfill({
+    status: 404,
+    contentType: 'application/json',
+    body: JSON.stringify({ error: 'conversation_not_found', detail: 'The requested conversation was not found.' }),
+  }))
+  await page.route('**/api/chat', async (route) => {
+    chatCalls += 1
+    if (chatCalls === 1) {
+      await route.fulfill({
+        status: 502,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'provider_error', detail: 'private internal diagnostic' }),
+      })
+      return
+    }
+    await route.fulfill({ json: { reply: 'Manual retry succeeded', provider: 'mock', demo: true, conversation_id: null } })
+  })
+
+  await unlock(page)
+  await page.getByTitle('Conversation no longer present').click()
+  await expect(page.getByRole('alert')).toHaveText(/conversation is no longer available/i)
+  await expect(page.getByText(/private internal diagnostic|sql|password/i)).toHaveCount(0)
+
+  await page.getByRole('button', { name: 'New conversation' }).click()
+  await page.getByRole('textbox', { name: 'Message JARVIS' }).fill('Check manual retry')
+  await page.getByRole('button', { name: 'Send message' }).click()
+  await expect(page.getByText('JARVIS could not complete that request. Please try again.')).toBeVisible()
+  await expect(page.getByText(/manual retry may duplicate this exchange/i)).toBeVisible()
+  await expect(page.getByText(/private internal diagnostic/i)).toHaveCount(0)
+  expect(chatCalls).toBe(1)
+
+  await page.getByRole('button', { name: 'Try again' }).click()
+  await expect(page.getByText('Manual retry succeeded')).toBeVisible()
+  expect(chatCalls).toBe(2)
+})
+
+test('keeps memory management and document-ingestion confirmation accessible', async ({ page }) => {
+  await page.getByRole('button', { name: 'Memory' }).click()
+  await expect(page.getByRole('heading', { name: 'Memory', exact: true })).toBeVisible()
+  const fileInput = page.getByLabel('Import one .txt or .md document (16 KiB maximum)')
+  await expect(fileInput).toBeVisible()
+  await fileInput.setInputFiles({ name: 'e2e-reference.md', mimeType: 'text/markdown', buffer: Buffer.from('Synthetic untrusted document text.') })
+
+  const confirmation = page.getByRole('alertdialog', { name: 'Import this document?' })
+  await expect(confirmation).toBeVisible()
+  await expect(confirmation).toContainText('e2e-reference.md')
+  await page.getByRole('button', { name: 'Cancel' }).click()
+  await expect(confirmation).toHaveCount(0)
+})

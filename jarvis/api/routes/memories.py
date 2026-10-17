@@ -2,15 +2,21 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from starlette.concurrency import run_in_threadpool
 
-from jarvis.api.dependencies import authenticated_owner
+from jarvis.api.dependencies import authenticated_owner, enforce_capability
 from jarvis.memory.base import MemoryPersistenceError, MemoryRepository
+from jarvis.memory.ingestion import (
+    MAX_DOCUMENT_BYTES,
+    DocumentValidationError,
+    validate_document,
+)
 from jarvis.memory.models import (
     MemoryCreate, MemoryPage, MemoryRecord, MemorySearchRequest, MemoryUpdate,
 )
 from jarvis.models.schemas import ErrorResponse
+from jarvis.security.policy import Capability
 
 router = APIRouter(prefix="/memories", tags=["memories"])
 
@@ -47,9 +53,50 @@ async def create_memory(
 ) -> MemoryRecord:
     repository = _repository(request)
     owner_id = _owner(owner_id)
+    enforce_capability(request, owner_id, Capability.MEMORY_WRITE)
     try:
         return await run_in_threadpool(
             repository.create, owner_id, body.content, body.category, body.source_reference
+        )
+    except MemoryPersistenceError as exc:
+        raise _unavailable() from exc
+
+
+@router.post(
+    "/ingest",
+    response_model=MemoryRecord,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        413: {"model": ErrorResponse, "description": "Document exceeds an upload limit"},
+        503: {"model": ErrorResponse, "description": "Memory persistence unavailable"},
+    },
+)
+async def ingest_document(
+    request: Request,
+    filename: str = Header(alias="X-Document-Filename"),
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> MemoryRecord:
+    """Import one bounded plain-text document as one explicitly owned memory."""
+    repository = _repository(request)
+    owner_id = _owner(owner_id)
+    enforce_capability(request, owner_id, Capability.MEMORY_WRITE)
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/octet-stream":
+        raise HTTPException(status_code=422, detail="Document upload must use application/octet-stream.")
+
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > MAX_DOCUMENT_BYTES:
+            raise HTTPException(status_code=413, detail="Document exceeds the 16 KiB upload limit.")
+        raw.extend(chunk)
+
+    try:
+        document = validate_document(filename, bytes(raw))
+    except DocumentValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.public_message) from exc
+
+    try:
+        return await run_in_threadpool(
+            repository.create, owner_id, document.content, None, document.filename
         )
     except MemoryPersistenceError as exc:
         raise _unavailable() from exc
@@ -63,6 +110,7 @@ async def search_memories(
 ) -> MemoryPage:
     repository = _repository(request)
     owner_id = _owner(owner_id)
+    enforce_capability(request, owner_id, Capability.MEMORY_READ)
     try:
         return await run_in_threadpool(
             repository.search, owner_id, body.query, limit=body.limit, offset=body.offset
@@ -83,6 +131,7 @@ async def list_memories(
         raise HTTPException(status_code=422, detail="Category must not be blank.")
     repository = _repository(request)
     owner_id = _owner(owner_id)
+    enforce_capability(request, owner_id, Capability.MEMORY_READ)
     try:
         return await run_in_threadpool(repository.list, owner_id, limit=limit, offset=offset, category=category)
     except MemoryPersistenceError as exc:
@@ -102,6 +151,7 @@ async def get_memory(
 ) -> MemoryRecord:
     repository = _repository(request)
     owner_id = _owner(owner_id)
+    enforce_capability(request, owner_id, Capability.MEMORY_READ)
     try:
         memory = await run_in_threadpool(repository.get, owner_id, memory_id)
     except MemoryPersistenceError as exc:
@@ -124,6 +174,7 @@ async def update_memory(
 ) -> MemoryRecord:
     repository = _repository(request)
     owner_id = _owner(owner_id)
+    enforce_capability(request, owner_id, Capability.MEMORY_WRITE)
     try:
         memory = await run_in_threadpool(repository.update, owner_id, memory_id, body)
     except MemoryPersistenceError as exc:
@@ -146,6 +197,7 @@ async def delete_memory(
 ) -> Response:
     repository = _repository(request)
     owner_id = _owner(owner_id)
+    enforce_capability(request, owner_id, Capability.MEMORY_WRITE)
     try:
         deleted = await run_in_threadpool(repository.delete, owner_id, memory_id)
     except MemoryPersistenceError as exc:

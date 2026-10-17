@@ -5,6 +5,14 @@ from time import monotonic
 from typing import Callable
 from uuid import UUID, uuid4
 
+from jarvis.models.schemas import (
+    CONVERSATION_LIST_DEFAULT_LIMIT,
+    CONVERSATION_LIST_MAX_LIMIT,
+    CONVERSATION_LIST_MAX_OFFSET,
+    CONVERSATION_PREVIEW_MAX_LENGTH,
+    ConversationListResponse,
+    ConversationSummary,
+)
 from jarvis.persistence.base import (
     ConversationMessage, ConversationNotFound, MessageRole, PersistenceError,
 )
@@ -146,6 +154,79 @@ class PostgresConversationRepository:
             return messages
         except ConversationNotFound:
             raise
+        except Exception as exc:
+            raise PersistenceError() from exc
+
+    def list_conversations(
+        self,
+        *,
+        limit: int = CONVERSATION_LIST_DEFAULT_LIMIT,
+        offset: int = 0,
+    ) -> ConversationListResponse:
+        """Return a deterministic, bounded page without exposing full message text."""
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= CONVERSATION_LIST_MAX_LIMIT
+        ):
+            raise ValueError(
+                f"limit must be between 1 and {CONVERSATION_LIST_MAX_LIMIT}."
+            )
+        if (
+            isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or not 0 <= offset <= CONVERSATION_LIST_MAX_OFFSET
+        ):
+            raise ValueError(
+                f"offset must be between 0 and {CONVERSATION_LIST_MAX_OFFSET}."
+            )
+
+        deadline = operation_deadline(self._operation_timeout_seconds, clock=monotonic)
+        query = """SELECT c.id, c.created_at,
+                          COALESCE(activity.last_activity_at, c.created_at) AS last_activity_at,
+                          first_user.preview
+                   FROM jarvis_app.conversations AS c
+                   LEFT JOIN (
+                       SELECT conversation_id, MAX(created_at) AS last_activity_at
+                       FROM jarvis_app.messages
+                       GROUP BY conversation_id
+                   ) AS activity ON activity.conversation_id = c.id
+                   LEFT JOIN LATERAL (
+                       SELECT LEFT(m.content, 121) AS preview
+                       FROM jarvis_app.messages AS m
+                       WHERE m.conversation_id = c.id AND m.role = 'user'
+                       ORDER BY m.sequence_number ASC, m.id ASC
+                       LIMIT 1
+                   ) AS first_user ON TRUE
+                   ORDER BY last_activity_at DESC, c.id DESC
+                   LIMIT %s OFFSET %s"""
+        try:
+            with self._open_connection(deadline) as connection:
+                rows = execute_with_deadline(
+                    connection,
+                    deadline,
+                    query,
+                    (limit + 1, offset),
+                    clock=monotonic,
+                ).fetchall()
+
+            has_more = len(rows) > limit
+            items = []
+            for row in rows[:limit]:
+                preview = row[3]
+                if preview is not None and len(preview) > CONVERSATION_PREVIEW_MAX_LENGTH:
+                    preview = preview[: CONVERSATION_PREVIEW_MAX_LENGTH - 1] + "…"
+                items.append(
+                    ConversationSummary(
+                        conversation_id=row[0],
+                        created_at=row[1],
+                        last_activity_at=row[2],
+                        preview=preview,
+                    )
+                )
+            return ConversationListResponse(
+                items=items, limit=limit, offset=offset, has_more=has_more
+            )
         except Exception as exc:
             raise PersistenceError() from exc
 

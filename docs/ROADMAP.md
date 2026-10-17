@@ -133,6 +133,17 @@ Verification results supplied by the repository operator (not rerun during the d
 - The candidate regressed the Stage 1 `common` query's expected top-five order. It is therefore not adopted, despite clearing the length-sensitive MRR threshold. Production ranking SQL remains unchanged.
 - These controlled synthetic results demonstrate behavior only for the defined corpus and queries; they do not establish general retrieval quality or justify semantic search. No schema, migration, dependency, API, frontend, or production ranking change is included.
 
+## Core v1.7 — Bounded document ingestion (implemented; latest live result operator-reported)
+
+- Add an explicit, authenticated single-file import for `.txt` and `.md`, creating one existing owner-scoped memory record per upload with a sanitized basename source reference.
+- Bound raw input to 16 KiB and decoded UTF-8 content to 4,000 characters; strip one leading BOM and reject malformed encoding, NUL, blank text, and unsupported extensions before persistence.
+- Require the user to confirm the visible filename before browser upload. Store/display content as plain text; do not interpret Markdown, follow links, or execute embedded material.
+- Preserve retrieval opt-in/default-off behavior, five-record maximum, existing lexical ranking, deadlines, fallback and untrusted-context framing. No migration, chunking, embeddings, semantic search, or automatic extraction is part of this increment.
+- Earlier implementation verification (operator-reported): 245 Python tests passed, compileall passed, 33 frontend tests passed, and the frontend build passed. This is an earlier snapshot, not the latest offline result.
+- Earlier live PostgreSQL verification (operator-reported): 20 passed, 0 failed, with cleanup-verification code present. That run predates the later filename-validation and documentation fixes and does not verify the latest working tree. It covers successful post-drop absence verification, not every possible cleanup failure scenario.
+- Later verification after the filename-validation and documentation fixes (operator-reported): the full Python suite passed 250 tests; compileall and `git diff --check` passed. PostgreSQL integration tests were not rerun after those fixes. These results were not independently reproduced during the current documentation update.
+- Follow-up verification run during the Windows drive-relative filename fix: 21 ingestion unit tests, 12 focused API tests (31 deselected), and the full Python suite (252 passed, one existing Starlette/httpx deprecation warning) passed. Compileall and `git diff --check` passed. PostgreSQL integration tests were not rerun after this latest filename fix; frontend tests/build were not rerun because frontend files were unchanged.
+
 ## Core v0.9 — Persistent Memory and Retrieval Foundation (implemented; verified locally)
 
 - Add an incremental PostgreSQL memory migration and a separate memory repository protocol/adapter. Memory content is strictly bounded, explicitly created/updated/deleted, and never copied automatically from chat messages.
@@ -142,6 +153,54 @@ Verification results supplied by the repository operator (not rerun during the d
 - Document that the memory API is global and unauthenticated and must not be exposed to untrusted/shared deployments; UUIDs do not grant ownership or authorization.
 
 Verification on Windows/Python 3.12.10: 143 default Python tests and 13 focused memory tests passed; the opt-in PostgreSQL integration suite passed 12/12 (5 URL checks and 7 live PostgreSQL cases); compileall, 16 frontend tests, the production build, and `git diff --check` passed. Live OpenAI behavior and semantic quality remain unverified. The milestone adds no account/ownership model, embedding generation, pgvector, automatic memory extraction, retention scheduler, memory audit history, or authentication/ownership controls.
+
+## Core v1.8 — Centralized authorization policy foundation (implemented)
+
+- Add a server-side allowlist for advisory chat, memory read/write, and conversation read/write, applied after the existing single-owner bearer authentication. Analysis and recommendation classifier labels are not distinct security grants.
+- Preserve unauthenticated stateless mock chat only while persistence is disabled. Missing owner/policy decisions and unknown capabilities are denied; external action execution is never granted.
+- Keep memory owner predicates, the empty tool registry, and `execution_enabled=False`. Prompts, model output, plans, and tool metadata cannot authorize operations.
+- Approval records/API/UI, `workflow.preview`, migrations, multi-user roles, and external-action execution remain deferred because no typed workflow operation currently exists to approve.
+
+## Core v1.9 — Integration, security, and workflow verification (implemented; independent report recommends acceptance)
+
+- Require the existing configured bearer identity for `/chat` whenever the trusted server-side provider is non-demo, even when persistence is disabled. Preserve anonymous stateless mock chat and all persistence-backed authentication and owner checks.
+- Add route-level denial regression tests for every memory read/write API operation and a deterministic API workflow covering authenticated document ingestion, owner-scoped lexical search, memory context passed into orchestration/provider execution, and chronological conversation history.
+- Extend the opt-in PostgreSQL fixture with read-only reporting for pre-existing generated test databases. Active connections are reported as active; connection-free entries are reported as stale-uncertain. The fixture never automatically deletes pre-existing databases because the available metadata cannot prove staleness or exclude an active process between connections.
+- Preserve advisory-only behavior, the empty tool registry, `execution_enabled=False`, retrieval defaults/limits, and current APIs. A supplied independent report recommends acceptance; live-provider behavior remains unverified.
+
+## Core v2.0 — Integrated local platform (Phases 1–6 implemented; final acceptance pending)
+
+- **Phase 1 — Conversation summary contract and repository:** independently reviewed. Reuses the existing schema and persistence model; no migration was added.
+- **Phase 2 — Authenticated conversation-list API:** independently reviewed. `GET /conversations` requires the existing bearer identity and `conversation.read`; limit defaults to 20 (1–100), offset defaults to 0 (0–1,000,000), and the repository supplies `has_more`. Ordering is `last_activity_at DESC, conversation_id DESC`; previews are nullable and at most 120 Unicode characters, sourced from the first user message.
+- **Phase 3 — PostgreSQL integration verification:** test implementation and safety review are recorded. Latest live result is owner-reported: the project owner manually ran the suite in PowerShell and reported **27 passed, 1 warning in 25.73 seconds**. The warning was a `StarletteDeprecationWarning` concerning `httpx` and `starlette.testclient`, not a test failure. The final read-only Codex review did not rerun the tests; this is owner-provided execution evidence, not an independently reproduced result from that review. The supplied result does not independently establish post-run database absence. Do not treat a code review or browser interception as live database verification.
+- **Phase 4 — Frontend conversation integration:** independent audit reported PASS. The client lists/reopens saved conversations, navigates bounded pages, loads history for display, and clears credentials and sensitive in-memory state on lock or HTTP 401. It does not inject history into provider prompts.
+- **Phase 5 — Playwright browser smoke tests:** independent audit reported PASS WITH FINDINGS; the recorded suite has nine scenarios. It uses local loopback services and the mock provider. Synthetic intercepted conversation API responses test UI behavior only and do not prove persisted database behavior.
+- **Phase 6 — Documentation and final regression:** this handoff records the current implementation and verification. Final v2.0 acceptance remains pending project-owner review and the stated cleanup-evidence limitation.
+
+Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remains single-owner and advisory-only; `tools.json` is empty and `execution_enabled=False`. No approval workflow, external-action executor, multi-user authorization, or production-readiness claim is included.
+
+## Core v2.1 — Reliability and operational readiness (implementation in progress; verification blocked in this environment)
+
+- Improve operational diagnostics without changing the modular-monolith architecture or exposing sensitive configuration.
+- Keep `/health` as process liveness. `/ready` distinguishes initialized components (`ready`), configured remote dependencies not probed (`not_checked`), dependencies not needed in the current mode (`not_required`), and missing required wiring (`unavailable`). Aggregate status is `ready`, `degraded`, or `not_ready`; only missing required in-process wiring yields sanitized HTTP 503. Readiness performs no provider or database network requests.
+- Treat intentionally disabled persistence as `not_required`. Enabled PostgreSQL persistence and configured remote model providers remain `not_checked` until a separate bounded diagnostic or real operation supplies reachability evidence.
+- Preserve authentication, capability enforcement, mock mode, provider selection, owner isolation, bounded execution, and disabled tool/action execution.
+- Add focused pure unit coverage for ready, incomplete, optional dependency not-checked, and persistence-not-required states, plus HTTP contract regression coverage. The frontend status view must reflect `/ready`, bound request duration, expose manual refresh, and show loading, degraded, unavailable, timeout, and not-ready states without polling.
+- v2.1 is not complete until verification is repeated in an environment that permits the Windows loopback sockets required by the current TestClient/Uvicorn setup. The current restricted execution result and the separate PostgreSQL/browser verification limits are recorded in `docs/HANDOFF.md`.
+
+## Repository Intelligence and Coding Diagnostics (implemented)
+
+- Add a secure, bounded, read-only repository intelligence subsystem (`jarvis/repo/`) for Project JARVIS.
+- Implement bounded repository inventory (`jarvis/repo/inventory.py`): structure, language detection, manifest recognition, entry points, and test directories with strict ignore rules.
+- Implement bounded text, regular expression, and AST symbol search (`jarvis/repo/search.py`): classes, functions, async functions, route handlers, and constants with line numbers and context lines.
+- Implement strictly read-only Git intelligence (`jarvis/repo/git_intel.py`): branch, HEAD commit, working-tree status (modified, staged, unstaged, untracked), diff summaries, changed modules, and affected test mappings.
+- Implement multi-pattern secret redaction (`jarvis/repo/secret_redactor.py`): redacts API keys (OpenAI, Anthropic), GitHub tokens, AWS keys, database URL passwords, Bearer tokens, and configuration passwords.
+- Implement static configuration and dependency discovery (`jarvis/repo/config_discovery.py`): parses `pyproject.toml`, `package.json`, and discovers declared environment variable names without exposing `.env` secret values.
+- Implement test and build discovery (`jarvis/repo/test_discovery.py`): test frameworks (`pytest`, `vitest`, `playwright`), test files, test commands, and module-to-test mappings.
+- Implement evidence-based diagnostic report generation (`jarvis/repo/diagnostics.py`): separates confirmed facts from hypotheses with explicit confirmation needed and human-executable suggested commands.
+- Implement strict path traversal and boundary security (`jarvis/repo/path_security.py`): prevents directory traversal, absolute path escapes, Windows alternate data streams, drive-relative paths, and external symlinks.
+- Expose authenticated, read-only API endpoints under `/repo` (`/inventory`, `/search`, `/symbols`, `/git`, `/config`, `/tests`, `/diagnostics`) requiring bearer authentication and `Capability.REPO_READ`.
+- The subsystem is strictly read-only, does not execute arbitrary code, does not modify files, does not change Git state, and keeps `execution_enabled=False`.
 
 ## Later milestones
 

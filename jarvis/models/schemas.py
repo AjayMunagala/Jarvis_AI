@@ -35,6 +35,34 @@ class ConversationHistoryResponse(BaseModel):
     next_before_sequence: int | None = None
 
 
+CONVERSATION_LIST_DEFAULT_LIMIT = 20
+CONVERSATION_LIST_MAX_LIMIT = 100
+CONVERSATION_LIST_MAX_OFFSET = 1_000_000
+CONVERSATION_PREVIEW_MAX_LENGTH = 120
+
+
+class ConversationSummary(BaseModel):
+    """Bounded metadata for one persisted conversation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    conversation_id: UUID
+    created_at: datetime
+    last_activity_at: datetime
+    preview: str | None = Field(default=None, max_length=CONVERSATION_PREVIEW_MAX_LENGTH)
+
+
+class ConversationListResponse(BaseModel):
+    """One bounded page of conversation summaries."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    items: list[ConversationSummary]
+    limit: int = Field(ge=1, le=CONVERSATION_LIST_MAX_LIMIT)
+    offset: int = Field(ge=0, le=CONVERSATION_LIST_MAX_OFFSET)
+    has_more: bool
+
+
 class HistoryMessage(BaseModel):
     id: UUID
     conversation_id: UUID
@@ -49,6 +77,30 @@ class HealthResponse(BaseModel):
     version: str
 
 
+class ReadinessResponse(BaseModel):
+    status: Literal["ready", "degraded", "not_ready"]
+    version: str
+    components: dict[str, Literal["ready", "not_checked", "not_required", "unavailable"]]
+
+
 class ErrorResponse(BaseModel):
     error: str
     detail: str
+
+
+class RepoSearchRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    query: str = Field(min_length=1, max_length=500)
+    search_type: Literal["text", "filename", "symbol"] = "text"
+    is_regex: bool = False
+    case_sensitive: bool = False
+    path_filter: str | None = Field(default=None, max_length=255)
+    max_results: int = Field(default=50, ge=1, le=200)
+
+
+class RepoDiagnosticRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    query: str = Field(min_length=1, max_length=2000)
+    target_files: list[str] | None = Field(default=None, max_length=50)

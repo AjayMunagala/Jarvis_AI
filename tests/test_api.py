@@ -28,14 +28,33 @@ def persistent_client(app, **options):
 
 
 def client(provider=None, **overrides):
-    settings = Settings(environment="test", **overrides)
-    return TestClient(create_app(settings=settings, provider=provider))
+    settings_values = {}
+    headers = {}
+    if provider is not None and getattr(provider, "is_demo", False) is not True:
+        from pydantic import SecretStr
+        settings_values.update(
+            local_auth_token=SecretStr(TEST_AUTH_TOKEN),
+            owner_id=TEST_OWNER_ID,
+        )
+        headers = AUTH_HEADERS
+    settings = Settings(environment="test", **settings_values, **overrides)
+    return TestClient(create_app(settings=settings, provider=provider), headers=headers)
 
 
 def test_health_and_readiness_include_version():
     with client() as test_client:
         assert test_client.get("/health").json() == {"status": "ok", "version": "0.1.0"}
-        assert test_client.get("/ready").json() == {"status": "ready", "version": "0.1.0"}
+        assert test_client.get("/ready").json() == {
+            "status": "ready",
+            "version": "0.1.0",
+            "components": {
+                "application": "ready",
+                "provider": "ready",
+                "orchestration": "ready",
+                "authorization": "ready",
+                "persistence": "not_required",
+            },
+        }
 
 
 def test_demo_chat_returns_clear_structured_response():
@@ -164,6 +183,149 @@ def test_history_is_unavailable_when_persistence_is_disabled():
     }
 
 
+def test_conversation_list_returns_authenticated_bounded_page_without_logging_previews(caplog):
+    from jarvis.models.schemas import ConversationListResponse, ConversationSummary
+    from jarvis.security.policy import Capability, CapabilityPolicy
+
+    created_at = datetime(2026, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
+    activity_at = datetime(2026, 2, 4, 5, 6, 7, tzinfo=timezone.utc)
+    conversation_id = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    private_preview = "do-not-log-conversation-preview"
+
+    class Repository:
+        def __init__(self):
+            self.calls = []
+
+        def list_conversations(self, *, limit=20, offset=0):
+            self.calls.append((limit, offset))
+            return ConversationListResponse(
+                items=[ConversationSummary(
+                    conversation_id=conversation_id,
+                    created_at=created_at,
+                    last_activity_at=activity_at,
+                    preview=private_preview,
+                )],
+                limit=limit,
+                offset=offset,
+                has_more=True,
+            )
+
+    class RecordingPolicy(CapabilityPolicy):
+        def __init__(self):
+            super().__init__(TEST_OWNER_ID)
+            self.calls = []
+
+        def allows(self, owner_id, capability, **kwargs):
+            self.calls.append((owner_id, capability))
+            return super().allows(owner_id, capability, **kwargs)
+
+    repository = Repository()
+    policy = RecordingPolicy()
+    app = create_app(settings=persistent_settings())
+    app.state.conversation_repository = repository
+    app.state.authorization_policy = policy
+    with caplog.at_level("INFO", logger="jarvis"):
+        with persistent_client(app) as test_client:
+            response = test_client.get("/conversations")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [{
+            "conversation_id": str(conversation_id),
+            "created_at": "2026-02-03T04:05:06Z",
+            "last_activity_at": "2026-02-04T05:06:07Z",
+            "preview": private_preview,
+        }],
+        "limit": 20,
+        "offset": 0,
+        "has_more": True,
+    }
+    assert repository.calls == [(20, 0)]
+    assert policy.calls == [(TEST_OWNER_ID, Capability.CONVERSATION_READ)]
+    assert private_preview not in caplog.text
+
+
+def test_conversation_list_uses_custom_pagination_and_empty_result():
+    from jarvis.models.schemas import ConversationListResponse
+
+    class Repository:
+        def __init__(self):
+            self.calls = []
+
+        def list_conversations(self, *, limit=20, offset=0):
+            self.calls.append((limit, offset))
+            return ConversationListResponse(
+                items=[], limit=limit, offset=offset, has_more=False
+            )
+
+    repository = Repository()
+    app = create_app(settings=persistent_settings())
+    app.state.conversation_repository = repository
+    with persistent_client(app) as test_client:
+        response = test_client.get("/conversations?limit=7&offset=13")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [], "limit": 7, "offset": 13, "has_more": False,
+    }
+    assert repository.calls == [(7, 13)]
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_detail"),
+    [
+        ("limit=0", "The request body is invalid."),
+        ("limit=101", "The request body is invalid."),
+        ("offset=-1", "The request body is invalid."),
+        ("offset=1000001", "The request body is invalid."),
+    ],
+)
+def test_conversation_list_rejects_out_of_range_pagination(query, expected_detail):
+    class Repository:
+        def list_conversations(self, **_kwargs):
+            raise AssertionError("Invalid pagination must not reach persistence")
+
+    app = create_app(settings=persistent_settings())
+    app.state.conversation_repository = Repository()
+    with persistent_client(app) as test_client:
+        response = test_client.get(f"/conversations?{query}")
+
+    assert response.status_code == 422
+    assert response.json() == {"error": "invalid_request", "detail": expected_detail}
+
+
+def test_conversation_list_is_unavailable_when_persistence_is_disabled():
+    with client() as test_client:
+        response = test_client.get("/conversations")
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "persistence_unavailable",
+        "detail": "Conversation persistence is not enabled.",
+    }
+
+
+def test_conversation_list_sanitizes_persistence_failures(caplog):
+    from jarvis.persistence.base import PersistenceError
+
+    class Repository:
+        def list_conversations(self, **_kwargs):
+            raise PersistenceError() from RuntimeError("private SQL and credential details")
+
+    app = create_app(settings=persistent_settings())
+    app.state.conversation_repository = Repository()
+    with caplog.at_level("ERROR", logger="jarvis"):
+        with persistent_client(app) as test_client:
+            response = test_client.get("/conversations")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "persistence_unavailable",
+        "detail": "Conversation list is unavailable.",
+    }
+    assert "private SQL" not in response.text
+    assert "credential details" not in caplog.text
+
+
 @pytest.mark.parametrize(
     ("failure", "status", "error_code"),
     [
@@ -198,6 +360,151 @@ def test_chat_cannot_continue_conversation_when_persistence_is_disabled():
     assert response.status_code == 503
     assert response.json()["error"] == "persistence_unavailable"
     assert response.headers["x-jarvis-execution-id"]
+
+
+def test_document_ingestion_creates_one_owner_scoped_memory_with_sanitized_basename():
+    from jarvis.memory.models import MemoryRecord
+
+    class MemoryRepository:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, owner_id, content, category=None, source_reference=None):
+            self.calls.append((owner_id, content, category, source_reference))
+            return MemoryRecord(
+                id=uuid4(), content=content, category=category,
+                source_reference=source_reference,
+                created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+            )
+
+    repository = MemoryRepository()
+    app = create_app(settings=persistent_settings())
+    app.state.memory_repository = repository
+    with persistent_client(app) as test_client:
+        response = test_client.post(
+            "/memories/ingest",
+            content=b"Project notes",
+            headers={"Content-Type": "application/octet-stream", "X-Document-Filename": r"C:\\Users\\private\\notes.MD"},
+        )
+
+    assert response.status_code == 201
+    assert response.json()["content"] == "Project notes"
+    assert response.json()["source_reference"] == "notes.MD"
+    assert repository.calls == [(TEST_OWNER_ID, "Project notes", None, "notes.MD")]
+    assert "C:\\Users" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("filename", "body", "status_code", "declared_length"),
+    [
+        ("notes.pdf", b"not imported", 422, None),
+        ("notes.txt", b"\xff", 422, None),
+        ("notes.txt", b"\x00text", 422, None),
+        ("notes.txt", b"   \n", 422, None),
+        ("bad%C2%85name.md", b"content", 422, None),
+        ("C:notes.md", b"content", 422, None),
+        ("notes.txt", b"x" * 4001, 422, None),
+        # A deliberately understated Content-Length cannot bypass stream counting.
+        ("notes.txt", b"x" * (16 * 1024 + 1), 413, "1"),
+    ],
+)
+def test_document_ingestion_rejects_invalid_input_before_persistence(filename, body, status_code, declared_length):
+    class MemoryRepository:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            raise AssertionError("Invalid documents must not be persisted")
+
+    repository = MemoryRepository()
+    app = create_app(settings=persistent_settings())
+    app.state.memory_repository = repository
+    with persistent_client(app) as test_client:
+        headers = {"Content-Type": "application/octet-stream", "X-Document-Filename": filename}
+        if declared_length is not None:
+            headers["Content-Length"] = declared_length
+        response = test_client.post(
+            "/memories/ingest",
+            content=body,
+            headers=headers,
+        )
+    assert response.status_code == status_code
+    assert response.json()["error"] in {"http_error", "request_too_large"}
+    assert repository.calls == []
+    decoded_sample = body[:32].decode("utf-8", errors="ignore")
+    if decoded_sample:
+        assert decoded_sample not in response.text
+
+
+def test_document_ingestion_rejects_oversized_stream_without_content_length():
+    class MemoryRepository:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            raise AssertionError("Oversized documents must not be persisted")
+
+    repository = MemoryRepository()
+    app = create_app(settings=persistent_settings())
+    app.state.memory_repository = repository
+
+    def body_chunks():
+        yield b"x" * (16 * 1024 + 1)
+
+    with persistent_client(app) as test_client:
+        response = test_client.post(
+            "/memories/ingest",
+            content=body_chunks(),
+            headers={"Content-Type": "application/octet-stream", "X-Document-Filename": "notes.txt"},
+        )
+
+    assert "content-length" not in response.request.headers
+    assert response.status_code == 413
+    assert response.json()["error"] in {"http_error", "request_too_large"}
+    assert repository.calls == []
+
+
+def test_document_ingestion_requires_authentication_and_octet_stream():
+    app = create_app(settings=persistent_settings())
+    app.state.memory_repository = object()
+    with TestClient(app) as test_client:
+        unauthorized = test_client.post(
+            "/memories/ingest", content=b"text", headers={"X-Document-Filename": "notes.txt"}
+        )
+    assert unauthorized.status_code == 401
+    assert unauthorized.headers["www-authenticate"] == "Bearer"
+
+    app = create_app(settings=persistent_settings())
+    app.state.memory_repository = object()
+    with persistent_client(app) as test_client:
+        wrong_type = test_client.post(
+            "/memories/ingest", content=b"text", headers={"X-Document-Filename": "notes.txt"}
+        )
+    assert wrong_type.status_code == 422
+
+
+def test_document_ingestion_sanitizes_persistence_failures():
+    from jarvis.memory.base import MemoryPersistenceError
+
+    class MemoryRepository:
+        def create(self, *args, **kwargs):
+            raise MemoryPersistenceError() from RuntimeError("private path and database details")
+
+    app = create_app(settings=persistent_settings())
+    app.state.memory_repository = MemoryRepository()
+    with persistent_client(app) as test_client:
+        response = test_client.post(
+            "/memories/ingest", content=b"plain text",
+            headers={"Content-Type": "application/octet-stream", "X-Document-Filename": "notes.txt"},
+        )
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "persistence_unavailable",
+        "detail": "Memory storage is unavailable.",
+    }
+    assert "private path" not in response.text
 
 
 def test_invalid_conversation_id_is_rejected():

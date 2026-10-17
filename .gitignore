@@ -23,3 +23,6 @@ coverage/
 dist/
 build/
 *.egg-info/
+/frontend/playwright-report/
+/frontend/test-results/
+/frontend/.playwright/
