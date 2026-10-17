@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     context_history_messages: int = Field(default=6, ge=0, le=20)
     context_excerpt_max_chars: int = Field(default=1500, ge=200, le=4000)
     context_max_chars: int = Field(default=12000, ge=2000, le=40000)
+    verification_execution_enabled: bool = False
+    verification_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
+    verification_max_output_bytes: int = Field(default=32768, ge=1024, le=131072)
 
     @model_validator(mode="after")
     def validate_provider_configuration(self) -> "Settings":

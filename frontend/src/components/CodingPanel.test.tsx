@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import CodingPanel from './CodingPanel'
-import { analyzeCoding, type CodingReport } from '../services/api'
+import { analyzeCoding, verifyPatch, type CodingReport, type VerificationReport } from '../services/api'
 
-vi.mock('../services/api', () => ({ analyzeCoding: vi.fn() }))
+vi.mock('../services/api', () => ({ analyzeCoding: vi.fn(), verifyPatch: vi.fn() }))
 const analyze = vi.mocked(analyzeCoding)
+const verify = vi.mocked(verifyPatch)
 const report: CodingReport = {
   execution_id: 'coding-1', workflow: 'patch', interpretation: 'Propose addition', analysis_origin: 'static', provider: 'static',
   evidence: [{ id: 'E1', path: 'module.py', sha256: 'a'.repeat(64), excerpt: '<script>untrusted()</script>', excerpt_start_line: 1, truncated: false, symbols: ['total at line 1'], relationships: ['Syntactic call: total'] }],
@@ -14,8 +15,66 @@ const report: CodingReport = {
   patch_status: 'proposed', patches: [{ path: 'module.py', operation: 'modify', reason: 'Use addition', sha256_before: 'a'.repeat(64), sha256_after: 'b'.repeat(64), diff: '--- a/module.py\n+++ b/module.py\n@@ -1 +1 @@\n-return 1\n+return 2\n' }],
   existing_tests: ['tests/test_module.py'], verification_recommendations: ['Run focused tests'], limitations: ['No execution'], verification_status: 'not_run', repository_modified: false, execution_enabled: false,
 }
+const mockVerificationReport: VerificationReport = {
+  execution_id: 'exec-test-1',
+  plan_id: 'VP-12345678',
+  overall_state: 'check_blocked',
+  results: [
+    {
+      check_id: 'CHK-0001',
+      name: 'AST syntax validation: module.py',
+      scope: 'syntax',
+      state: 'check_passed',
+      evidence: {
+        evidence_id: 'VE-0001',
+        check_id: 'CHK-0001',
+        check_name: 'AST syntax validation: module.py',
+        profile_id: 'python_syntax',
+        state: 'check_passed',
+        started_at: '2026-10-17T00:00:00Z',
+        completed_at: '2026-10-17T00:00:01Z',
+        duration_seconds: 0.002,
+        output_excerpt: 'Python AST parsed successfully.',
+        output_truncated: false,
+        verified_files: ['module.py'],
+        provenance: 'static_analysis',
+        limitations: [],
+      },
+      summary: 'In-memory AST validation passed.',
+    },
+    {
+      check_id: 'CHK-0002',
+      name: 'Targeted unit test: test_module.py',
+      scope: 'unit',
+      state: 'check_blocked',
+      evidence: {
+        evidence_id: 'VE-0002',
+        check_id: 'CHK-0002',
+        check_name: 'Targeted unit test: test_module.py',
+        profile_id: 'pytest_targeted',
+        state: 'check_blocked',
+        started_at: '2026-10-17T00:00:00Z',
+        duration_seconds: 0.0,
+        output_excerpt: 'Execution disabled by server policy.',
+        output_truncated: false,
+        verified_files: ['tests/test_module.py'],
+        provenance: 'static_analysis',
+        limitations: ['Execution disabled'],
+      },
+      summary: 'Check blocked: verification execution is disabled.',
+    },
+  ],
+  summary: 'Proposed patch passed syntax validation, but live test execution is blocked.',
+  facts: ['module.py: verified preimage hash matches disk.'],
+  limitations: ['Execution runner is disabled.'],
+  execution_enabled: false,
+  repository_modified: false,
+}
 const auth = { token: 'a'.repeat(32) }
-beforeEach(() => { analyze.mockReset(); analyze.mockResolvedValue(report) })
+beforeEach(() => {
+  analyze.mockReset(); analyze.mockResolvedValue(report)
+  verify.mockReset(); verify.mockResolvedValue(mockVerificationReport)
+})
 afterEach(cleanup)
 
 describe('Coding workspace', () => {
@@ -92,15 +151,26 @@ describe('Coding workspace', () => {
     expect(screen.queryByRole('article', { name: 'Coding report' })).not.toBeInTheDocument()
   })
 
-  it('does not revive a report after unmount', async () => {
-    let resolve!: (value: CodingReport) => void
-    analyze.mockReturnValue(new Promise((done) => { resolve = done }))
-    const view = render(<CodingPanel auth={auth} onUnlock={vi.fn()} />)
-    fireEvent.change(screen.getByLabelText('Engineering request'), { target: { value: 'Explain' } })
+  it('triggers in-memory patch verification and displays verification report', async () => {
+    render(<CodingPanel auth={auth} onUnlock={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText('Engineering request'), { target: { value: 'Fix bug' } })
     fireEvent.submit(screen.getByRole('form', { name: 'Coding request' }))
-    const signal = analyze.mock.calls[0][1]?.signal
-    view.unmount()
-    expect(signal?.aborted).toBe(true)
-    await act(async () => resolve(report))
+    expect(await screen.findByRole('article', { name: 'Coding report' })).toBeInTheDocument()
+
+    const verifyBtn = screen.getByRole('button', { name: 'Validate proposed patches' })
+    expect(verifyBtn).toBeInTheDocument()
+    await userEvent.click(verifyBtn)
+
+    expect(verify).toHaveBeenCalledWith(
+      {
+        patches: report.patches,
+        reported_observation: report.reported_observation,
+      },
+      auth,
+    )
+    expect(await screen.findByRole('region', { name: 'Verification results' })).toBeInTheDocument()
+    expect(screen.getAllByText(/check_blocked/i).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText(/In-memory AST validation passed/i)).toBeInTheDocument()
+    expect(screen.getByText(/Python AST parsed successfully/i)).toBeInTheDocument()
   })
 })

@@ -163,3 +163,53 @@ Retrieved conversation turns, memories, and document excerpts are data. The syst
 `patches.py` checks repository-relative paths, protected/private exclusions, exact unique replacements, current preimages and output limits before generating unified diffs in memory. Creation requires an explicitly requested nonexistent target. There is no apply path or test/command execution. Model output cannot change authentication, policy, tool metadata or execution state. Coding reports are ephemeral and do not write memories, conversations, repository files or audit records to PostgreSQL. Stable execution/outcome metadata is logged without source or prompt text.
 
 The React Coding workspace uses the existing API transport, escaped text, in-memory identity, session clearing and cancellation safeguards. Model advice never becomes a verified repository fact. Source inspection does not prove runtime behavior, redaction is heuristic, and filesystem races remain possible. The tools registry remains empty and `execution_enabled=False`. Full contracts, limits, browser/mock distinctions and developer commands are in [CODING_INTELLIGENCE.md](CODING_INTELLIGENCE.md). This phase implements coding proposals; it does not implement the later verification/execution engine.
+
+## Core v2.5 — Verification and quality engineering subsystem
+
+Project JARVIS v2.5 implements the complete software verification, quality engineering, and evidence-based validation subsystem (`jarvis/verification/`). It provides bounded test planning, in-memory patch verification, a strictly sandboxed process runner, and structured verification reports without modifying repository files.
+
+### Subsystem architecture (`jarvis/verification/`)
+
+- `models.py`: Defines closed Pydantic contracts for verification:
+  - 9-state lifecycle model: `not_checked`, `check_requested`, `check_running`, `check_passed`, `check_failed`, `check_timed_out`, `check_blocked`, `check_result_unavailable`, `inconclusive`.
+  - Check scopes: `syntax`, `unit`, `integration`, `typecheck`, `custom`.
+  - Structured evidence schema (`VerificationEvidence`): execution ID, check ID, duration, exit code, output excerpt (capped at 32KB), redacted error details, verified files, timestamps, provenance (`static_analysis`, `in_memory_simulation`, `direct_execution`), and explicit limitations.
+  - Verification plans and reports: `VerificationPlan`, `CheckResult`, `VerificationReport`.
+  - Execution profiles: `ProfileDefinition` with whitelisted binary, arguments, allowed target directories, working directories, and timeout ceilings.
+- `planner.py`: `VerificationPlanner` inspects repository metadata via `jarvis/repo/` to formulate targeted verification plans:
+  - Generates Python AST syntax checks for touched source modules.
+  - Discovers affected test suites via `identify_affected_tests` and `discover_tests_and_build`.
+  - Caps checks per target path (maximum 5 targets, bounded checks).
+- `patch_verifier.py`: `PatchVerifier` validates proposed patches statically in-memory:
+  - Preimage validation: verifies disk SHA-256 matches `sha256_before` (supporting exact disk and LF-normalized hashes).
+  - Target collision avoidance: ensures `create` operations do not overwrite existing files.
+  - In-memory postimage syntax verification: simulates postimage AST syntax without disk mutations (`repository_modified = False`).
+  - Represents planned test execution states truthfully as `check_blocked` when execution is disabled.
+- `runner.py`: `SafeProcessRunner` manages process execution with strict isolation:
+  - Whitelisted profiles: `pytest_targeted`, `compileall`, `vitest_targeted`, `tsc_build`, `playwright_targeted`.
+  - Target confinement: enforces targets reside strictly within approved directories (`tests`, `integration_tests`, `jarvis`, `frontend/src`). Rejects directory traversal and arbitrary shell commands.
+  - Environment sanitization: strips ambient variables, explicitly dropping `GIT_*`, `PYTHON*`, and credential variables.
+  - Bounded outputs & redaction: captures bounded output (default 32KB) with multi-pattern secret redaction (`sk-*`, AWS keys, tokens, passwords).
+  - Process cleanup: terminates spawned process groups upon timeout or cancellation.
+- `service.py`: `VerificationService` coordinates planning, patch validation, profile retrieval, and dual-gate execution runs.
+- `jarvis/api/routes/verification.py`: Authenticated endpoints:
+  - `POST /verification/plan`: Generates a targeted verification plan for specified target paths. Guarded by `Capability.VERIFY_READ`.
+  - `POST /verification/verify-patch`: Performs in-memory static patch validation without disk changes. Guarded by `Capability.VERIFY_READ`.
+  - `POST /verification/run`: Runs a planned verification check item. Guarded by `Capability.VERIFY_EXECUTE`.
+  - `GET /verification/profiles`: Lists approved execution profiles and current execution enablement. Guarded by `Capability.VERIFY_READ`.
+
+### Dual-Gate execution policy
+
+Verification execution follows a strict mandatory dual-gate policy:
+1. Server-side configuration gate: `settings.verification_execution_enabled` must be `True` (default `False`).
+2. Client-side authorization gate: Requesting owner must hold `Capability.VERIFY_EXECUTE`.
+
+If `verification_execution_enabled` is `False`, `POST /verification/run` immediately returns HTTP 403 Forbidden with a clear diagnostic message, regardless of client capabilities. `VERIFY_EXECUTE` alone can never enable execution.
+
+### Frontend integration (`CodingPanel.tsx`)
+
+The React Coding workspace integrates one-click in-memory validation for proposed patches. Clicking "Validate proposed patches" executes `verifyPatch` against the active patch set and renders an accessible verification card (`role="region"`):
+- Status badges with distinct visual treatments for all 9 verification states.
+- Preimage hash validation facts and in-memory simulated AST parsing results.
+- Honest reporting of blocked unit tests and explicit limitation disclosures.
+- Confirmation that repository files were not modified (`repository_modified = False`).

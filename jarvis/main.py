@@ -14,6 +14,7 @@ from jarvis.api.routes.conversations import router as conversations_router
 from jarvis.api.routes.health import router as health_router
 from jarvis.api.routes.memories import router as memories_router
 from jarvis.api.routes.repo import router as repo_router
+from jarvis.api.routes.verification import router as verification_router
 from jarvis.core.config import Settings, get_settings
 from jarvis.core.logging_config import configure_logging
 from jarvis.core.middleware import RequestBodyLimitMiddleware
@@ -24,6 +25,7 @@ from jarvis.persistence.postgres import PostgresConversationRepository
 from jarvis.persistence.memory_postgres import PostgresMemoryRepository
 from jarvis.repo.service import RepoIntelligenceService
 from jarvis.security.policy import CapabilityPolicy
+from jarvis.verification.service import VerificationService
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +79,9 @@ def create_app(
     app.state.orchestration_service = orchestration_service
     app.state.conversation_repository = conversation_repository
     app.state.memory_repository = memory_repository
-    app.state.repo_service = RepoIntelligenceService()
+    repo_service = RepoIntelligenceService()
+    app.state.repo_service = repo_service
+    app.state.verification_service = VerificationService(repo_service.repo_root, resolved_settings)
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=resolved_settings.max_request_body_bytes,
@@ -88,6 +92,7 @@ def create_app(
     app.include_router(memories_router)
     app.include_router(repo_router)
     app.include_router(coding_router)
+    app.include_router(verification_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

@@ -446,3 +446,62 @@ The owner separately authorized local integration and one local integration comm
 The integration Python run used a fresh `Join-Path ([IO.Path]::GetTempPath()) ('jarvis-v24-local-integration-' + [guid]::NewGuid().ToString('N'))` directory and refused existing targets. Its 17 skips are native-link privilege restrictions (two original helper cases, ten manifest cases, four alias/service cases, and one coding-caller case). They remain skips in this execution, separate from the owner's accepted 17-pass native result. The existing Starlette/httpx deprecation and browser color-environment warnings remain; no temporary cleanup error appeared in this run. All four PostgreSQL integration process variables were unset, so no live database tests, connections or migrations ran. Browser tests remained local mock-only; no live model was called. Verification-command/tool execution within the application remains disabled.
 
 The pre-commit preservation check found only four intentional documentation changes relative to the accepted starting tree (`README.md`, `docs/HANDOFF.md`, `docs/ROADMAP.md`, `docs/CODING_INTELLIGENCE.md`), recording acceptance and owner evidence; all 31 other reviewed files were byte-for-byte unchanged. The local commit is scoped to those same 35 accepted files with explicit-path staging, whitespace checks and a staged-file review. The resulting commit SHA is the Git commit containing this record; it is reported separately by `git log -1` rather than embedded in its own contents. No push, main-branch merge, dependency installation, permission/credential change, patch application, or v2.5 implementation is part of local integration.
+
+## Core v2.5 — Verification, Quality Engineering and Evidence-Based Validation (implemented)
+
+Implemented by Antigravity under project owner authorization for Project JARVIS v2.5.
+
+- Starting baseline branch: `jarvis/integration-acceptance-v24`
+- Designated starting commit: `abcb59484ee828101426d8fa3a0fcabfa2407414`
+- Implementation branch: `antigravity/jarvis-v2.5-verification` (created from `abcb59484ee828101426d8fa3a0fcabfa2407414`)
+- Working tree state: Implementation complete and verified across all test suites; all changes remain uncommitted and unpushed awaiting explicit user instructions.
+
+### v2.5 Scope and Implementation Summary
+
+1. **Verification Subsystem (`jarvis/verification/`):**
+   - `models.py`: Closed Pydantic schemas for the 9 verification states (`not_checked`, `check_requested`, `check_running`, `check_passed`, `check_failed`, `check_timed_out`, `check_blocked`, `check_result_unavailable`, `inconclusive`), 5 scopes (`syntax`, `unit`, `integration`, `typecheck`, `custom`), structured evidence (`VerificationEvidence`), test plan items, verification plans, check results, and verification reports.
+   - `planner.py`: `VerificationPlanner` parses repository metadata, identifies touched paths, discovers tests, and formulates targeted verification plans bounded to at most 5 files.
+   - `patch_verifier.py`: `PatchVerifier` validates patch proposals statically in-memory. Validates disk preimages (supporting exact and LF-normalized hashes), checks collision avoidance for creates, and performs simulated postimage AST syntax validation without writing to disk (`repository_modified = False`).
+   - `runner.py`: `SafeProcessRunner` provides bounded, sandboxed command execution. Supports approved profiles (`pytest_targeted`, `compileall`, `vitest_targeted`, `tsc_build`, `playwright_targeted`), strict environment sanitization (dropping `GIT_*` and `PYTHON*` overrides), target path confinement, timeout enforcement, output truncation (32KB), and secret redaction.
+   - `service.py`: `VerificationService` coordinates verification planning, in-memory patch validation, profile discovery, and dual-gate execution runs.
+2. **Security & Configuration Integration:**
+   - `jarvis/security/policy.py`: Added `Capability.VERIFY_READ` and `Capability.VERIFY_EXECUTE`. Added `VERIFY_READ` to `_OWNER_CAPABILITIES`.
+   - `jarvis/core/config.py`: Added `verification_execution_enabled: bool = False` (default disabled), `verification_timeout_seconds: float = 30.0`, `verification_max_output_bytes: int = 32768`.
+   - **Dual-Gate Security Policy:** Verification execution commands are strictly blocked unless both server configuration has `verification_execution_enabled=True` and the requesting owner holds `Capability.VERIFY_EXECUTE`.
+3. **API Routing & Main Wiring:**
+   - `jarvis/api/routes/verification.py`: Endpoints `POST /verification/plan`, `POST /verification/verify-patch`, `POST /verification/run`, `GET /verification/profiles`.
+   - `jarvis/main.py`: Mounted `verification_router` and wired `app.state.verification_service`.
+4. **Frontend Integration:**
+   - `frontend/src/services/api.ts`: Verification API clients `createVerificationPlan`, `verifyPatch`, `getVerificationProfiles` and corresponding TypeScript types.
+   - `frontend/src/components/CodingPanel.tsx`: Added "Validate proposed patches" in-memory verification button, `role="region"` verification report card with status badges, checks list, facts, and limitations.
+   - `frontend/src/components/CodingPanel.css`: Added styles for verification sections and `.state-badge` for all 9 states.
+   - `frontend/src/components/CodingPanel.test.tsx`: Verified in-memory patch validation UI workflow.
+   - `frontend/src/services/verification-api.test.ts`: Added unit tests for verification API client endpoints.
+
+### v2.5 Execution Evidence
+
+All verification commands were executed directly against the local repository:
+
+| Command | Result | Exit |
+| --- | --- | --- |
+| `.\.venv-dev\Scripts\python.exe -m pytest -q -rs tests/test_verification_service.py --basetemp=$testBase` | **19 passed, 1 existing warning** in 1.27s | 0 |
+| `.\.venv-dev\Scripts\python.exe -m pytest -q -rs tests --basetemp=$testBase` | **537 passed, 17 skipped, 1 existing warning** in 12.40s | 0 |
+| `.\.venv-dev\Scripts\python.exe -m compileall -q jarvis tests integration_tests database` | **Passed cleanly** (0 errors) | 0 |
+| `npm.cmd test -- --run` in `frontend/` | **77 passed**, 6 test files in 25.06s | 0 |
+| `npm.cmd run build` in `frontend/` | **Passed** (`tsc -b && vite build` 0 errors) | 0 |
+| `npm.cmd run test:e2e` in `frontend/` | **10 passed** in 10.2s | 0 |
+| `.\.venv-dev\Scripts\python.exe -m pytest -q integration_tests` | **11 passed, 22 skipped** (PostgreSQL opt-in) in 0.67s | 0 |
+| `git diff --check` | **Passed** (0 whitespace errors) | 0 |
+
+Notes on test evidence:
+- Python test suite: 537 passed, 17 skipped (the known 17 Windows unprivileged symlink tests, `WinError 1314`), 0 failed.
+- Frontend Vitest suite: 77 passed across all 6 test files (added 3 verification API tests).
+- Frontend Playwright E2E suite: 10/10 passed cleanly.
+- Integration tests guard: 11 passed, 22 skipped (PostgreSQL opt-in tests require `JARVIS_RUN_POSTGRES_INTEGRATION=1`).
+
+### Retained Limitations & Decisions
+
+1. **Verification Execution Disabled by Default:** `verification_execution_enabled = False` is enforced server-side. Command execution cannot be run through the verification runner unless explicitly enabled in configuration.
+2. **In-Memory Patch Validation Only:** Patch validation evaluates preimages and performs simulated postimage AST syntax parsing in-memory. Patches are never applied automatically (`repository_modified = False`).
+3. **Single-Owner Scope:** Verification routes are gated by single-owner bearer token authentication and server-side capability policies (`Capability.VERIFY_READ`, `Capability.VERIFY_EXECUTE`).
+4. **Git State:** All changes reside in the working directory on branch `antigravity/jarvis-v2.5-verification`. No commits, merges, or pushes were performed.

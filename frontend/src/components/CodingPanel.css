@@ -13,4 +13,13 @@
 .coding-panel summary { cursor: pointer; }
 .coding-panel .coding-consent { display: flex; align-items: flex-start; gap: 10px; }
 .coding-panel [role="alert"] { color: #ffb6b6; }
+.coding-panel .verification-section { margin-top: 24px; padding: 16px; border: 1px solid #3d4f63; border-radius: 8px; background: #0c1219; }
+.coding-panel .state-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 13px; font-weight: 600; text-transform: uppercase; }
+.coding-panel .state-check_passed { background: #133820; color: #6ee7b7; border: 1px solid #059669; }
+.coding-panel .state-check_failed { background: #3b1818; color: #fca5a5; border: 1px solid #dc2626; }
+.coding-panel .state-check_blocked { background: #382d12; color: #fde047; border: 1px solid #ca8a04; }
+.coding-panel .state-check_timed_out { background: #3a2010; color: #fdba74; border: 1px solid #ea580c; }
+.coding-panel .state-not_checked, .coding-panel .state-inconclusive { background: #1e293b; color: #94a3b8; border: 1px solid #475569; }
+.coding-panel .verification-check-list ul { list-style: none; padding-left: 0; }
+.coding-panel .verification-check-list li { margin: 10px 0; padding: 8px; background: #131a22; border-radius: 6px; border: 1px solid #283545; }
 @media (max-width: 600px) { .coding-panel { padding: 18px; } }

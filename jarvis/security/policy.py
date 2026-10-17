@@ -13,6 +13,8 @@ class Capability(StrEnum):
     CONVERSATION_READ = "conversation.read"
     CONVERSATION_WRITE = "conversation.write"
     REPO_READ = "repo.read"
+    VERIFY_READ = "verify.read"
+    VERIFY_EXECUTE = "verify.execute"
     EXTERNAL_ACTION_EXECUTE = "external_action.execute"
 
 
@@ -23,6 +25,7 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.CONVERSATION_READ,
     Capability.CONVERSATION_WRITE,
     Capability.REPO_READ,
+    Capability.VERIFY_READ,
 })
 
 

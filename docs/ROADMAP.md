@@ -226,6 +226,17 @@ Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remain
 - Validate closed contracts, source snapshots, path/private exclusions, bounded exact replacements and new-file proposals. Diffs are generated only; no code application, test execution, shell commands, tool execution or autonomous action is introduced. No dependencies or database changes are required.
 - Preserve the accepted v2.1–v2.3 changes and their separate test provenance. The owner accepted v2.4 on 2026-10-17. **OWNER-RUN RESULTS REPORTED BY THE PROJECT OWNER:** 17 native Windows tests passed, 0 failed, 0 skipped (14 mocked variants deselected; 1 existing warning; exit 0). Live-provider behavior remains unverified, PostgreSQL has not been rerun against v2.4, and single-owner/advisory-only security limitations remain. Evidence and local integration provenance are recorded in `docs/HANDOFF.md`. Local integration and a local commit are separately authorized; pushing, publishing, merging to main and v2.5 are not authorized.
 
+## Core v2.5 — Verification, Quality Engineering and Evidence-Based Validation (implemented)
+
+- Add a bounded software verification subsystem (`jarvis/verification/`) with an explicit 9-state lifecycle model: `not_checked`, `check_requested`, `check_running`, `check_passed`, `check_failed`, `check_timed_out`, `check_blocked`, `check_result_unavailable`, `inconclusive`.
+- Implement in-memory static patch validation (`jarvis/verification/patch_verifier.py`): verifies preimage hashes against disk, checks target creation collision avoidance, and performs simulated postimage AST syntax validation (Python AST / JSON) without modifying files (`repository_modified = False`).
+- Implement targeted verification planning (`jarvis/verification/planner.py`): maps touched paths to syntax checks and affected test suites using repository intelligence.
+- Implement an isolated, sandboxed process runner (`jarvis/verification/runner.py`) with whitelisted profiles (`pytest_targeted`, `compileall`, `vitest_targeted`, `tsc_build`, `playwright_targeted`), strict environment sanitization, timeouts, process group cleanup, output truncation (32KB), and secret redaction.
+- Enforce a mandatory Dual-Gate security policy: verification execution is disabled by default (`verification_execution_enabled = False`); runner commands are strictly blocked unless both server configuration and authenticated `Capability.VERIFY_EXECUTE` are granted.
+- Expose authenticated API routes `/verification/plan`, `/verification/verify-patch`, `/verification/run`, and `/verification/profiles`.
+- Integrate one-click patch verification into the React Coding workspace (`CodingPanel.tsx`) with accessible report cards, fact lists, and distinct visual badges for all 9 states.
+- Verification evidence: full Python test suite passed (537 passed, 17 skipped, 0 failed), frontend Vitest suite passed (77 passed, 0 failed), Playwright E2E passed (10 passed, 0 failed), `compileall` passed with 0 errors, and frontend production build succeeded.
+
 ## Later milestones
 
 1. Identity and memory governance: authenticated users, explicit ownership, access controls, retention/export/revocation, and user-visible memory controls before exposing memory in shared deployments.

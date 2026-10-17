@@ -346,3 +346,112 @@ export function getReadiness(auth?: ApiAuth): Promise<ReadinessResponse> {
 export function getRepoInventory(auth?: ApiAuth): Promise<unknown> {
   return request<unknown>('/repo/inventory', undefined, false, auth)
 }
+
+export type VerificationState =
+  | 'not_checked'
+  | 'check_requested'
+  | 'check_running'
+  | 'check_passed'
+  | 'check_failed'
+  | 'check_timed_out'
+  | 'check_blocked'
+  | 'check_result_unavailable'
+  | 'inconclusive'
+
+export type CheckScope = 'syntax' | 'unit' | 'integration' | 'typecheck' | 'build' | 'regression'
+
+export interface CheckPlanItem {
+  check_id: string
+  name: string
+  scope: CheckScope
+  target: string
+  profile_id: string
+  rationale: string
+  expected_files: string[]
+}
+
+export interface VerificationPlan {
+  plan_id: string
+  target_paths: string[]
+  checks: CheckPlanItem[]
+  rationale: string
+  execution_enabled: boolean
+  created_at: string
+}
+
+export interface VerificationEvidence {
+  evidence_id: string
+  check_id: string
+  check_name: string
+  profile_id: string
+  state: VerificationState
+  command_executed?: string[] | null
+  exit_code?: number | null
+  started_at: string
+  completed_at?: string | null
+  duration_seconds: number
+  output_excerpt: string
+  output_truncated: boolean
+  redacted_error_details?: string | null
+  verified_files: string[]
+  provenance: 'direct_execution' | 'static_analysis' | 'reported_external'
+  limitations: string[]
+}
+
+export interface CheckResult {
+  check_id: string
+  name: string
+  scope: CheckScope
+  state: VerificationState
+  evidence: VerificationEvidence
+  summary: string
+  diagnostics?: string[]
+}
+
+export interface VerificationReport {
+  execution_id: string
+  plan_id: string
+  overall_state: VerificationState
+  results: CheckResult[]
+  summary: string
+  facts: string[]
+  limitations: string[]
+  execution_enabled: boolean
+  repository_modified: false
+}
+
+export interface ProfileDefinition {
+  profile_id: string
+  name: string
+  description: string
+  working_directory: '.' | 'frontend'
+  allowed_target_dirs: string[]
+  default_timeout_seconds: number
+}
+
+export interface VerificationProfilesResponse {
+  execution_enabled: boolean
+  profiles: ProfileDefinition[]
+}
+
+export interface VerificationPlanRequest {
+  target_paths?: string[]
+  reason?: string
+}
+
+export interface VerifyPatchRequest {
+  patches: { path: string; operation: 'modify' | 'create'; reason: string; sha256_before: string | null; sha256_after: string; diff: string }[]
+  reported_observation?: string | null
+}
+
+export function createVerificationPlan(body: VerificationPlanRequest, auth?: ApiAuth): Promise<VerificationPlan> {
+  return request<VerificationPlan>('/verification/plan', json(body), false, auth)
+}
+
+export function verifyPatch(body: VerifyPatchRequest, auth?: ApiAuth): Promise<VerificationReport> {
+  return request<VerificationReport>('/verification/verify-patch', json(body), false, auth)
+}
+
+export function getVerificationProfiles(auth?: ApiAuth): Promise<VerificationProfilesResponse> {
+  return request<VerificationProfilesResponse>('/verification/profiles', undefined, false, auth)
+}
