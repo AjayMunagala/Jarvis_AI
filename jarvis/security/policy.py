@@ -31,6 +31,9 @@ class Capability(StrEnum):
     # Workflow orchestration (v3.2): DAG workflows and execution runs.
     WORKFLOW_READ = "workflow.read"
     WORKFLOW_WRITE = "workflow.write"
+    # Knowledge intelligence & context continuity (v3.3): hybrid retrieval and context budgeting.
+    KNOWLEDGE_READ = "knowledge.read"
+    KNOWLEDGE_WRITE = "knowledge.write"
     EXTERNAL_ACTION_EXECUTE = "external_action.execute"
 
 
@@ -53,6 +56,8 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.ASSISTANT_WRITE,
     Capability.WORKFLOW_READ,
     Capability.WORKFLOW_WRITE,
+    Capability.KNOWLEDGE_READ,
+    Capability.KNOWLEDGE_WRITE,
 })
 
 

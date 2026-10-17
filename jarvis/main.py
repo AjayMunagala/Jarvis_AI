@@ -21,10 +21,13 @@ from jarvis.api.routes.repo import router as repo_router
 from jarvis.api.routes.tools import router as tools_router
 from jarvis.api.routes.verification import router as verification_router
 from jarvis.api.routes.workflow import router as workflow_router
+from jarvis.api.routes.knowledge import router as knowledge_router
 from jarvis.assistant.service import AssistantService
 from jarvis.assistant.stores import MemoryAssistantStore, PostgresAssistantStore
 from jarvis.workflow.service import WorkflowService
 from jarvis.workflow.stores import MemoryWorkflowStore, PostgresWorkflowStore
+from jarvis.knowledge.service import KnowledgeService
+from jarvis.knowledge.stores import MemoryKnowledgeStore, PostgresKnowledgeStore
 from jarvis.audit.service import ApprovalService, AuditService
 from jarvis.audit.stores import (
     MemoryApprovalStore, MemoryAuditStore, PostgresApprovalStore, PostgresAuditStore,
@@ -133,14 +136,20 @@ def create_app(
                         operation_timeout_seconds=resolved_settings.persistence_operation_timeout_seconds)
         assistant_store = PostgresAssistantStore(url, **timeouts)
         workflow_store = PostgresWorkflowStore(url, **timeouts)
+        knowledge_store = PostgresKnowledgeStore(url, **timeouts)
     else:
         assistant_store = MemoryAssistantStore()
         workflow_store = MemoryWorkflowStore()
+        knowledge_store = MemoryKnowledgeStore()
     app.state.assistant_service = AssistantService(assistant_store, audit_service=app.state.audit_service)
     app.state.workflow_service = WorkflowService(
         workflow_store,
         audit_service=app.state.audit_service,
         assistant_service=app.state.assistant_service,
+    )
+    app.state.knowledge_service = KnowledgeService(
+        knowledge_store,
+        audit_service=app.state.audit_service,
     )
 
     app.add_middleware(
@@ -160,6 +169,7 @@ def create_app(
     app.include_router(interface_router)
     app.include_router(assistant_router)
     app.include_router(workflow_router)
+    app.include_router(knowledge_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
