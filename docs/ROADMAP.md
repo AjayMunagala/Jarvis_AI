@@ -279,3 +279,8 @@ Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remain
 10. Controlled improvement: model evaluation, fine-tuning experiments, versioning, and rollback with human review.
 
 The long-term vision includes natural conversation and voice; desktop and supported mobile-device integrations; coding, debugging, test execution, fixes and independent verification; document analysis, web research, personal knowledge and long-term memory; task management, reminders, scheduling and personal workflows; financial planning, expense analysis, stock-market research and experimental forecasting; proactive monitoring and notifications; smart-home integrations; defensive cybersecurity and system health monitoring; personalized learning and tutoring; travel planning and creative tools; and controlled self-improvement, model evaluation, fine-tuning experiments and rollback.
+
+## Advanced intelligence and personalization v5.1–v5.6 (implemented on `claude/jarvis-v5.1-to-v5.6`; owner review pending)
+
+- v5.1 model registry, routing policies, bounded fallback, repeatable evaluation; v5.2 knowledge graph; v5.3 memory selection and context packaging; v5.4 multimodal foundation (mock adapters only); v5.5 plan-quality evaluation (12/13 vs 5/13 baseline on an author-written dataset); v5.6 controlled personalization.
+- Built in parallel with v3.1–v4.0 and not yet integrated with it; integration contracts are listed in `docs/ADVANCED_INTELLIGENCE.md`. v6 and later are not started.

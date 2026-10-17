@@ -50,7 +50,7 @@ async def _call(func, *args, **kwargs):
 
 @router.get("/activity", response_model=ActivityPage, responses=_ERRORS)
 async def activity(request: Request, limit: int = Query(default=50, ge=1, le=200),
-                   category: Literal["tool", "browser", "approval"] | None = Query(default=None),
+                   category: Literal["tool", "browser", "approval", "intelligence"] | None = Query(default=None),
                    owner_id: UUID | None = Depends(authenticated_owner)) -> ActivityPage:
     owner = _owner(owner_id)
     enforce_capability(request, owner, Capability.AUDIT_READ)

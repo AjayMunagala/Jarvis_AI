@@ -29,3 +29,5 @@ include = ["jarvis*"]
 
 [tool.setuptools.package-data]
 "jarvis.orchestration" = ["config/*.json"]
+"jarvis.routing" = ["config/*.json", "datasets/*.json"]
+"jarvis.reasoning" = ["datasets/*.json"]

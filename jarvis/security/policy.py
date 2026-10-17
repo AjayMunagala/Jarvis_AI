@@ -25,6 +25,7 @@ class Capability(StrEnum):
     AUDIT_READ = "audit.read"
     APPROVALS_READ = "approvals.read"
     APPROVALS_DECIDE = "approvals.decide"
+<<<<<<< HEAD
     # Personal assistant foundation (v3.1): tasks, notes, reminders, local calendar.
     ASSISTANT_READ = "assistant.read"
     ASSISTANT_WRITE = "assistant.write"
@@ -54,6 +55,11 @@ class Capability(StrEnum):
     # Autonomous AI Operating System Capstone (v4.0): unified multi-subsystem autonomous coordination.
     AUTONOMOUS_READ = "autonomous.read"
     AUTONOMOUS_EXECUTE = "autonomous.execute"
+    # Advanced intelligence (v5.1-v5.6). None of these grants tool or action execution.
+    INTELLIGENCE_READ = "intelligence.read"
+    INTELLIGENCE_EVALUATE = "intelligence.evaluate"
+    KNOWLEDGE_GRAPH_WRITE = "knowledge_graph.write"
+    PERSONALIZATION_MANAGE = "personalization.manage"
     EXTERNAL_ACTION_EXECUTE = "external_action.execute"
 
 
@@ -92,6 +98,10 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.IMPROVEMENT_APPROVE,
     Capability.AUTONOMOUS_READ,
     Capability.AUTONOMOUS_EXECUTE,
+    Capability.INTELLIGENCE_READ,
+    Capability.INTELLIGENCE_EVALUATE,
+    Capability.KNOWLEDGE_GRAPH_WRITE,
+    Capability.PERSONALIZATION_MANAGE,
 })
 
 

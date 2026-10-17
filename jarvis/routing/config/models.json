@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "model_key": "mock-deterministic",
+      "provider": "mock",
+      "model_id": "mock",
+      "display_name": "Deterministic demo provider",
+      "task_types": ["general"],
+      "input_modalities": ["text"],
+      "tool_calling": false,
+      "structured_output": false,
+      "locality": "local",
+      "is_demo": true,
+      "limitations": [
+        "Returns a fixed demo sentence; performs no reasoning and follows no instructions.",
+        "Ignores structured-output schemas."
+      ],
+      "capability_source": "adapter_contract"
+    },
+    {
+      "model_key": "openai-compatible-configured",
+      "provider": "openai",
+      "model_id": "${JARVIS_OPENAI_MODEL}",
+      "display_name": "Configured OpenAI-compatible model",
+      "task_types": ["general"],
+      "input_modalities": ["text"],
+      "tool_calling": false,
+      "structured_output": true,
+      "locality": "remote",
+      "requires": ["JARVIS_PROVIDER=openai", "JARVIS_OPENAI_API_KEY"],
+      "limitations": [
+        "Capabilities beyond the adapter contract are unknown until an operator declares them or an evaluation measures them.",
+        "The adapter sends text only; tool calling is not wired through this adapter."
+      ],
+      "capability_source": "adapter_contract"
+    }
+  ]
+}
