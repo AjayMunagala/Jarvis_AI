@@ -781,3 +781,15 @@ export function getApprovals(limit: number, auth?: ApiAuth, state?: ApprovalStat
 export function decideApproval(approvalId: string, approve: boolean, note: string | undefined, auth?: ApiAuth): Promise<ApprovalRequest> {
   return request<ApprovalRequest>(`/approvals/${encodeURIComponent(approvalId)}/${approve ? 'approve' : 'reject'}`, json(note ? { note } : {}), false, auth)
 }
+
+// ------------------------------------------------- unified interface (v3.0)
+
+export interface InterfaceConfig {
+  contract_version: '1'
+  features: { chat: boolean; memory: boolean; coding: boolean; browser: boolean; tools: boolean; chat_tools: boolean; activity: boolean; approval_execution: false }
+  voice: { enabled: boolean; mode: 'browser_native'; server_receives_audio: false; auto_send: false; requires_opt_in: true }
+}
+
+export function getInterfaceConfig(): Promise<InterfaceConfig> {
+  return request<InterfaceConfig>('/interface/config')
+}

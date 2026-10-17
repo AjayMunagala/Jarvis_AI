@@ -574,3 +574,11 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - Owner decision: approvals are recorded only; approval does not execute anything. Decision D7 applied: durable in PostgreSQL when persistence is enabled, otherwise in memory and labelled non-durable.
 - Not run: live PostgreSQL application of migration 0006 (needs operator credentials).
 - Dependencies for v3.0: voice input should submit through the existing chat path (no new execution surface); Activity remains the place to review refused actions.
+
+## Core v3.0 — Voice and unified interface (implemented; owner acceptance pending)
+
+- Baseline: `jarvis/integration-acceptance-v29` at `ef3ae95292ecd9650d9a0d7d9455ccf6ffa767a4`. Work is on `claude/jarvis-v3.0-voice-interface` in `D:\Project_Jarvis_worktrees\voice-v30`; not pushed.
+- New `frontend/src/voice/` (`speech.ts`, `VoiceControls.tsx`/`.css`, tests), `jarvis/api/routes/interface.py` (`GET /interface/config`), setting `JARVIS_VOICE_ENABLED` (default true; opt-in still required per page session), voice wiring and OFF badges in `App.tsx`, one Playwright voice scenario. See `docs/VOICE_INTERFACE.md`.
+- Decision D5 applied: browser-native speech first; no server audio, no new dependency.
+- Not tested: real microphones and real browser speech services (manual check required).
+- Full technical handover for v3.0 → v4.0: `docs/ANTIGRAVITY_HANDOVER.md`.

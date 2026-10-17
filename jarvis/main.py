@@ -14,6 +14,7 @@ from jarvis.api.routes.chat import router as chat_router
 from jarvis.api.routes.coding import router as coding_router
 from jarvis.api.routes.conversations import router as conversations_router
 from jarvis.api.routes.health import router as health_router
+from jarvis.api.routes.interface import router as interface_router
 from jarvis.api.routes.memories import router as memories_router
 from jarvis.api.routes.repo import router as repo_router
 from jarvis.api.routes.tools import router as tools_router
@@ -132,6 +133,7 @@ def create_app(
     app.include_router(browser_router)
     app.include_router(tools_router)
     app.include_router(activity_router)
+    app.include_router(interface_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

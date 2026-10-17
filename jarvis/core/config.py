@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     chat_tool_max_calls: int = Field(default=4, ge=1, le=8)
     # Approval gateway (v2.9): pending requests expire; approval executes nothing.
     approvals_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
+    # Voice (v3.0): offer optional browser-native voice controls. The owner must still opt in
+    # per page session; the server never receives audio.
+    voice_enabled: bool = True
 
     @model_validator(mode="after")
     def validate_provider_configuration(self) -> "Settings":

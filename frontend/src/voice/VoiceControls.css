@@ -1,0 +1,19 @@
+.composer { position: relative; }
+.voice-button { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid rgba(137, 165, 194, .22); border-radius: 7px; background: #17212c; color: #a9bccc; cursor: pointer; transition: .16s ease; }
+.voice-button:hover:not(:disabled) { color: #e6fbff; border-color: rgba(107, 220, 244, .4); }
+.voice-button:disabled { color: #5d6b7a; cursor: not-allowed; }
+.voice-button:focus-visible { outline: 2px solid #a5d3ff; outline-offset: 2px; }
+.voice-on { color: #6bdcf4; border-color: rgba(107, 220, 244, .45); }
+.voice-listening { color: #ffb4b4; border-color: rgba(255, 120, 120, .6); box-shadow: 0 0 12px rgba(255, 110, 110, .25); animation: voice-pulse 1.4s ease-in-out infinite; }
+@keyframes voice-pulse { 50% { box-shadow: 0 0 2px rgba(255, 110, 110, .1); } }
+@media (prefers-reduced-motion: reduce) { .voice-listening { animation: none; } }
+.voice-status { position: absolute; left: 14px; right: 14px; bottom: calc(100% + 6px); padding: 5px 9px; border: 1px solid rgba(137, 165, 194, .18); border-radius: 7px; background: #111821; color: #b9c7d4; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.voice-status:empty { display: none; }
+.voice-backdrop { position: fixed; z-index: 30; inset: 0; display: grid; place-items: center; padding: 18px; background: rgba(2, 5, 9, .82); backdrop-filter: blur(5px); }
+.voice-dialog { width: min(500px, 100%); max-height: calc(100vh - 36px); overflow: auto; padding: 24px; border: 1px solid rgba(137, 165, 194, .3); border-radius: 12px; background: #111821; color: #e0e9f0; box-shadow: 0 18px 70px rgba(0, 0, 0, .55); }
+.voice-dialog h2 { margin: 0 0 9px; font-size: 20px; }
+.voice-dialog p, .voice-dialog li { color: #a3b0bd; font-size: 12px; line-height: 1.6; }
+.voice-dialog ul { padding-left: 18px; }
+.voice-dialog-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 14px; }
+.voice-dialog-actions button { padding: 8px 14px; border: 1px solid #526b87; border-radius: 8px; background: #23364a; color: inherit; cursor: pointer; }
+.voice-dialog-actions button:focus-visible { outline: 2px solid #a5d3ff; outline-offset: 2px; }

@@ -3,11 +3,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import userEvent from '@testing-library/user-event'
 import App from './App'
 import './styles.css'
-import { getConversationMessages, getMemory, getReadiness, listConversations, listMemories, sendChatMessage, type ConversationPage, type ReadinessResponse } from './services/api'
+import { getConversationMessages, getInterfaceConfig, getMemory, getReadiness, listConversations, listMemories, sendChatMessage, type ConversationPage, type ReadinessResponse } from './services/api'
 
 vi.mock('./services/api', () => ({
   sendChatMessage: vi.fn(), listConversations: vi.fn(), getConversationMessages: vi.fn(), listMemories: vi.fn(), searchMemories: vi.fn(),
-  createMemory: vi.fn(), updateMemory: vi.fn(), deleteMemory: vi.fn(), getMemory: vi.fn(), getReadiness: vi.fn(), analyzeCoding: vi.fn(),
+  createMemory: vi.fn(), updateMemory: vi.fn(), deleteMemory: vi.fn(), getMemory: vi.fn(), getReadiness: vi.fn(), analyzeCoding: vi.fn(), getInterfaceConfig: vi.fn(),
 }))
 const sendMock = vi.mocked(sendChatMessage)
 const listConversationsMock = vi.mocked(listConversations)
@@ -544,5 +544,41 @@ describe('JARVIS chat', () => {
     expect(tools).toHaveTextContent('model-proposed, validated by JARVIS')
     expect(tools).toHaveTextContent('T1 calculator · succeeded, T2 shell.exec · denied (not_offered)')
     expect(tools).toHaveTextContent('Verification: partially verified')
+  })
+})
+
+describe('JARVIS unified interface and voice (v3.0)', () => {
+  const config = (voice: boolean, features: Partial<{ browser: boolean; tools: boolean; memory: boolean }> = {}) => ({
+    contract_version: '1' as const,
+    features: { chat: true, memory: false, coding: true, browser: false, tools: false, chat_tools: false, activity: true, approval_execution: false as const, ...features },
+    voice: { enabled: voice, mode: 'browser_native' as const, server_receives_audio: false as const, auto_send: false as const, requires_opt_in: true as const },
+  })
+
+  it('hides voice controls when the interface configuration is unavailable', async () => {
+    vi.mocked(getInterfaceConfig).mockRejectedValue(new Error('offline'))
+    render(<App />)
+    await waitFor(() => expect(getInterfaceConfig).toHaveBeenCalled())
+    expect(screen.queryByRole('button', { name: /voice input/i })).toBeNull()
+    expect(screen.getByRole('textbox', { name: /message jarvis/i })).toBeEnabled()
+  })
+
+  it('offers opt-in voice controls when enabled and keeps typing available', async () => {
+    vi.mocked(getInterfaceConfig).mockResolvedValue(config(true))
+    render(<App />)
+    const mic = await screen.findByRole('button', { name: /voice input/i })
+    // jsdom has no Web Speech API, so the control explains it is unsupported.
+    expect(mic).toHaveAccessibleName('Voice input is not supported in this browser')
+    expect(mic).toBeDisabled()
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'typed still works')
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeEnabled()
+    expect(sendMock).not.toHaveBeenCalled()
+  })
+
+  it('does not offer voice when the server disables it and marks disabled views', async () => {
+    vi.mocked(getInterfaceConfig).mockResolvedValue(config(false, { browser: false, tools: true, memory: false }))
+    render(<App />)
+    await waitFor(() => expect(document.querySelectorAll('.nav-off')).toHaveLength(2))
+    expect(screen.queryByRole('button', { name: /voice input/i })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Browser' })).toBeInTheDocument()
   })
 })

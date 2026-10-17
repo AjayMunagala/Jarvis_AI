@@ -91,6 +91,10 @@ With `JARVIS_TOOLS_ENABLED=true` and `JARVIS_CHAT_TOOLS_ENABLED=true`, chat can 
 
 When JARVIS refuses an action that needs approval (a non-read-only or higher-risk tool, or a consequential browser click), it records an approval request. The **Activity** view (or `GET /approvals`, `POST /approvals/{id}/approve|reject`) lets the owner approve or reject it, and `GET /activity` shows one audit trail for tool calls, browser actions and decisions. **Approving records the decision only; nothing is executed.** Records are stored in PostgreSQL when persistence is enabled (apply migration `0006_audit_and_approvals.sql`), otherwise in memory and labelled not durable. See `docs/APPROVALS_AUDIT.md`.
 
+## Core v3.0 — Voice and unified interface (implemented; owner acceptance pending)
+
+Chat offers optional voice: a microphone button places what you say into the message box for you to review and send, and **Read replies aloud** speaks new answers (with **Stop speaking**). Voice uses your browser's built-in speech features, is off until you accept a privacy disclosure (in Chrome and Edge, recognition audio is processed by Google's or Microsoft's speech service), and JARVIS never receives audio. Typing always works; unsupported browsers show an explanation. `GET /interface/config` exposes non-sensitive feature flags, and the navigation marks views the server has turned off. `JARVIS_VOICE_ENABLED=false` hides voice. See `docs/VOICE_INTERFACE.md`; the technical handover for the next phase is `docs/ANTIGRAVITY_HANDOVER.md`.
+
 ## Prerequisites
 
 - Windows 10/11 and Python 3.11 or newer (developed with Python 3.12.10).

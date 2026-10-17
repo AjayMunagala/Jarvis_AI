@@ -260,6 +260,11 @@ Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remain
 - Approval requests for refused actions (tools needing approval, consequential browser clicks) with risk, target, reason, expected side effects, scope hash and expiry; owner approve/reject exactly once; **recorded only, nothing executes**.
 - Central owner-scoped audit trail for tools, browser and approvals: PostgreSQL when persistence is enabled (migration 0006), otherwise in memory and labelled non-durable (D7). Activity frontend view. Details: `docs/APPROVALS_AUDIT.md`.
 
+## Core v3.0 — Voice and unified interface (implemented; owner acceptance pending)
+
+- Browser-native voice (D5): explicit opt-in with privacy disclosure, browser-managed microphone permission, transcripts placed in the composer for review (never auto-sent), read-aloud with interrupt, unsupported-browser handling, text always available.
+- `GET /interface/config` feature flags and disabled-view badges for one consistent workspace. Details: `docs/VOICE_INTERFACE.md`. Next phases (v3.0 → v4.0) are handed over in `docs/ANTIGRAVITY_HANDOVER.md`.
+
 ## Later milestones
 
 1. Identity and memory governance: authenticated users, explicit ownership, access controls, retention/export/revocation, and user-visible memory controls before exposing memory in shared deployments.

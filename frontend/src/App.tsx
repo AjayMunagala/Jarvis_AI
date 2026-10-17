@@ -4,12 +4,14 @@ import {
   Clock3, Command, Compass, Cpu, FileText, Folder, Menu, MessageSquare, Plus, Search,
   Settings2, ShieldCheck, Sparkles, X,
 } from 'lucide-react'
-import { getConversationMessages, getReadiness, listConversations, sendChatMessage, type ApiAuth, type ChatContextSummary, type ChatMemoryContext, type ToolActivity } from './services/api'
+import { getConversationMessages, getInterfaceConfig, getReadiness, listConversations, sendChatMessage, type ApiAuth, type ChatContextSummary, type ChatMemoryContext, type InterfaceConfig, type ToolActivity } from './services/api'
 import MemoryManager from './components/MemoryManager'
 import CodingPanel from './components/CodingPanel'
 import BrowserPanel from './components/BrowserPanel'
 import CapabilitiesPanel from './components/CapabilitiesPanel'
 import ActivityPanel from './components/ActivityPanel'
+import VoiceControls from './voice/VoiceControls'
+import { createBrowserSpeechProvider, type SpeechProvider } from './voice/speech'
 
 const MAX_MESSAGE_LENGTH = 4000
 
@@ -86,6 +88,10 @@ export default function App() {
   const [historyHasMore, setHistoryHasMore] = useState(false)
   const [historyBeforeSequence, setHistoryBeforeSequence] = useState<number | null>(null)
   const [readiness, setReadiness] = useState<'loading' | 'ready' | 'not_ready' | 'unreachable'>('loading')
+  const [interfaceConfig, setInterfaceConfig] = useState<InterfaceConfig | null>(null)
+  const [voiceConsent, setVoiceConsent] = useState(false)
+  const [readAloud, setReadAloud] = useState(false)
+  const [speechProvider] = useState<SpeechProvider>(() => createBrowserSpeechProvider())
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const requestInFlightRef = useRef(false)
@@ -118,6 +124,13 @@ export default function App() {
     void fetchReadiness()
   }, [fetchReadiness])
 
+  useEffect(() => {
+    // Feature flags only; if unavailable, optional voice controls stay hidden (typing always works).
+    let cancelled = false
+    Promise.resolve().then(() => getInterfaceConfig()).then((config) => { if (!cancelled && config) setInterfaceConfig(config) }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [])
+
   const handleUnauthorized = useCallback(() => {
     sessionVersionRef.current += 1
     sessionControllerRef.current.abort()
@@ -144,7 +157,8 @@ export default function App() {
     setHistoryBeforeSequence(null)
     setPending(false)
     setUnlockOpen(true)
-  }, [])
+    speechProvider.cancelSpeech() // locking stops any reply being read aloud
+  }, [speechProvider])
 
   const currentAuth = useCallback((): ApiAuth => ({
     token: credential || undefined,
@@ -162,6 +176,8 @@ export default function App() {
 
   const activeConversation = conversations.find((conversation) => conversation.id === activeId) ?? null
   const messages = activeConversation?.messages ?? []
+  const lastMessage = messages.length ? messages[messages.length - 1] : null
+  const latestReply = lastMessage && lastMessage.role === 'assistant' && !lastMessage.error ? { id: lastMessage.id, text: lastMessage.content } : null
 
   useEffect(() => {
     if (messages.length) bottomRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'end' })
@@ -363,6 +379,17 @@ export default function App() {
     setMobileMenuOpen(false)
   }
 
+  function featureOff(label: string) {
+    const features = interfaceConfig?.features
+    if (!features) return false
+    return (label === 'Browser' && !features.browser) || (label === 'Capabilities' && !features.tools) || (label === 'Memory' && !features.memory)
+  }
+
+  function addTranscript(text: string) {
+    setDraft((current) => `${current.trim() ? `${current.trimEnd()} ` : ''}${text}`.slice(0, MAX_MESSAGE_LENGTH))
+    inputRef.current?.focus()
+  }
+
   const sortedConversations = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt || b.id.localeCompare(a.id))
 
   return (
@@ -385,7 +412,7 @@ export default function App() {
             const active = label === activeView
             const available = label === 'Chat' || label === 'Memory' || label === 'Coding' || label === 'Browser' || label === 'Capabilities' || label === 'Activity'
             return <button key={label} className={`nav-item ${active ? 'nav-active' : ''}`} onClick={() => selectNav(label)} aria-current={active ? 'page' : undefined}>
-              <Icon size={17} strokeWidth={1.8} /><span>{label}</span>{!available && <span className="nav-soon">SOON</span>}
+              <Icon size={17} strokeWidth={1.8} /><span>{label}</span>{!available && <span className="nav-soon">SOON</span>}{available && featureOff(label) && <span className="nav-soon nav-off" aria-hidden="true" title="Disabled by the server configuration">OFF</span>}
             </button>
           })}
         </nav>
@@ -452,7 +479,7 @@ export default function App() {
         <div className="composer-dock">
           <form className="composer" onSubmit={handleSubmit}>
             <textarea ref={inputRef} aria-label="Message JARVIS" placeholder="Message JARVIS…" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} maxLength={MAX_MESSAGE_LENGTH} rows={1} disabled={pending} />
-            <div className="composer-bottom"><div className="composer-hint"><span className="hint-key">↵</span> to send <span className="hint-separator">·</span> <span className="hint-key">⇧ ↵</span> for new line <span className="hint-separator">·</span> Provider mode is shown on each reply</div><div className="composer-actions"><span className="char-count">{draft.length > 0 ? `${draft.length}/${MAX_MESSAGE_LENGTH}` : ''}</span><button type="submit" className="send-button" aria-label="Send message" disabled={!draft.trim() || pending || draft.trim().length > MAX_MESSAGE_LENGTH}><ArrowUp size={18} strokeWidth={2.3} /></button></div></div>
+            <div className="composer-bottom"><div className="composer-hint"><span className="hint-key">↵</span> to send <span className="hint-separator">·</span> <span className="hint-key">⇧ ↵</span> for new line <span className="hint-separator">·</span> Provider mode is shown on each reply</div><div className="composer-actions">{interfaceConfig?.voice.enabled && <VoiceControls provider={speechProvider} consented={voiceConsent} onConsent={() => setVoiceConsent(true)} readAloud={readAloud} onReadAloudChange={setReadAloud} onTranscript={addTranscript} latestReply={latestReply} busy={pending} />}<span className="char-count">{draft.length > 0 ? `${draft.length}/${MAX_MESSAGE_LENGTH}` : ''}</span><button type="submit" className="send-button" aria-label="Send message" disabled={!draft.trim() || pending || draft.trim().length > MAX_MESSAGE_LENGTH}><ArrowUp size={18} strokeWidth={2.3} /></button></div></div>
           </form>
           <div className="composer-footer"><span><ShieldCheck size={12} /> Memory saving is explicit</span><span><Clock3 size={12} /> Chat history depends on backend persistence</span></div>
         </div></>}

@@ -303,3 +303,48 @@ test('keeps memory management and document-ingestion confirmation accessible', a
   await page.getByRole('button', { name: 'Cancel' }).click()
   await expect(confirmation).toHaveCount(0)
 })
+
+test('offers opt-in browser voice that fills the composer without sending and reads new replies aloud', async ({ page }) => {
+  // A deterministic stand-in for the browser Web Speech API: no microphone and no speech service are used.
+  await page.addInitScript(() => {
+    window.__voice = { recognitions: [], spoken: [] }
+    class FakeRecognition {
+      constructor() { window.__voice.recognitions.push(this) }
+      start() { this.started = true }
+      stop() { this.onend?.() }
+      abort() { this.onend?.() }
+    }
+    Object.defineProperty(window, 'SpeechRecognition', { value: FakeRecognition, configurable: true })
+    Object.defineProperty(window, 'SpeechSynthesisUtterance', { value: class { constructor(text) { this.text = text } }, configurable: true })
+    Object.defineProperty(window, 'speechSynthesis', {
+      value: { speak(utterance) { window.__voice.spoken.push(utterance.text); setTimeout(() => utterance.onend?.(), 0) }, cancel() {}, getVoices() { return [] } },
+      configurable: true,
+    })
+  })
+  await page.reload()
+  let chatRequests = 0
+  page.on('request', (request) => { if (new URL(request.url()).pathname === '/api/chat') chatRequests += 1 })
+
+  await page.getByRole('button', { name: 'Start voice input' }).click()
+  const disclosure = page.getByRole('dialog', { name: 'Use voice with JARVIS?' })
+  await expect(disclosure).toContainText('JARVIS never receives or stores audio')
+  await page.getByRole('button', { name: 'Enable voice' }).click()
+  await expect(page.getByRole('button', { name: 'Stop voice input' })).toBeVisible()
+  await page.evaluate(() => {
+    const recognition = window.__voice.recognitions.at(-1)
+    recognition.onresult({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: 'E2E voice check' } }] })
+    recognition.onend()
+  })
+  const composer = page.getByRole('textbox', { name: 'Message JARVIS' })
+  await expect(composer).toHaveValue('E2E voice check')
+  expect(chatRequests).toBe(0)
+
+  await page.getByRole('button', { name: 'Read replies aloud' }).click()
+  const chatResponse = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/chat')
+  await composer.press('Enter')
+  expect((await chatResponse).status()).toBe(200)
+  const reply = 'This is a JARVIS demo response, not an AI-generated answer. I received: E2E voice check'
+  await expect(page.getByText(reply)).toBeVisible()
+  await expect.poll(() => page.evaluate(() => window.__voice.spoken)).toEqual([reply])
+  expect(chatRequests).toBe(1)
+})
