@@ -20,8 +20,11 @@ from jarvis.api.routes.memories import router as memories_router
 from jarvis.api.routes.repo import router as repo_router
 from jarvis.api.routes.tools import router as tools_router
 from jarvis.api.routes.verification import router as verification_router
+from jarvis.api.routes.workflow import router as workflow_router
 from jarvis.assistant.service import AssistantService
 from jarvis.assistant.stores import MemoryAssistantStore, PostgresAssistantStore
+from jarvis.workflow.service import WorkflowService
+from jarvis.workflow.stores import MemoryWorkflowStore, PostgresWorkflowStore
 from jarvis.audit.service import ApprovalService, AuditService
 from jarvis.audit.stores import (
     MemoryApprovalStore, MemoryAuditStore, PostgresApprovalStore, PostgresAuditStore,
@@ -129,9 +132,16 @@ def create_app(
         timeouts = dict(connect_timeout_seconds=resolved_settings.persistence_connect_timeout_seconds,
                         operation_timeout_seconds=resolved_settings.persistence_operation_timeout_seconds)
         assistant_store = PostgresAssistantStore(url, **timeouts)
+        workflow_store = PostgresWorkflowStore(url, **timeouts)
     else:
         assistant_store = MemoryAssistantStore()
+        workflow_store = MemoryWorkflowStore()
     app.state.assistant_service = AssistantService(assistant_store, audit_service=app.state.audit_service)
+    app.state.workflow_service = WorkflowService(
+        workflow_store,
+        audit_service=app.state.audit_service,
+        assistant_service=app.state.assistant_service,
+    )
 
     app.add_middleware(
         RequestBodyLimitMiddleware,
@@ -149,6 +159,7 @@ def create_app(
     app.include_router(activity_router)
     app.include_router(interface_router)
     app.include_router(assistant_router)
+    app.include_router(workflow_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

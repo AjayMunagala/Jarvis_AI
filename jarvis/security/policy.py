@@ -28,6 +28,9 @@ class Capability(StrEnum):
     # Personal assistant foundation (v3.1): tasks, notes, reminders, local calendar.
     ASSISTANT_READ = "assistant.read"
     ASSISTANT_WRITE = "assistant.write"
+    # Workflow orchestration (v3.2): DAG workflows and execution runs.
+    WORKFLOW_READ = "workflow.read"
+    WORKFLOW_WRITE = "workflow.write"
     EXTERNAL_ACTION_EXECUTE = "external_action.execute"
 
 
@@ -48,6 +51,8 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.APPROVALS_DECIDE,
     Capability.ASSISTANT_READ,
     Capability.ASSISTANT_WRITE,
+    Capability.WORKFLOW_READ,
+    Capability.WORKFLOW_WRITE,
 })
 
 
