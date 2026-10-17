@@ -3,6 +3,8 @@
 from datetime import datetime
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_serializer
+
+from jarvis.agent.models import ToolActivity
 from uuid import UUID
 
 
@@ -52,13 +54,17 @@ class ChatResponse(BaseModel):
     conversation_id: UUID | None = None
     memory_context: ChatMemoryContext | None = None
     context: ChatContextSummary | None = None
+    # v2.8: tool calls made for this request, with independent verification.
+    tool_activity: ToolActivity | None = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_context(self, handler):
-        # Stateless chat has no context assembly; keep its response shape unchanged.
+        # Optional sections are omitted when unused, keeping earlier response shapes unchanged.
         data = handler(self)
-        if isinstance(data, dict) and data.get("context") is None:
-            data.pop("context", None)
+        if isinstance(data, dict):
+            for key in ("context", "tool_activity"):
+                if data.get(key) is None:
+                    data.pop(key, None)
         return data
 
 

@@ -123,12 +123,15 @@ class ToolRuntime:
                 input_schema=definition.input_schema, output_schema=definition.output_schema,
                 timeout_seconds=timeout, max_output_bytes=max_bytes,
                 available=available, availability_reason=reason,
-                invocable=enabled and available and permitted and handler is not None
-                and definition.risk == "low" and definition.read_only,
+                invocable=(invocable := enabled and available and permitted and handler is not None
+                           and definition.risk == "low" and definition.read_only),
+                autonomous=bool(invocable and getattr(self.settings, "chat_tools_enabled", False)),
             ))
         return CapabilitiesResponse(
             tools_enabled=enabled, capabilities=tuple(items),
-            note=("Read-only tools only. The orchestrator does not call tools autonomously in v2.7. "
+            note=("Read-only tools only. "
+                  + ("Chat may propose calls to invocable tools; trusted code validates each one. "
+                     if getattr(self.settings, "chat_tools_enabled", False) else "Chat does not call tools. ")
                   + ("" if enabled else "Tool execution is disabled (JARVIS_TOOLS_ENABLED=false).")).strip(),
         )
 

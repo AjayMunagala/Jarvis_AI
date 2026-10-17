@@ -9,7 +9,7 @@ v2.7; tools run only when the authenticated owner invokes them. Model-proposed t
 
 | Contract | Purpose |
 |---|---|
-| `CapabilityDescriptor` | Tool id/version, title, description, `risk`, `read_only`, `side_effects: "none"`, required permissions, input/output JSON schemas, timeout, output limit, per-request `available`/`availability_reason`, `invocable`, `autonomous: false`. |
+| `CapabilityDescriptor` | Tool id/version, title, description, `risk`, `read_only`, `side_effects: "none"`, required permissions, input/output JSON schemas, timeout, output limit, per-request `available`/`availability_reason`, `invocable`, `autonomous` (true only when v2.8 chat tools are enabled and the tool is invocable). |
 | `ToolCall` | Server-assigned `call_id`, tool id, correlation id, deadline. Clients cannot set ids or permissions. |
 | `ToolResult` | `status` (`succeeded`, `failed`, `timed_out`, `unavailable`, `denied`, `invalid_input`, `partial`, `approval_required`), typed `output` (only on success), sanitized `error`, `evidence` references, timings, `retryable`, `output_bytes`, `audit_event_id`, `untrusted_content`. |
 | `ToolAuditEvent` | Metadata-only record: ids, tool, actor, decision, status, error code, argument **names** and a SHA-256 digest of the arguments (never values), duration, evidence count, `durable: false`. |
@@ -106,3 +106,5 @@ orchestrator remains tool-free (`ToolRegistry.execution_enabled == False`; exper
 `.venv-dev\Scripts\python.exe -m pytest tests/test_tools.py -v` (unit/API tests with in-process fakes, this
 repository for repo/git tools, and the mock browser provider) and `npx vitest run` in `frontend/`
 (`CapabilitiesPanel.test.tsx`, `tools-api.test.ts`).
+
+> **v2.8 update.** With `JARVIS_CHAT_TOOLS_ENABLED=true`, chat may propose calls to invocable tools; every call still goes through this runtime. See `docs/ACTION_LOOP.md`.

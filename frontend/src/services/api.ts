@@ -28,6 +28,39 @@ export interface ChatContextSummary {
   unknown_citation_count: number
 }
 
+export interface ToolActivityCall {
+  ref: string
+  round: number
+  proposer: 'rules' | 'model'
+  tool_id: string
+  purpose: string
+  status: string
+  error_code: string | null
+  executed: boolean
+  evidence: string[]
+  duration_ms: number
+  call_id: string | null
+  audit_event_id: string | null
+  untrusted_content: boolean
+}
+
+export interface ToolVerification {
+  status: 'verified' | 'partially_verified' | 'unverified' | 'not_applicable'
+  checks: { name: string; outcome: 'pass' | 'fail' | 'not_evaluated'; detail: string }[]
+  cited_refs: string[]
+  unknown_citation_count: number
+  summary: string
+}
+
+export interface ToolActivity {
+  proposer: 'rules' | 'model'
+  rounds_used: number
+  calls: ToolActivityCall[]
+  stopped_reason: 'no_tools_needed' | 'completed' | 'round_limit' | 'call_limit' | 'deadline' | 'proposal_invalid' | 'provider_failed'
+  verification: ToolVerification | null
+  limitations: string[]
+}
+
 export interface ChatResponse {
   reply: string
   provider: string
@@ -36,6 +69,7 @@ export interface ChatResponse {
   conversation_id?: string | null
   memory_context?: ChatMemoryContext | null
   context?: ChatContextSummary
+  tool_activity?: ToolActivity
 }
 
 export interface ConversationSummary {

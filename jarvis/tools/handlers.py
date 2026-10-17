@@ -38,6 +38,17 @@ class ToolContext:
     browser_service: Any = None
 
 
+def build_tool_context(state, owner_id: UUID) -> "ToolContext":
+    """Collect the existing services a tool may wrap from FastAPI app state."""
+    return ToolContext(
+        owner_id=owner_id, settings=state.settings,
+        memory_repository=getattr(state, "memory_repository", None),
+        repo_service=getattr(state, "repo_service", None),
+        verification_service=getattr(state, "verification_service", None),
+        browser_service=getattr(state, "browser_service", None),
+    )
+
+
 @dataclass(frozen=True)
 class HandlerResult:
     output: Output

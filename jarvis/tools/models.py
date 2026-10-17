@@ -55,7 +55,8 @@ class CapabilityDescriptor(Contract):
     available: StrictBool
     availability_reason: StrictStr = Field(default="", max_length=300)
     invocable: StrictBool
-    autonomous: Literal[False] = False  # the orchestrator never calls tools in v2.7
+    # True only when JARVIS_CHAT_TOOLS_ENABLED lets the chat loop propose this tool (v2.8).
+    autonomous: StrictBool = False
 
 
 class CapabilitiesResponse(Contract):

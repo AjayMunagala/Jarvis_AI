@@ -559,3 +559,10 @@ D1 registry populated, runtime off by default; D2 no consequential execution; D3
 ### Dependencies for v2.8
 
 v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and the live policy), `CapabilityDescriptor` schemas for model-facing tool descriptions, and `ToolResult.evidence` for verification. Model-proposed calls must still pass the same enforcement order; `executable` in `tools.json` must remain `false` until v2.8 deliberately changes orchestrator behavior.
+
+## Core v2.8 — First complete action loop (implemented; uncommitted; owner acceptance pending)
+
+- Baseline: `jarvis/integration-acceptance-v27` at `7ba5853ffa91d40fe69e2697b6dc3a93375a0dcc` (v2.7 accepted and integrated locally). Work is on `claude/jarvis-v2.8-action-loop` in `D:\Project_Jarvis_worktrees\loop-v28`; nothing is committed or pushed.
+- New `jarvis/agent/` (`models.py`, `proposers.py`, `loop.py`, `verification.py`, `rendering.py`); chat integration in `jarvis/api/routes/chat.py`; `RequestContext.tool_evidence` and expert rendering of tool results; `ChatResponse.tool_activity`; settings `JARVIS_CHAT_TOOLS_ENABLED` (default false) and `JARVIS_CHAT_TOOL_MAX_CALLS`; `CapabilityDescriptor.autonomous` now reflects chat-tool enablement; chat UI tool-activity line. See `docs/ACTION_LOOP.md`.
+- Decision D3 applied: model-proposed calls only for currently invocable LOW-risk read-only tools, each validated by trusted code and re-checked by the runtime.
+- Dependencies for v2.9: the approval gateway should reuse `ToolResult`/`ToolActivityCall` statuses (`approval_required` already exists) and the audit correlation ids; durable audit should persist `ToolAuditEvent` records.

@@ -250,6 +250,11 @@ Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remain
 - Registry populated with 8 read-only tools wrapping existing services (calculator, memory search, repository search and symbols, git status and diff summary, verification plan, browser observe); `JARVIS_TOOLS_ENABLED=false` by default; the orchestrator does not call tools yet (v2.8).
 - `GET /capabilities`, `POST /tools/calls`, `GET /tools/audit` (in-memory, non-durable) and a Capabilities frontend view. pgvector remains deferred (D6). Details: `docs/TOOL_RUNTIME.md`.
 
+## Core v2.8 — First complete action loop (implemented; owner acceptance pending)
+
+- Master Phase 6. Chat requests can use registered read-only tools: rule-based (offline) or model-proposed calls, validated by trusted code, executed through the v2.7 runtime within the shared deadline and round/call limits, answered with untrusted tool evidence, and independently verified (citations and computed values).
+- `ChatResponse.tool_activity` and a chat UI line show calls, statuses, and verification. Off by default (`JARVIS_CHAT_TOOLS_ENABLED=false`). Details: `docs/ACTION_LOOP.md`.
+
 ## Later milestones
 
 1. Identity and memory governance: authenticated users, explicit ownership, access controls, retention/export/revocation, and user-visible memory controls before exposing memory in shared deployments.

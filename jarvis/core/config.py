@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     tools_max_timeout_seconds: float = Field(default=20.0, ge=1.0, le=30.0)
     tools_max_output_bytes: int = Field(default=32_768, ge=1_024, le=131_072)
     tools_max_argument_bytes: int = Field(default=8_192, ge=512, le=65_536)
+    # Action loop (v2.8): chat may propose read-only tool calls; trusted code validates each one.
+    chat_tools_enabled: bool = False
+    chat_tool_max_calls: int = Field(default=4, ge=1, le=8)
 
     @model_validator(mode="after")
     def validate_provider_configuration(self) -> "Settings":
@@ -143,6 +146,8 @@ class Settings(BaseSettings):
             token = self.local_auth_token.get_secret_value() if self.local_auth_token else ""
             if len(token) < 32 or self.owner_id is None or self.owner_id.int == 0:
                 raise ValueError("JARVIS_TOOLS_ENABLED=true requires JARVIS_LOCAL_AUTH_TOKEN and JARVIS_OWNER_ID.")
+        if self.chat_tools_enabled and not self.tools_enabled:
+            raise ValueError("JARVIS_CHAT_TOOLS_ENABLED=true requires JARVIS_TOOLS_ENABLED=true.")
         if self.browser_checks_enabled and not self.browser_enabled:
             raise ValueError("JARVIS_BROWSER_CHECKS_ENABLED=true requires JARVIS_BROWSER_ENABLED=true.")
         return self

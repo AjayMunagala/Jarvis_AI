@@ -525,4 +525,24 @@ describe('JARVIS chat', () => {
     expect(sources).toHaveTextContent('history unavailable')
     expect(sources).toHaveTextContent('1 omitted for size')
   })
+
+  it('shows tool calls with honest statuses and the independent verification result', async () => {
+    sendMock.mockResolvedValue({
+      reply: 'The result is 42 [T1].', provider: 'scripted', demo: false,
+      tool_activity: {
+        proposer: 'model', rounds_used: 1, stopped_reason: 'completed', limitations: [],
+        calls: [
+          { ref: 'T1', round: 1, proposer: 'model', tool_id: 'calculator', purpose: 'compute', status: 'succeeded', error_code: null, executed: true, evidence: ['computed:calculator'], duration_ms: 2, call_id: 'TC-0123456789abcdef', audit_event_id: 'AE-0123456789abcdef', untrusted_content: false },
+          { ref: 'T2', round: 1, proposer: 'model', tool_id: 'shell.exec', purpose: 'x', status: 'denied', error_code: 'not_offered', executed: false, evidence: [], duration_ms: 0, call_id: null, audit_event_id: null, untrusted_content: false },
+        ],
+        verification: { status: 'partially_verified', checks: [], cited_refs: ['T1'], unknown_citation_count: 0, summary: 'Some tool results are cited correctly; others are uncited or failed.' },
+      },
+    })
+    render(<App />)
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'compute 6 times 7{Enter}')
+    const tools = await screen.findByLabelText('Tools used for this answer')
+    expect(tools).toHaveTextContent('model-proposed, validated by JARVIS')
+    expect(tools).toHaveTextContent('T1 calculator · succeeded, T2 shell.exec · denied (not_offered)')
+    expect(tools).toHaveTextContent('Verification: partially verified')
+  })
 })

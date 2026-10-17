@@ -83,6 +83,10 @@ Apply migration `0005_memory_source_kind.sql` (`database\install_db.bat` applies
 
 `JARVIS_TOOLS_ENABLED=true` (with the owner token configured) lets the owner run registered **read-only** tools through `POST /tools/calls` or the **Capabilities** view: calculator, memory search, repository search and symbols, git status and diff summary, verification planning (never execution), and browser observation. Every call is schema-validated, permission-checked server-side, time- and size-bounded, and audited (in memory; not durable). Medium- or higher-risk tools are never executed. JARVIS's chat does not call tools on its own in this version. pgvector/semantic retrieval is not implemented. See `docs/TOOL_RUNTIME.md`.
 
+## Core v2.8 — Action loop (implemented; owner acceptance pending)
+
+With `JARVIS_TOOLS_ENABLED=true` and `JARVIS_CHAT_TOOLS_ENABLED=true`, chat can use the read-only tools: JARVIS proposes calls (deterministic rules offline, the model with a real provider), validates and runs them through the tool runtime, gives the results to the answer as untrusted data, and checks the answer against the evidence (`verified`, `partially_verified`, `unverified`, or `not_applicable`). Each answer shows which tools ran and their statuses. Nothing beyond the read-only tools can run. See `docs/ACTION_LOOP.md`.
+
 ## Prerequisites
 
 - Windows 10/11 and Python 3.11 or newer (developed with Python 3.12.10).

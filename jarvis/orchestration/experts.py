@@ -9,6 +9,7 @@ from typing import Protocol
 from pydantic import BaseModel, ValidationError
 
 from jarvis.intelligence.base import IntelligenceProvider, TransientProviderError
+from jarvis.agent.rendering import TOOL_EVIDENCE_INSTRUCTION, render_tool_evidence
 from jarvis.memory.context import CONTEXT_SYSTEM_INSTRUCTION, assemble_context, render_context_message
 from jarvis.orchestration.models import (
     AnalysisExpertOutput,
@@ -64,6 +65,11 @@ class ConfiguredExpert:
         if assembled is not None and assembled.items:
             system_instruction = "\n\n".join(
                 part for part in (system_instruction, CONTEXT_SYSTEM_INSTRUCTION) if part
+            )
+        if context.tool_evidence:
+            message = render_tool_evidence(message, context.tool_evidence)
+            system_instruction = "\n\n".join(
+                part for part in (system_instruction, TOOL_EVIDENCE_INSTRUCTION) if part
             )
         if system_instruction:
             kwargs["system_instruction"] = system_instruction

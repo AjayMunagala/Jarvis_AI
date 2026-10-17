@@ -5,6 +5,7 @@ from typing import Literal, TypeAlias
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator, model_validator
+from jarvis.agent.models import ToolEvidenceRecord
 from jarvis.memory.context import AssembledContext
 from jarvis.memory.models import MAX_RETRIEVED_RECORDS, RetrievedMemory
 
@@ -30,6 +31,8 @@ class RequestContext(Contract):
     # Bounded, attributed context built by jarvis.memory.context. When absent,
     # experts assemble one from retrieved_memories with default limits.
     context: AssembledContext | None = None
+    # v2.8: results of trusted-code-validated read-only tool calls for this request.
+    tool_evidence: tuple[ToolEvidenceRecord, ...] = Field(default=(), max_length=20)
     received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

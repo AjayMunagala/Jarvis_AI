@@ -18,7 +18,7 @@ from starlette.concurrency import run_in_threadpool
 from jarvis.api.dependencies import authenticated_owner, enforce_capability
 from jarvis.models.schemas import ErrorResponse
 from jarvis.security.policy import Capability
-from jarvis.tools.handlers import ToolContext
+from jarvis.tools.handlers import ToolContext, build_tool_context
 from jarvis.tools.models import AuditPage, CapabilitiesResponse, ToolCallRequest, ToolResult
 from jarvis.tools.runtime import ToolRuntime
 
@@ -41,14 +41,7 @@ def _runtime(request: Request) -> ToolRuntime:
 
 
 def _context(request: Request, owner_id: UUID) -> ToolContext:
-    state = request.app.state
-    return ToolContext(
-        owner_id=owner_id, settings=state.settings,
-        memory_repository=getattr(state, "memory_repository", None),
-        repo_service=getattr(state, "repo_service", None),
-        verification_service=getattr(state, "verification_service", None),
-        browser_service=getattr(state, "browser_service", None),
-    )
+    return build_tool_context(request.app.state, owner_id)
 
 
 @router.get("/capabilities", response_model=CapabilitiesResponse, responses=_ERRORS)

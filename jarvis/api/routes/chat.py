@@ -18,6 +18,8 @@ from jarvis.models.schemas import (
     ChatResponse,
     ErrorResponse,
 )
+from jarvis.agent.loop import ActionLoop
+from jarvis.agent.verification import verify
 from jarvis.memory.base import MemoryDeadlineExceeded
 from jarvis.memory.context import AssembledContext, HistoryEntry, assemble_context, cited_refs
 from jarvis.memory.query import extract_query_terms
@@ -30,6 +32,7 @@ from jarvis.orchestration.models import (
 )
 from jarvis.persistence.base import ConversationNotFound, PersistenceError
 from jarvis.security.policy import Capability
+from jarvis.tools.handlers import build_tool_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["chat"])
@@ -140,6 +143,20 @@ async def chat(
             "retrieved_memories": retrieval.records if retrieval is not None else (),
         })
 
+    tool_activity = None
+    tool_evidence = ()
+    runtime = getattr(request.app.state, "tool_runtime", None)
+    if settings.chat_tools_enabled and owner_id is not None and runtime is not None:
+        # Proposals (rule-based or model) are validated and executed only through the
+        # read-only ToolRuntime, inside this request's shared deadline.
+        tool_activity, tool_evidence = await ActionLoop(runtime, request.app.state.provider, settings).run(
+            owner_id=owner_id, message=body.message, context=build_tool_context(request.app.state, owner_id),
+            policy=request.app.state.authorization_policy, deadline=deadline, execution_id=context.execution_id,
+        )
+        context = context.model_copy(update={"tool_evidence": tool_evidence})
+        if monotonic() >= deadline:
+            raise _request_timeout(context.execution_id)
+
     try:
         result = await request.app.state.orchestration_service.run(context, deadline=deadline)
     except RequestDeadlineExceeded as exc:
@@ -203,6 +220,8 @@ async def chat(
         conversation_id=conversation_id,
         memory_context=memory_context,
         context=_context_summary(assembled, result.reply) if assembled is not None else None,
+        tool_activity=(tool_activity.model_copy(update={"verification": verify(result.reply, tool_activity, tool_evidence)})
+                       if tool_activity is not None else None),
     )
 
 
