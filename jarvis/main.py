@@ -119,7 +119,7 @@ def create_app(
         approval_store, app.state.audit_service, ttl_seconds=resolved_settings.approvals_ttl_seconds,
     )
     # v5.1-v5.6 advanced intelligence layer (wraps the existing provider; replaces nothing).
-    app.state.intelligence = build_intelligence(resolved_settings, resolved_provider)
+    app.state.intelligence = build_intelligence(resolved_settings, resolved_provider, app.state.audit_service)
     for component in (app.state.tool_runtime, app.state.browser_service):
         component.audit_service = app.state.audit_service
         component.approval_service = app.state.approval_service

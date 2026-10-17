@@ -734,7 +734,7 @@ export interface AuditRecord {
   event_id: string
   occurred_at: string
   owner_id: string
-  category: 'tool' | 'browser' | 'approval'
+  category: 'tool' | 'browser' | 'approval' | 'intelligence'
   event_type: string
   decision: string
   status: string

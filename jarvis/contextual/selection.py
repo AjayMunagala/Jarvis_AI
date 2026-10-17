@@ -121,6 +121,13 @@ def assemble(request: ContextRequest, candidates: Iterable[MemoryCandidate], *, 
              weights: RelevanceWeights = RelevanceWeights(), similarity: SimilarityScorer | None = None,
              now: datetime | None = None, outdated_refs: frozenset[str] = frozenset()) -> ContextPackage:
     similarity = similarity or LexicalSimilarity()
+    # External scorers (for example a future semantic scorer) are validated: invalid scores count as no match.
+    from jarvis.contextual.sources import checked_similarity  # noqa: PLC0415 - avoids an import cycle
+    if isinstance(similarity, LexicalSimilarity):
+        checked = None
+    else:
+        checked = similarity if isinstance(similarity, checked_similarity) else checked_similarity(similarity)
+    score = checked or similarity
     now = now or datetime.now(timezone.utc)
     omitted: list[Omission] = []
     pool: list[MemoryCandidate] = []
@@ -150,7 +157,7 @@ def assemble(request: ContextRequest, candidates: Iterable[MemoryCandidate], *, 
             continue
         seen_content.add(fingerprint)
         components = {
-            "similarity": round(similarity(request.query, item.content), 6),
+            "similarity": round(score(request.query, item.content), 6),
             "recency": recency_score(item, now),
             "reliability": RELIABILITY_SCORE[item.reliability],
             "scope": 1.0 if item.project_id is not None else 0.6,
@@ -161,8 +168,8 @@ def assemble(request: ContextRequest, candidates: Iterable[MemoryCandidate], *, 
         if components["similarity"] == 0 and not item.pinned and components["task"] == 0:
             omitted.append(Omission(candidate_id=item.candidate_id, reason="below_threshold"))
             continue
-        score = sum(getattr(weights, key) * value for key, value in components.items()) / total_weight
-        if score < request.min_score and not item.pinned:
+        total = sum(getattr(weights, key) * value for key, value in components.items()) / total_weight
+        if total < request.min_score and not item.pinned:
             omitted.append(Omission(candidate_id=item.candidate_id, reason="below_threshold"))
             continue
         reasons = []
@@ -172,14 +179,14 @@ def assemble(request: ContextRequest, candidates: Iterable[MemoryCandidate], *, 
             reasons.append("contradicted by an equally reliable record")
         if item.status == "outdated" or item.source_ref in outdated_refs:
             reasons.append("marked outdated")
-        scored.append((round(score, 6), item, components, tuple(reasons)))
+        scored.append((round(total, 6), item, components, tuple(reasons)))
     scored.sort(key=lambda entry: (-entry[0], entry[1].candidate_id))
 
     budget, source = budget_for(model, request)
     used = 0
     items: list[PackagedItem] = []
     counters: dict[str, int] = {}
-    for score, item, components, reasons in scored:
+    for item_score, item, components, reasons in scored:
         if len(items) >= request.max_items:
             omitted.append(Omission(candidate_id=item.candidate_id, reason="item_limit"))
             continue
@@ -197,10 +204,12 @@ def assemble(request: ContextRequest, candidates: Iterable[MemoryCandidate], *, 
         used += estimate_tokens(excerpt)
         items.append(PackagedItem(ref=f"{prefix}{counters[prefix]}", candidate_id=item.candidate_id,
                                   category=item.category, source_ref=item.source_ref, reliability=item.reliability,
-                                  excerpt=excerpt, truncated=truncated, score=score, components=components,
+                                  excerpt=excerpt, truncated=truncated, score=item_score, components=components,
                                   reasons=reasons))
     note = ("Similarity is lexical; no semantic retrieval is used." if isinstance(similarity, LexicalSimilarity)
             else f"Similarity: {similarity.name}.")
+    if checked is not None and checked.invalid:
+        note += f" {checked.invalid} invalid similarity score(s) were treated as no match."
     if any(item.resolution == "unresolved" for item in contradictions):
         note += " Some records contradict each other and are flagged."
     return ContextPackage(items=tuple(items), omitted=tuple(omitted), contradictions=tuple(contradictions),

@@ -588,3 +588,11 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - Branch `claude/jarvis-v5.1-to-v5.6`, worktree `D:\Project_Jarvis_worktrees\intel-v5`, based on `jarvis/integration-acceptance-v30` (`7bfb919`). Built in parallel with Antigravity's v3.1–v4.0 branch and **not integrated or verified against it**.
 - New packages: `jarvis/routing`, `jarvis/knowledge_graph`, `jarvis/contextual`, `jarvis/multimodal`, `jarvis/reasoning`, `jarvis/personalization`; wiring `jarvis/advanced_intelligence.py`; API `jarvis/api/routes/intelligence.py`; migrations `0052_knowledge_graph.sql`, `0056_personalization.sql`; four new owner capabilities.
 - Not run: live providers, live PostgreSQL for 0052/0056, real multimodal models. Chat does not use the router or personalization yet (deliberately; see the integration table in `docs/ADVANCED_INTELLIGENCE.md`).
+
+### v5.x integration hardening (branch `claude/jarvis-v5.1-to-v5.6`, child of `a8439b8`)
+
+- Durable memory-update proposals and outdated decisions (`jarvis/contextual/updates.py`, migration `0057_memory_update_proposals.sql`; claim, apply, finalize, with an `applying` state and an owner-resolution endpoint).
+- Transactional knowledge-graph updates with per-owner advisory and keyed locks; in-memory undo; constraint races return 409 (`jarvis/knowledge_graph/stores.py`, `service.py`).
+- Central audit of all intelligence mutations under the new category `intelligence` (migration `0058_audit_intelligence_category.sql`; 0006 unchanged).
+- Adapter boundaries: `reasoning/adapters.py` (neutral plan document v1), `contextual/sources.py`, `knowledge_graph/adapters.py`. Chat is unchanged.
+- Not run: live PostgreSQL (the opt-in suite `integration_tests/test_intelligence_postgres_integration.py` is ready) and live model providers. Details: `docs/ADVANCED_INTELLIGENCE.md`, *Integration hardening*.

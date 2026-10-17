@@ -71,7 +71,7 @@ Re-asserting the same relationship merges its provenance. A verified fact is nev
 
 **Storage.** In-memory storage is the default. PostgreSQL is used when persistence is enabled; migration `0052_knowledge_graph.sql` adds composite foreign keys on `(owner_id, id)`, so cross-owner edges are impossible in the database itself.
 
-**Limitation.** Multi-step updates are serialized within one process. Several processes writing the same owner's graph concurrently are not coordinated.
+**Concurrency.** Superseded by the hardening pass: multi-step updates are transactional with per-owner keyed locks across processes. See *Integration hardening* below.
 
 ## v5.3 — Memory and context management (`jarvis/contextual`)
 
@@ -88,7 +88,7 @@ Re-asserting the same relationship merges its provenance. A verified fact is nev
 
 **Similarity is lexical** and reuses `jarvis.memory.query`. `SimilarityScorer` is the plug-in point for semantic retrieval once the knowledge workstream provides embeddings. pgvector is still not used (decision D6).
 
-**Update proposals.** Memory updates (`add`, `mark_outdated`) need an owner decision. Accepting an `add` calls the existing repository's `create`. "Outdated" decisions are an in-memory overlay. Making them durable needs a memory-schema change, which belongs to the knowledge workstream.
+**Update proposals.** Memory updates (`add`, `mark_outdated`) need an owner decision. Accepting an `add` calls the existing repository's `create`. Decisions are durable in PostgreSQL (migration 0057) when persistence is enabled. See *Integration hardening* below.
 
 ## v5.4 — Multimodal foundation (`jarvis/multimodal`)
 
@@ -207,7 +207,7 @@ These are documented contracts. None has been verified against that branch yet.
 | v3.4 document intelligence | Produce `knowledge_graph.KnowledgeRecord`s from extracted entities and relations (model-extracted relations stay `inferred`) | Contract ready; producer pending |
 | v3.5 proactive / v3.9 controlled improvement | `EvaluationReport` and `compare_to_baseline` outputs can serve as evidence; this workstream implements no self-improvement or deployment engine | Evidence only |
 | Chat path | Use `ModelRouter.decide/execute` for model choice, `contextual.assemble` for context, and `PresentationDirectives.instruction()` for formatting, behind a flag | Not wired into chat yet, on purpose |
-| Central audit (v2.9) | Graph, preference and evaluation changes are not yet in the central audit; this needs new audit categories (a change to the audit model and migration 0006) | Deferred; coordinate first |
+| Central audit (v2.9) | Implemented in the hardening pass: category `intelligence`, forward migration 0058 | Other workstreams' category migrations must keep `intelligence` |
 
 **Possible merge conflicts** are small and textual:
 - `jarvis/main.py` (router include and state);
@@ -216,3 +216,126 @@ These are documented contracts. None has been verified against that branch yet.
 - the documentation sections.
 
 Migrations are numbered `0052` and `0056` so they cannot collide with the other workstream's `0007`+.
+
+## Integration hardening (v5.x, on top of `a8439b8`)
+
+This is a targeted maintenance pass: there is no redesign, and the six versions keep their behavior except where this section says otherwise. It is on branch `claude/jarvis-v5.1-to-v5.6`, as a direct child of `a8439b8`, which is itself based on `7bfb919` (v3.0). It is still **not integrated with v3.1–v4.0**.
+
+### Durable outdated-memory decisions (Task 1)
+
+**Implemented**
+
+- **Storage.** Proposals are stored in a `ProposalStore`:
+  - `MemoryProposalStore` is non-durable and is used when persistence is disabled.
+  - `PostgresProposalStore` uses the new table `jarvis_app.memory_update_proposals` (forward migration **0057**) and is used when persistence is enabled.
+  - Neither touches `jarvis_app.memories`. `target_ref` is a reference string with no foreign key, because the memory schema belongs to the memory workstream.
+- **`mark_outdated`.** The accepted proposal row *is* the durable outdated state. Acceptance is one owner-scoped conditional update (`WHERE owner_id AND id AND status = 'proposed'`), so a decision and its effect cannot diverge. Context selection reads the overlay from the same table.
+- **`add`.** It runs in three steps:
+  1. *Claim:* `proposed → applying`.
+  2. *Apply:* the existing `MemoryRepository.create` writes the memory.
+  3. *Finalize:* `applying → accepted`, with `applied_ref`.
+- **If the apply step fails**, the claim is released (`applying → proposed`, `last_error = apply_failed`) and the API returns 503.
+- **If the process stops** between the write and finalization, the proposal stays `applying`. In that state it is visible, never reported as accepted, and never re-applied. The owner resolves it with `POST /intelligence/memory/proposals/{id}/resolve-interrupted` and `{applied: bool}`.
+- **When persistence is unavailable**, storage errors return HTTP 503 and nothing is decided. There is no silent fallback to memory.
+- **Concurrency.** Concurrent decisions on one proposal apply it exactly once; the other request gets 409.
+
+**Dependency (not implemented here)**
+
+- If the v3.3 memory work adds a native "outdated" or status field to memories, add a sink adapter that mirrors accepted `mark_outdated` rows into it.
+- Until then the overlay is authoritative. Memory rows are not modified.
+
+### Knowledge-graph concurrency (Task 2)
+
+**What could break before.** The service lock was process-local, so two server processes could:
+
+- both add different verified objects for one functional relation (both stored as verified);
+- each add half of a `depends_on` cycle;
+- lose provenance on concurrent re-assertions;
+- race entity creation, ending in a unique-violation error;
+- exceed per-owner limits;
+- write a partial ingest.
+
+**Implemented**
+
+- **Atomic updates with keyed locks.** Every read-modify-write runs in `store.atomic(owner_id, keys)`. In PostgreSQL that is one transaction on one connection, with `pg_advisory_xact_lock` taken on keys derived from the owner, in sorted order and released at commit or rollback. The keys are:
+  - `entity:<type>:<key>`
+  - `rel:<subject>:<relation>`, which covers adding, re-asserting, resolving and retracting
+  - `dep`, taken for the owner's `depends_on` additions
+  - `quota:entities` and `quota:relationships`, taken last and only when a row is created
+- **No global lock.** Keys are per owner, so unrelated subjects proceed in parallel; a test checks this.
+- **In-memory store.** It uses the same keys with per-key re-entrant locks, plus an undo log, so a failed block restores exactly the rows it touched.
+- **Ingest is all-or-nothing in both stores.** A record that fails part-way, for example on a cycle, leaves no writes.
+- **Lost races report a conflict.** Unique-key and foreign-key violations (SQLSTATE 23505 and 23503) become `StorageConflict`, which the API returns as **409** "changed concurrently; nothing was changed". Example: a relationship write that races an entity delete.
+- **Invariants preserved under concurrency** (each is exercised with real threads):
+  - conflicting functional facts are both marked `disputed`;
+  - a weaker concurrent inference never downgrades a verified fact;
+  - duplicate entity creation collapses to one entity;
+  - two racing `depends_on` edges cannot form a cycle; exactly one is rejected with 422;
+  - an entity delete racing a relationship write leaves no orphaned edges.
+
+  A negative-control test shows that without the keyed locks the functional race does occur.
+
+**Limits**
+
+- **Live PostgreSQL behaviour is unverified here.** The SQL, lock order, rollback and error mapping are verified only against a fake connection. The opt-in live tests exist but did not run.
+- **Advisory-lock ids are 64-bit hashes.** A hash collision would only make two unrelated keys serialize; it cannot break correctness.
+- **Dangling conflict references remain.** Deleting an entity leaves `conflicts_with` references to the removed relationships on any surviving rivals. Those rivals stay `disputed`, never silently verified, until the owner resolves them.
+- **Lock ordering mixes phases.** `ingest` takes its entity keys first and its relationship keys second, while single writes take relationship keys only. This avoids lock-order cycles in the service's own paths. PostgreSQL deadlock detection remains the backstop, surfacing as 503.
+
+### Central audit (Task 3)
+
+**Implemented**
+
+- **Same audit service.** Mutations are recorded in the existing v2.9 `AuditService`, under one new category, `intelligence`. The category is allowed by forward migration **0058**, which replaces the `audit_events` category check with the union `tool, browser, approval, intelligence`. Migration 0006 is unchanged; its checksum is pinned in a test.
+- **Covered events:**
+  - `kg_entity_upsert`, `kg_entity_delete`
+  - `kg_relationship_add`, `kg_conflict_resolve`, `kg_relationship_retract`, `kg_record_ingest`
+  - `preference_set`, `preference_remove`
+  - `personalization_disable`, `personalization_enable`, `personalization_reset`
+  - `preference_observations`, `preference_proposal_accept` and `preference_proposal_reject`
+  - `memory_proposal_create`, `memory_proposal_accept` and `memory_proposal_reject`, `memory_proposal_resolve_interrupted`
+  - `evaluation_run`, `evaluation_evidence_accept`
+- **Outcome fields.**
+  - `decision` is `allowed`: the request passed authentication and capability checks.
+  - `status` is `succeeded` when state changed, or `failed` when an authorized attempt changed nothing (validation, conflict, not found, storage failure). The `details` include `mutated` and `http_status`.
+  - Evidence acceptance that refuses simulated summaries is recorded as `failed`, with a `refused_simulated` count.
+  - Unauthenticated and capability-denied requests are refused before any work, so no intelligence audit record is written for them; tests check that nothing changes.
+- **Metadata only.** Records hold ids, kinds, statuses and counts. They never contain entity names, memory content, reasons, preference values, prompts, media or credentials; tests check this.
+- **Visibility.** `/activity?category=intelligence` lists the records. The frontend type is widened as well.
+
+**Coordination required.** Any later migration that changes `audit_events_category_allowed`, for example to add categories for v3.1–v4.0, must keep every category listed in 0058.
+
+### Adapter contracts (Task 4)
+
+**Implemented today vs proposed**
+
+| Area | Implemented behavior | Proposed / dependency |
+|---|---|---|
+| A. Planner → v5.5 | `reasoning.adapters.adapt_plan` dispatches to registered adapters. `from_execution_plan` serves the existing orchestration plan. `from_neutral_plan` accepts the **neutral plan document v1** (`format: "jarvis.neutral_plan"`, nodes, and edges where `to` depends on `from`). Invalid documents are rejected, never repaired. Nothing is executed or scheduled. | The v3.2 DAG planner either emits the neutral document or registers its own adapter with `register_adapter`. Its real plan format is **not assumed**. |
+| B. Semantic retrieval | `CandidateSource` protocol. `RepositoryCandidateSource` uses the existing lexical `MemoryRepository.search`, and context preview uses it. `checked_similarity` turns invalid, NaN, out-of-range or failing scores into "no match" and counts them. `validate_candidates` drops malformed and foreign-owner candidates. Lexical similarity remains the fallback. | A semantic source or scorer from v3.3 implements these protocols. **No pgvector or embedding support exists or is claimed.** |
+| C. Document → graph | `knowledge_graph.adapters.document_record` fixes `source_kind = "document"` and keeps the document reference and excerpts as provenance. It *refuses* verified status or confidence 1.0 from `model` and `rule` extractors. Promotion to verified happens only when the owner asserts the relationship with user provenance, or resolves a conflict. | v3.4 calls `document_record`, then `GraphService.ingest`, which is atomic. |
+| D. Chat | **Unchanged.** Chat does not use routing, context packaging or personalization. | A separate, explicit integration decision would put `ModelRouter.decide/execute`, `contextual.assemble` (with `RepositoryCandidateSource`) and `PresentationDirectives.instruction()` behind a flag in the chat route. |
+| E. Ownership | The intelligence layer owns `kg_*`, `personalization_*` and `memory_update_proposals`. The memory repository owns `memories` (read via search, written only through its `create`). The central audit service owns `audit_events`; the layer only appends. Orchestration, the planner and tools are untouched. | v3.1–v4.0 keeps ownership of the planner, workflows, memory schema, scheduler and audit service. This layer integrates only through the contracts above. |
+
+### Migrations
+
+| File | Kind | Notes |
+|---|---|---|
+| `0052_knowledge_graph.sql`, `0056_personalization.sql` | existing (from `a8439b8`) | Unchanged; checksums are pinned in tests. Their application to a live database is **not assumed**. |
+| `0057_memory_update_proposals.sql` | new, additive | New table only; no existing table is altered. |
+| `0058_audit_intelligence_category.sql` | new, forward | Widens the 0006 category check; existing rows already satisfy it. |
+
+Apply with `database\install_db.bat`. The runner refuses edited applied migrations and applies pending ones in order.
+
+### Test results for this pass
+
+| Suite | PASSED | FAILED | SKIPPED | UNAVAILABLE | Evidence type |
+|---|---|---|---|---|---|
+| `tests/` (full Python suite) | 922 | 0 | 17 (pre-existing Windows symlink skips) | – | unit plus mocked integration |
+| of which `tests/test_intelligence_hardening.py` (new) | 23 | 0 | 0 | – | unit, real-thread concurrency on in-memory stores, PostgreSQL through a fake connection, API with TestClient |
+| v5.1–v5.6 suites (routing 29, graph 20, context 13, multimodal 15, reasoning 23, personalization 11, API 30) | 141 | 0 | 0 | – | regression |
+| `integration_tests/` (live PostgreSQL, opt-in) | 11 | 0 | 27 | **27 unavailable**: `JARVIS_RUN_POSTGRES_INTEGRATION` is not set | The 11 passes are URL-guard and classification unit tests that need no database. The 27 skips include the 5 new live intelligence tests. |
+| Frontend: Vitest / tsc and build / Playwright E2E | 126 / pass / 11 | 0 | 0 | – | the frontend changed only by a type widening |
+| Live model-provider tests | – | – | – | **not run** | none claimed |
+
+**No test in this pass used a real PostgreSQL instance.**

@@ -6,6 +6,12 @@ evaluations, ``knowledge_graph.write`` for graph changes,
 ``personalization.manage`` for preference changes, and the existing
 ``memory.read`` / ``memory.write`` for memory context and memory proposals.
 No route executes tools or actions, and none can change permissions.
+
+Every mutation is recorded in the central v2.9 audit trail (category
+"intelligence") with metadata only, as ``succeeded`` when it changed state or
+``failed`` when an authorized attempt changed nothing (validation, conflict,
+not found or storage failure). Requests rejected by authentication or
+capability checks are refused before any audit-worthy work starts.
 """
 
 from typing import Literal
@@ -17,7 +23,7 @@ from starlette.concurrency import run_in_threadpool
 
 from jarvis.advanced_intelligence import IntelligenceLayer
 from jarvis.api.dependencies import authenticated_owner, enforce_capability
-from jarvis.contextual.adapters import from_memory_records
+from jarvis.contextual.sources import RepositoryCandidateSource
 from jarvis.contextual.models import ContextRequest
 from jarvis.contextual.selection import assemble
 from jarvis.contextual.updates import UpdateError
@@ -68,6 +74,26 @@ async def _call(func, *args, **kwargs):
         raise HTTPException(status_code=exc.status_code, detail=exc.public_message) from exc
     except MultimodalInputError as exc:
         raise HTTPException(status_code=422, detail=exc.public_message) from exc
+
+
+async def _mutate(request: Request, owner: UUID, event_type: str, subject: str, func, *args,
+                  details: dict | None = None, describe=None, **kwargs):
+    """Run a mutation and audit its outcome (metadata only)."""
+    layer = _layer(request)
+    correlation = request.headers.get("x-request-id")
+    try:
+        result = await _call(func, *args, **kwargs)
+    except HTTPException as exc:
+        layer.audit(owner, event_type, succeeded=False, subject=subject, correlation_id=correlation,
+                    details={**(details or {}), "http_status": exc.status_code})
+        raise
+    except Exception:
+        layer.audit(owner, event_type, succeeded=False, subject=subject, correlation_id=correlation,
+                    details={**(details or {}), "http_status": 500})
+        raise
+    layer.audit(owner, event_type, succeeded=True, subject=subject, correlation_id=correlation,
+                details={**(details or {}), **(describe(result) if describe else {})})
+    return result
 
 
 # ---------------------------------------------------------------- v5.1
@@ -133,11 +159,15 @@ async def run_evaluation(body: EvaluationBody, request: Request, owner_id: UUID 
     owner = _owner(request, owner_id, Capability.INTELLIGENCE_EVALUATE)
     layer = _layer(request)
     dataset, digest = load_dataset(body.dataset)
+    details = {"dataset": body.dataset, "models": len(body.model_keys), "repeats": body.repeats}
     try:
         report = await layer.harness.run(dataset, digest, body.model_keys, repeats=body.repeats)
     except ValueError as exc:
+        layer.audit(owner, "evaluation_run", succeeded=False, subject="evaluation", details={**details, "http_status": 422})
         raise HTTPException(status_code=422, detail="Unknown model keys or invalid repeats.") from exc
     layer.store_report(owner, report)
+    layer.audit(owner, "evaluation_run", succeeded=True, subject="evaluation", details={
+        **details, "report_id": report.report_id, "simulated": any(item.simulated for item in report.summaries)})
     return report.model_dump(mode="json")
 
 
@@ -147,8 +177,13 @@ async def accept_evaluation(report_id: str, request: Request, owner_id: UUID | N
     layer = _layer(request)
     report = layer.report(owner, report_id)
     if report is None:
+        layer.audit(owner, "evaluation_evidence_accept", succeeded=False, subject="evaluation",
+                    details={"report_id": report_id[:40], "http_status": 404})
         raise HTTPException(status_code=404, detail="The evaluation report was not found.")
     accepted = layer.router.accept_evidence(report)
+    layer.audit(owner, "evaluation_evidence_accept", succeeded=bool(accepted), subject="evaluation",
+                details={"report_id": report_id, "accepted_models": len(accepted),
+                         "refused_simulated": sum(item.simulated for item in report.summaries)})
     return {"accepted_models": list(accepted),
             "note": "Simulated (mock or demo) summaries are never accepted as routing evidence."}
 
@@ -158,7 +193,11 @@ async def accept_evaluation(report_id: str, request: Request, owner_id: UUID | N
 @router.post("/graph/entities", responses=_ERRORS)
 async def upsert_entity(body: EntityInput, request: Request, owner_id: UUID | None = Depends(authenticated_owner)):
     owner = _owner(request, owner_id, Capability.KNOWLEDGE_GRAPH_WRITE)
-    return (await _call(_layer(request).graph.upsert_entity, owner, body)).model_dump(mode="json")
+    entity = await _mutate(request, owner, "kg_entity_upsert", f"entity:{body.entity_type}",
+                           _layer(request).graph.upsert_entity, owner, body,
+                           details={"entity_type": body.entity_type, "extractor": body.provenance.extractor},
+                           describe=lambda item: {"entity_id": item.entity_id})
+    return entity.model_dump(mode="json")
 
 
 @router.get("/graph/entities", responses=_ERRORS)
@@ -180,7 +219,10 @@ async def get_entity(entity_id: str, request: Request, owner_id: UUID | None = D
 @router.delete("/graph/entities/{entity_id}", responses=_ERRORS)
 async def delete_entity(entity_id: str, request: Request, owner_id: UUID | None = Depends(authenticated_owner)):
     owner = _owner(request, owner_id, Capability.KNOWLEDGE_GRAPH_WRITE)
-    return {"removed": await _call(_layer(request).graph.delete_entity, owner, entity_id)}
+    removed = await _mutate(request, owner, "kg_entity_delete", "entity", _layer(request).graph.delete_entity,
+                            owner, entity_id, details={"entity_id": entity_id[:40]},
+                            describe=lambda count: {"removed": count})
+    return {"removed": removed}
 
 
 @router.get("/graph/entities/{entity_id}/neighbors", responses=_ERRORS)
@@ -196,7 +238,13 @@ async def neighbors(entity_id: str, request: Request, depth: int = Query(default
 @router.post("/graph/relationships", responses=_ERRORS)
 async def add_relationship(body: RelationshipInput, request: Request, owner_id: UUID | None = Depends(authenticated_owner)):
     owner = _owner(request, owner_id, Capability.KNOWLEDGE_GRAPH_WRITE)
-    return (await _call(_layer(request).graph.add_relationship, owner, body)).model_dump(mode="json")
+    item = await _mutate(request, owner, "kg_relationship_add", f"relationship:{body.relation}",
+                         _layer(request).graph.add_relationship, owner, body,
+                         details={"relation": body.relation, "requested_status": body.status,
+                                  "extractor": body.provenance.extractor},
+                         describe=lambda rel: {"relationship_id": rel.relationship_id, "stored_status": rel.status,
+                                               "conflicts": len(rel.conflicts_with)})
+    return item.model_dump(mode="json")
 
 
 class NoteBody(_Body):
@@ -207,19 +255,29 @@ class NoteBody(_Body):
 async def resolve_relationship(relationship_id: str, body: NoteBody, request: Request,
                                owner_id: UUID | None = Depends(authenticated_owner)):
     owner = _owner(request, owner_id, Capability.KNOWLEDGE_GRAPH_WRITE)
-    return (await _call(_layer(request).graph.resolve_conflict, owner, relationship_id, note=body.note)).model_dump(mode="json")
+    item = await _mutate(request, owner, "kg_conflict_resolve", "relationship", _layer(request).graph.resolve_conflict,
+                         owner, relationship_id, note=body.note, details={"relationship_id": relationship_id[:40]},
+                         describe=lambda rel: {"stored_status": rel.status})
+    return item.model_dump(mode="json")
 
 
 @router.post("/graph/relationships/{relationship_id}/retract", responses=_ERRORS)
 async def retract_relationship(relationship_id: str, request: Request, owner_id: UUID | None = Depends(authenticated_owner)):
     owner = _owner(request, owner_id, Capability.KNOWLEDGE_GRAPH_WRITE)
-    return (await _call(_layer(request).graph.retract, owner, relationship_id)).model_dump(mode="json")
+    item = await _mutate(request, owner, "kg_relationship_retract", "relationship", _layer(request).graph.retract,
+                         owner, relationship_id, details={"relationship_id": relationship_id[:40]},
+                         describe=lambda rel: {"stored_status": rel.status})
+    return item.model_dump(mode="json")
 
 
 @router.post("/graph/records", responses=_ERRORS)
 async def ingest_record(body: KnowledgeRecord, request: Request, owner_id: UUID | None = Depends(authenticated_owner)):
     owner = _owner(request, owner_id, Capability.KNOWLEDGE_GRAPH_WRITE)
-    return (await _call(_layer(request).graph.ingest, owner, body)).model_dump(mode="json")
+    result = await _mutate(request, owner, "kg_record_ingest", f"record:{body.source_kind}", _layer(request).graph.ingest,
+                           owner, body, details={"source_kind": body.source_kind, "extractor": body.extractor,
+                                                 "entities": len(body.entities), "relationships": len(body.relationships)},
+                           describe=lambda item: {"stored_relationships": len(item.relationships)})
+    return result.model_dump(mode="json")
 
 
 # ---------------------------------------------------------------- v5.3
@@ -241,14 +299,14 @@ async def context_preview(body: ContextPreviewBody, request: Request, owner_id: 
     model = layer.registry.get(body.model_key) if body.model_key else None
     if body.model_key and model is None:
         raise HTTPException(status_code=422, detail="Unknown model key.")
+    source = RepositoryCandidateSource(repository)
     try:
-        page = await run_in_threadpool(repository.search, owner, body.query[:200], limit=50, offset=0)
+        candidates = await run_in_threadpool(source.candidates, owner, body.query, limit=50)
     except Exception as exc:  # noqa: BLE001 - sanitized
         raise HTTPException(status_code=503, detail="Memory storage is unavailable.") from exc
-    candidates = from_memory_records(owner, page.items)
+    outdated = await _call(layer.memory_updates.outdated_refs, owner)
     package = assemble(ContextRequest(owner_id=owner, query=body.query, project_id=body.project_id,
-                                      max_items=body.max_items), candidates, model=model,
-                       outdated_refs=layer.memory_updates.outdated_refs(owner))
+                                      max_items=body.max_items), candidates, model=model, outdated_refs=outdated)
     return package.model_dump(mode="json")
 
 
@@ -261,15 +319,17 @@ class OutdatedBody(_Body):
 async def memory_proposals(request: Request, owner_id: UUID | None = Depends(authenticated_owner)):
     owner = _owner(request, owner_id, Capability.MEMORY_READ)
     layer = _layer(request)
-    return {"proposals": [item.model_dump(mode="json") for item in layer.memory_updates.list(owner)],
-            "durable": layer.memory_updates.durable}
+    items = await _call(layer.memory_updates.list, owner)
+    return {"proposals": [item.model_dump(mode="json") for item in items], "durable": layer.memory_updates.durable}
 
 
 @router.post("/memory/proposals/outdated", responses=_ERRORS)
 async def propose_outdated(body: OutdatedBody, request: Request, owner_id: UUID | None = Depends(authenticated_owner)):
     owner = _owner(request, owner_id, Capability.MEMORY_WRITE)
-    proposal = await _call(_layer(request).memory_updates.propose_outdated, owner, target_ref=body.target_ref,
-                           source_ref="owner:api", reason=body.reason)
+    proposal = await _mutate(request, owner, "memory_proposal_create", "memory_proposal:mark_outdated",
+                             _layer(request).memory_updates.propose_outdated, owner, target_ref=body.target_ref,
+                             source_ref="owner:api", reason=body.reason, details={"kind": "mark_outdated"},
+                             describe=lambda item: {"proposal_id": item.proposal_id})
     return proposal.model_dump(mode="json")
 
 
@@ -282,8 +342,12 @@ async def _decide_memory(proposal_id: str, request: Request, owner_id, accept: b
             raise UpdateError(503, "Memory storage requires JARVIS_PERSISTENCE_ENABLED=true.")
         repository.create(owner, item.content, item.category, item.source_ref)
 
-    return (await _call(_layer(request).memory_updates.decide, owner, proposal_id, accept=accept,
-                        applier=applier)).model_dump(mode="json")
+    item = await _mutate(request, owner, "memory_proposal_" + ("accept" if accept else "reject"), "memory_proposal",
+                         _layer(request).memory_updates.decide, owner, proposal_id, accept=accept, applier=applier,
+                         details={"proposal_id": proposal_id[:40]},
+                         describe=lambda result: {"kind": result.kind, "stored_status": result.status,
+                                                  "applied": result.applied_ref is not None})
+    return item.model_dump(mode="json")
 
 
 @router.post("/memory/proposals/{proposal_id}/accept", responses=_ERRORS)
@@ -294,6 +358,22 @@ async def accept_memory(proposal_id: str, request: Request, owner_id: UUID | Non
 @router.post("/memory/proposals/{proposal_id}/reject", responses=_ERRORS)
 async def reject_memory(proposal_id: str, request: Request, owner_id: UUID | None = Depends(authenticated_owner)):
     return await _decide_memory(proposal_id, request, owner_id, False)
+
+
+class InterruptedBody(_Body):
+    applied: bool
+    applied_ref: StrictStr | None = Field(default=None, max_length=300)
+
+
+@router.post("/memory/proposals/{proposal_id}/resolve-interrupted", responses=_ERRORS)
+async def resolve_interrupted_memory(proposal_id: str, body: InterruptedBody, request: Request,
+                                     owner_id: UUID | None = Depends(authenticated_owner)):
+    owner = _owner(request, owner_id, Capability.MEMORY_WRITE)
+    item = await _mutate(request, owner, "memory_proposal_resolve_interrupted", "memory_proposal",
+                         _layer(request).memory_updates.resolve_interrupted, owner, proposal_id, applied=body.applied,
+                         applied_ref=body.applied_ref, details={"proposal_id": proposal_id[:40], "applied": body.applied},
+                         describe=lambda result: {"stored_status": result.status})
+    return item.model_dump(mode="json")
 
 
 # ---------------------------------------------------------------- v5.4
@@ -354,34 +434,42 @@ class PreferenceBody(_Body):
 @router.put("/preferences/{key}", responses=_ERRORS)
 async def set_preference(key: str, body: PreferenceBody, request: Request, owner_id: UUID | None = Depends(authenticated_owner)):
     owner = _owner(request, owner_id, Capability.PERSONALIZATION_MANAGE)
-    return (await _call(_layer(request).personalization.set_preference, owner, key, body.value,
-                        scope=body.scope)).model_dump(mode="json")
+    item = await _mutate(request, owner, "preference_set", f"preference:{key[:40]}",
+                         _layer(request).personalization.set_preference, owner, key, body.value, scope=body.scope,
+                         details={"key": key[:40], "scope": body.scope})
+    return item.model_dump(mode="json")
 
 
 @router.delete("/preferences/{key}", responses=_ERRORS)
 async def remove_preference(key: str, request: Request, scope: str = Query(default="global", max_length=40),
                             owner_id: UUID | None = Depends(authenticated_owner)):
     owner = _owner(request, owner_id, Capability.PERSONALIZATION_MANAGE)
-    await _call(_layer(request).personalization.remove_preference, owner, key, scope=scope)
+    await _mutate(request, owner, "preference_remove", f"preference:{key[:40]}",
+                  _layer(request).personalization.remove_preference, owner, key, scope=scope,
+                  details={"key": key[:40], "scope": scope})
     return {"removed": True}
 
 
 @router.post("/preferences/disable", responses=_ERRORS)
 async def disable_preferences(request: Request, owner_id: UUID | None = Depends(authenticated_owner)):
     owner = _owner(request, owner_id, Capability.PERSONALIZATION_MANAGE)
-    return {"enabled": await _call(_layer(request).personalization.set_enabled, owner, False)}
+    return {"enabled": await _mutate(request, owner, "personalization_disable", "personalization",
+                                     _layer(request).personalization.set_enabled, owner, False)}
 
 
 @router.post("/preferences/enable", responses=_ERRORS)
 async def enable_preferences(request: Request, owner_id: UUID | None = Depends(authenticated_owner)):
     owner = _owner(request, owner_id, Capability.PERSONALIZATION_MANAGE)
-    return {"enabled": await _call(_layer(request).personalization.set_enabled, owner, True)}
+    return {"enabled": await _mutate(request, owner, "personalization_enable", "personalization",
+                                     _layer(request).personalization.set_enabled, owner, True)}
 
 
 @router.post("/preferences/reset", responses=_ERRORS)
 async def reset_preferences(request: Request, owner_id: UUID | None = Depends(authenticated_owner)):
     owner = _owner(request, owner_id, Capability.PERSONALIZATION_MANAGE)
-    return {"removed": await _call(_layer(request).personalization.reset, owner)}
+    return {"removed": await _mutate(request, owner, "personalization_reset", "personalization",
+                                     _layer(request).personalization.reset, owner,
+                                     describe=lambda count: {"removed": count})}
 
 
 class ObservationsBody(_Body):
@@ -392,7 +480,10 @@ class ObservationsBody(_Body):
 async def preference_observations(body: ObservationsBody, request: Request,
                                   owner_id: UUID | None = Depends(authenticated_owner)):
     owner = _owner(request, owner_id, Capability.PERSONALIZATION_MANAGE)
-    created = await _call(_layer(request).personalization.propose_from_observations, owner, body.observations)
+    created = await _mutate(request, owner, "preference_observations", "personalization",
+                            _layer(request).personalization.propose_from_observations, owner, body.observations,
+                            details={"observations": len(body.observations)},
+                            describe=lambda items: {"proposals_created": len(items)})
     return {"proposals": [item.model_dump(mode="json") for item in created],
             "note": "Proposals change nothing until you accept them."}
 
@@ -408,5 +499,8 @@ async def preference_proposals(request: Request, owner_id: UUID | None = Depends
 async def decide_preference(proposal_id: str, decision: Literal["accept", "reject"], request: Request,
                             owner_id: UUID | None = Depends(authenticated_owner)):
     owner = _owner(request, owner_id, Capability.PERSONALIZATION_MANAGE)
-    return (await _call(_layer(request).personalization.decide, owner, proposal_id,
-                        accept=decision == "accept")).model_dump(mode="json")
+    item = await _mutate(request, owner, f"preference_proposal_{decision}", "preference_proposal",
+                         _layer(request).personalization.decide, owner, proposal_id, accept=decision == "accept",
+                         details={"proposal_id": proposal_id[:40]},
+                         describe=lambda result: {"key": result.key, "scope": result.scope, "stored_status": result.status})
+    return item.model_dump(mode="json")
