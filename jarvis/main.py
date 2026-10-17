@@ -14,6 +14,8 @@ from jarvis.api.routes.chat import router as chat_router
 from jarvis.api.routes.coding import router as coding_router
 from jarvis.api.routes.conversations import router as conversations_router
 from jarvis.api.routes.health import router as health_router
+from jarvis.advanced_intelligence import build_intelligence
+from jarvis.api.routes.intelligence import router as intelligence_router
 from jarvis.api.routes.interface import router as interface_router
 from jarvis.api.routes.memories import router as memories_router
 from jarvis.api.routes.repo import router as repo_router
@@ -116,6 +118,8 @@ def create_app(
     app.state.approval_service = ApprovalService(
         approval_store, app.state.audit_service, ttl_seconds=resolved_settings.approvals_ttl_seconds,
     )
+    # v5.1-v5.6 advanced intelligence layer (wraps the existing provider; replaces nothing).
+    app.state.intelligence = build_intelligence(resolved_settings, resolved_provider)
     for component in (app.state.tool_runtime, app.state.browser_service):
         component.audit_service = app.state.audit_service
         component.approval_service = app.state.approval_service
@@ -134,6 +138,7 @@ def create_app(
     app.include_router(tools_router)
     app.include_router(activity_router)
     app.include_router(interface_router)
+    app.include_router(intelligence_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

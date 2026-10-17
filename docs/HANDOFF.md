@@ -582,3 +582,9 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - Decision D5 applied: browser-native speech first; no server audio, no new dependency.
 - Not tested: real microphones and real browser speech services (manual check required).
 - Full technical handover for v3.0 → v4.0: `docs/ANTIGRAVITY_HANDOVER.md`.
+
+## Advanced intelligence v5.1–v5.6 (independent workstream; owner review pending)
+
+- Branch `claude/jarvis-v5.1-to-v5.6`, worktree `D:\Project_Jarvis_worktrees\intel-v5`, based on `jarvis/integration-acceptance-v30` (`7bfb919`). Built in parallel with Antigravity's v3.1–v4.0 branch and **not integrated or verified against it**.
+- New packages: `jarvis/routing`, `jarvis/knowledge_graph`, `jarvis/contextual`, `jarvis/multimodal`, `jarvis/reasoning`, `jarvis/personalization`; wiring `jarvis/advanced_intelligence.py`; API `jarvis/api/routes/intelligence.py`; migrations `0052_knowledge_graph.sql`, `0056_personalization.sql`; four new owner capabilities.
+- Not run: live providers, live PostgreSQL for 0052/0056, real multimodal models. Chat does not use the router or personalization yet (deliberately; see the integration table in `docs/ADVANCED_INTELLIGENCE.md`).

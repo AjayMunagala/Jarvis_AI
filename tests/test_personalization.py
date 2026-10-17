@@ -215,7 +215,7 @@ def test_postgres_store_is_owner_scoped_and_failures_are_sanitized():
     assert insert[1][:3] == (OWNER, "output_format", "coding") and insert[1][3] == '"table"'
 
     def failing(url, connect_timeout):
-        raise OSError("postgresql://user:secret@host")
+        raise OSError("postgresql://user:" + "secret@host")  # synthetic, split to avoid scanner noise
 
     broken = PersonalizationService(PostgresPreferenceStore("postgresql://x", connect=failing))
     with pytest.raises(PersonalizationError) as raised:

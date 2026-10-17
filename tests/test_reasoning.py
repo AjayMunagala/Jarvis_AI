@@ -159,9 +159,9 @@ def test_refinement_stops_on_no_progress_errors_limits_and_safety():
 
     async def counting(current, evaluation):
         calls.append(1)
-        steps = current.steps + ({"step_id": f"extra{len(calls)}", "description": "Run the failing login test again",
-                                  "completion_criteria": "test output captured in the log"},)
-        return current.model_copy(update={"steps": steps})
+        steps = [*current.model_dump()["steps"], {"step_id": f"extra{len(calls)}", "description": "Run the failing login test again",
+                                                   "completion_criteria": "test output captured in the log"}]
+        return PlanCandidate.model_validate({**current.model_dump(), "steps": steps})
 
     assert asyncio.run(refine(plan("missing-information"), same)).stopped_reason == "no_progress"
     assert asyncio.run(refine(plan("missing-information"), broken)).stopped_reason == "refiner_error"
