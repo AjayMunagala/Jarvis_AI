@@ -1,16 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import AssistantPanel from './AssistantPanel'
 import {
-  createCalendarEvent,
-  createNote,
-  createReminder,
-  createTask,
-  deleteCalendarEvent,
-  deleteNote,
-  deleteReminder,
-  deleteTask,
   listCalendarEvents,
   listNotes,
   listReminders,

@@ -591,10 +591,17 @@ def test_forward_migrations_are_added_and_historical_files_are_unchanged():
     for migration_id, checksum in HISTORICAL.items():
         assert found[migration_id] == checksum
     assert {"0057_memory_update_proposals", "0058_audit_intelligence_category"} <= set(found)
-    assert sorted(found)[-2:] == ["0057_memory_update_proposals", "0058_audit_intelligence_category"]
-    audit_sql = (runner.MIGRATIONS_DIR / "0058_audit_intelligence_category.sql").read_text(encoding="utf-8")
-    for category in ("'tool'", "'browser'", "'approval'", "'intelligence'"):
-        assert category in audit_sql
+    ordered = sorted(found)
+    assert ordered.index("0056_personalization") < ordered.index("0057_memory_update_proposals") \
+        < ordered.index("0058_audit_intelligence_category")
+    # Later migrations may widen the audit category check again (another workstream's category), but every
+    # migration that replaces the check must keep all categories allowed before it, including 'intelligence'.
+    required = ["'tool'", "'browser'", "'approval'", "'intelligence'"]
+    for migration_id in ordered[ordered.index("0058_audit_intelligence_category"):]:
+        sql = (runner.MIGRATIONS_DIR / f"{migration_id}.sql").read_text(encoding="utf-8")
+        if "audit_events_category_allowed" in sql and "ADD CONSTRAINT" in sql:
+            for category in required:
+                assert category in sql, f"{migration_id} drops audit category {category}"
     proposals_sql = (runner.MIGRATIONS_DIR / "0057_memory_update_proposals.sql").read_text(encoding="utf-8")
     assert "ALTER TABLE" not in proposals_sql and "REFERENCES" not in proposals_sql.split("--")[-1]
     assert hashlib.sha256(b"").hexdigest() not in found.values()
