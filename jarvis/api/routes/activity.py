@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from starlette.concurrency import run_in_threadpool
 
 from jarvis.api.dependencies import authenticated_owner, enforce_capability
-from jarvis.audit.models import ActivityPage, ApprovalDecisionRequest, ApprovalPage, ApprovalRequest
+from jarvis.audit.models import ActivityPage, ApprovalDecisionRequest, ApprovalPage, ApprovalRequest, AuditCategory
 from jarvis.audit.service import ApprovalError, ApprovalService, AuditService
 from jarvis.models.schemas import ErrorResponse
 from jarvis.security.policy import Capability
@@ -50,7 +50,7 @@ async def _call(func, *args, **kwargs):
 
 @router.get("/activity", response_model=ActivityPage, responses=_ERRORS)
 async def activity(request: Request, limit: int = Query(default=50, ge=1, le=200),
-                   category: Literal["tool", "browser", "approval", "intelligence"] | None = Query(default=None),
+                   category: AuditCategory | None = Query(default=None),
                    owner_id: UUID | None = Depends(authenticated_owner)) -> ActivityPage:
     owner = _owner(owner_id)
     enforce_capability(request, owner, Capability.AUDIT_READ)

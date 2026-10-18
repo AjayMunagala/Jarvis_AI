@@ -25,7 +25,6 @@ class Capability(StrEnum):
     AUDIT_READ = "audit.read"
     APPROVALS_READ = "approvals.read"
     APPROVALS_DECIDE = "approvals.decide"
-<<<<<<< HEAD
     # Personal assistant foundation (v3.1): tasks, notes, reminders, local calendar.
     ASSISTANT_READ = "assistant.read"
     ASSISTANT_WRITE = "assistant.write"

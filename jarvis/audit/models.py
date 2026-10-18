@@ -11,8 +11,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 
-# "intelligence" (v5.x hardening, migration 0058): graph, personalization, memory-proposal and evaluation changes.
-AuditCategory = Literal["tool", "browser", "approval", "intelligence"]
+# "intelligence" (v5.x hardening, migration 0058); "orchestration" (v4.0 capstone & v3.8 workflows, migration 0059).
+AuditCategory = Literal["tool", "browser", "approval", "intelligence", "orchestration"]
 ApprovalState = Literal["pending", "approved", "rejected", "expired"]
 ApprovalCategory = Literal["tool", "browser"]
 RiskLevel = Literal["low", "medium", "high", "critical", "consequential"]
