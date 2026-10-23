@@ -180,8 +180,12 @@ def test_upgrade_from_v30_migration_state_applies_0052_to_0058(isolated_postgres
         with psycopg.connect(url) as connection:
             after = [row[0] for row in connection.execute(
                 "SELECT migration_id FROM jarvis_meta.schema_migrations ORDER BY migration_id")]
-            assert after == before + ["0052_knowledge_graph", "0056_personalization", "0057_memory_update_proposals",
-                                      "0058_audit_intelligence_category"]
+            # The runner applies every pending local migration in order (on the combined code base this also
+            # includes the v3.x migrations 0007-0013 and 0059), and nothing already applied is re-applied.
+            local = sorted(migration_id for migration_id, *_ in runner._migration_files(runner.MIGRATIONS_DIR))
+            assert after == local and after[:len(before)] == before
+            assert {"0052_knowledge_graph", "0056_personalization", "0057_memory_update_proposals",
+                    "0058_audit_intelligence_category"} <= set(after)
             assert connection.execute("SELECT category FROM jarvis_app.audit_events WHERE id = %s",
                                       ("AE-" + "2" * 16,)).fetchone() == ("tool",)
             connection.execute("""INSERT INTO jarvis_app.audit_events

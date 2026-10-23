@@ -27,7 +27,7 @@ class KnowledgeStore(Protocol):
 
     def get_document(self, owner_id: UUID, document_id: UUID) -> KnowledgeDocument | None: ...
 
-    def get_document_chunks(self, document_id: UUID) -> list[KnowledgeChunk]: ...
+    def get_document_chunks(self, owner_id: UUID, document_id: UUID) -> list[KnowledgeChunk]: ...
 
     def list_documents(
         self, owner_id: UUID, *, limit: int = 50, offset: int = 0
@@ -75,10 +75,11 @@ class MemoryKnowledgeStore:
             doc = self._documents.get(document_id)
             return doc if doc and doc.owner_id == owner_id else None
 
-    def get_document_chunks(self, document_id: UUID) -> list[KnowledgeChunk]:
+    def get_document_chunks(self, owner_id: UUID, document_id: UUID) -> list[KnowledgeChunk]:
         with self._lock:
             cids = self._doc_chunks.get(document_id, [])
-            return [self._chunks[cid] for cid in cids if cid in self._chunks]
+            # v4.1: owner-scoped like every other read; another owner's document yields nothing.
+            return [self._chunks[cid] for cid in cids if cid in self._chunks and self._chunks[cid].owner_id == owner_id]
 
     def list_documents(
         self, owner_id: UUID, *, limit: int = 50, offset: int = 0
@@ -243,17 +244,17 @@ class PostgresKnowledgeStore:
         except Exception as exc:
             raise KnowledgeStorageError("Failed to get knowledge document from PostgreSQL.") from exc
 
-    def get_document_chunks(self, document_id: UUID) -> list[KnowledgeChunk]:
+    def get_document_chunks(self, owner_id: UUID, document_id: UUID) -> list[KnowledgeChunk]:
         deadline = operation_deadline(self._operation_timeout, clock=monotonic)
         sql = """
             SELECT id, document_id, owner_id, chunk_index, content, token_count, created_at
             FROM jarvis_app.knowledge_chunks
-            WHERE document_id = %s
+            WHERE document_id = %s AND owner_id = %s
             ORDER BY chunk_index ASC
         """
         try:
             with self._open(deadline) as conn:
-                rows = execute_with_deadline(conn, deadline, sql, (document_id,), clock=monotonic).fetchall()
+                rows = execute_with_deadline(conn, deadline, sql, (document_id, owner_id), clock=monotonic).fetchall()
                 return [
                     KnowledgeChunk(
                         id=r[0],

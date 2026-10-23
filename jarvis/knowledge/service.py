@@ -97,7 +97,7 @@ class KnowledgeService:
         doc = self.store.get_document(owner_id, document_id)
         if not doc:
             return None
-        chunks = self.store.get_document_chunks(document_id)
+        chunks = self.store.get_document_chunks(owner_id, document_id)
         return KnowledgeDocumentDetail(document=doc, chunks=chunks)
 
     def list_documents(
@@ -160,7 +160,7 @@ class KnowledgeService:
         candidates: list[KnowledgeChunk] = []
         if req.document_ids:
             for doc_id in req.document_ids:
-                candidates.extend(self.store.get_document_chunks(doc_id))
+                candidates.extend(self.store.get_document_chunks(owner_id, doc_id))
         else:
             search_res = self.search(
                 owner_id, KnowledgeSearchRequest(query=req.prompt[:200], top_k=10)

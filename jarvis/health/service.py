@@ -33,7 +33,7 @@ class HealthService:
         self.store = store
         self.repo_root = repo_root or Path.cwd()
         q_dir = quarantine_dir or (self.repo_root / ".quarantine")
-        self.quarantine_manager = QuarantineManager(q_dir)
+        self.quarantine_manager = QuarantineManager(q_dir, allowed_root=self.repo_root)
         self.audit_service = audit_service
 
     def _audit(self, owner_id: UUID, event_type: str, subject: str, details: dict[str, Any]) -> None:
@@ -136,7 +136,7 @@ class HealthService:
             owner_id,
             "security.file.quarantine",
             f"security:quarantine:{record.id}",
-            {"original_path": record.original_path, "reason": record.reason},
+            {"original_path": self.quarantine_manager.display_path(record.original_path)},
         )
         return record
 
@@ -153,7 +153,7 @@ class HealthService:
             owner_id,
             "security.file.restore",
             f"security:quarantine:{restored_record.id}",
-            {"original_path": restored_record.original_path},
+            {"original_path": self.quarantine_manager.display_path(restored_record.original_path)},
         )
         return restored_record
 

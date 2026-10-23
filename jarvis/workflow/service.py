@@ -35,6 +35,15 @@ class WorkflowExecutionError(Exception):
     """Workflow execution or compilation failure."""
 
 
+class StepUnavailableError(WorkflowExecutionError):
+    """v4.1: the step's capability is not configured or not implemented.
+
+    Raised instead of returning a placeholder "success" (formerly ``*_mock``,
+    ``tool_executed``, ``assistant_executed`` or a generic ``completed``).
+    It is permanent, so the step fails at once without retries.
+    """
+
+
 class WorkflowService:
     def __init__(
         self,
@@ -287,6 +296,9 @@ class WorkflowService:
                         )
                         step_success = True
                         break
+                    except StepUnavailableError as exc:
+                        err_text = str(exc)
+                        break  # permanent: retrying cannot make a missing capability appear
                     except Exception as exc:
                         err_text = str(exc)
                         logger.warning(
@@ -414,7 +426,7 @@ class WorkflowService:
         # ------------------- ASSISTANT
         if step.step_type == StepType.ASSISTANT or act.startswith("assistant.") or act.startswith("tasks.") or act.startswith("notes."):
             if not self.assistant_service:
-                return {"result": "assistant_mock", "action": step.action, "params": merged_params}
+                raise StepUnavailableError(f"assistant service is not configured; step '{step.action}' was not executed.")
             if act in ("tasks.list", "assistant.tasks.list"):
                 page = self.assistant_service.list_tasks(owner_id)
                 return {"tasks": [t.model_dump(mode="json") for t in page.items], "total": page.total}
@@ -443,12 +455,12 @@ class WorkflowService:
                     ),
                 )
                 return {"note_id": str(note.id), "title": note.title}
-            return {"result": "assistant_executed", "action": step.action}
+            raise StepUnavailableError(f"Unsupported assistant action '{step.action}'; nothing was executed.")
 
         # ------------------- FINANCE
         if act.startswith("finance.") or act.startswith("accounts."):
             if not self.finance_service:
-                return {"result": "finance_mock", "action": step.action}
+                raise StepUnavailableError(f"finance service is not configured; step '{step.action}' was not executed.")
             if act in ("finance.accounts.create", "accounts.create"):
                 from jarvis.finance.models import AccountCreateRequest
                 acc = self.finance_service.create_account(
@@ -479,7 +491,7 @@ class WorkflowService:
         # ------------------- SCHEDULER
         if act.startswith("scheduler.") or act.startswith("notifications."):
             if not self.scheduler_service:
-                return {"result": "scheduler_mock", "action": step.action}
+                raise StepUnavailableError(f"scheduler service is not configured; step '{step.action}' was not executed.")
             if act in ("scheduler.notifications.send", "notifications.send"):
                 from jarvis.scheduler.models import NotificationCreateRequest
                 notif = self.scheduler_service.dispatch_notification(
@@ -496,7 +508,7 @@ class WorkflowService:
         # ------------------- HEALTH
         if act.startswith("health."):
             if not self.health_service:
-                return {"result": "health_mock", "action": step.action}
+                raise StepUnavailableError(f"health service is not configured; step '{step.action}' was not executed.")
             if act in ("health.snapshot.capture", "health.snapshot"):
                 snap = self.health_service.capture_snapshot(owner_id)
                 return {"snapshot_id": str(snap.id), "disk_free_gb": snap.disk_free_gb}
@@ -507,19 +519,20 @@ class WorkflowService:
         # ------------------- KNOWLEDGE
         if act.startswith("knowledge."):
             if not self.knowledge_service:
-                return {"result": "knowledge_mock", "action": step.action}
+                raise StepUnavailableError(f"knowledge service is not configured; step '{step.action}' was not executed.")
             if act == "knowledge.search":
-                res = self.knowledge_service.search(
-                    owner_id,
-                    query=merged_params.get("query", ""),
-                    top_k=int(merged_params.get("top_k", 5)),
-                )
+                from jarvis.knowledge.models import KnowledgeSearchRequest
+
+                # v4.1: KnowledgeService.search takes a validated request object; the earlier keyword
+                # call always raised TypeError and was retried with blocking sleeps.
+                res = self.knowledge_service.search(owner_id, KnowledgeSearchRequest(
+                    query=str(merged_params.get("query", "")), top_k=int(merged_params.get("top_k", 5))))
                 return {"results_count": len(res.results)}
 
         # ------------------- RESEARCH
         if act.startswith("research."):
             if not self.research_service:
-                return {"result": "research_mock", "action": step.action}
+                raise StepUnavailableError(f"research service is not configured; step '{step.action}' was not executed.")
             if act == "research.documents.parse":
                 from jarvis.research.models import DocumentParseRequest
                 doc = self.research_service.parse_and_store_document(
@@ -536,14 +549,14 @@ class WorkflowService:
         if step.step_type == StepType.TOOL:
             handler = self.tool_handlers.get(step.action)
             if not handler:
-                return {"result": "tool_executed", "action": step.action, "params": merged_params}
+                raise StepUnavailableError(f"No handler is registered for tool '{step.action}'; nothing was executed.")
             try:
                 res = handler(merged_params)
                 return {"result": res, "action": step.action}
             except Exception as exc:
                 raise WorkflowExecutionError(f"Tool '{step.action}' execution error: {exc}") from exc
 
-        return {"result": "completed", "step_type": step.step_type.value}
+        raise StepUnavailableError(f"Unsupported action '{step.action}' for step type '{step.step_type.value}'; nothing was executed.")
 
     def _compensate_step(
         self,

@@ -111,6 +111,11 @@ def test_snapshots_and_diagnostics(client):
 def test_file_quarantine_and_restore_api(client):
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
+        # v4.1: quarantine is confined to a root; use the temporary directory as that root.
+        from jarvis.health.quarantine import QuarantineManager
+
+        client.app_ref.state.health_service.quarantine_manager = QuarantineManager(
+            tmp_path / ".quarantine", allowed_root=tmp_path)
         suspect = tmp_path / "anomalous_agent.py"
         suspect.write_text("import socket; s = socket.socket()", encoding="utf-8")
 

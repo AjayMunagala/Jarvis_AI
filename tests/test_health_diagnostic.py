@@ -64,7 +64,7 @@ def test_quarantine_isolation_and_restoration():
         source_file.write_text(original_content, encoding="utf-8")
 
         quarantine_dir = tmp_path / ".quarantine"
-        manager = QuarantineManager(quarantine_dir)
+        manager = QuarantineManager(quarantine_dir, allowed_root=tmp_path)  # v4.1: the temp dir is the root
 
         # 1. Quarantine file
         record = manager.quarantine_file(
@@ -92,7 +92,7 @@ def test_quarantine_tamper_detection():
         source_file.write_text("original content", encoding="utf-8")
 
         quarantine_dir = tmp_path / ".quarantine"
-        manager = QuarantineManager(quarantine_dir)
+        manager = QuarantineManager(quarantine_dir, allowed_root=tmp_path)  # v4.1: the temp dir is the root
 
         record = manager.quarantine_file(
             owner_id=TEST_OWNER,

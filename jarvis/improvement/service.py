@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from jarvis.improvement.immutable import assert_mutable_target
+from jarvis.improvement.immutable import resolve_improvement_target
 from jarvis.improvement.models import (
     BenchmarkSuiteResult,
     PromptMutationProposal,
@@ -67,26 +67,26 @@ class ImprovementService:
 
     def get_target_content(self, target_name: str) -> str:
         """Retrieves target content from virtual storage or local filesystem."""
-        assert_mutable_target(target_name)
-        if target_name in self._target_storage:
+        file_path = resolve_improvement_target(self.repo_root, target_name, self._target_storage)
+        if file_path is None:
             return self._target_storage[target_name]
-        file_path = self.repo_root / target_name
         if file_path.is_file():
             return file_path.read_text(encoding="utf-8")
         return ""
 
     def set_target_content(self, target_name: str, content: str) -> None:
         """Saves target content to virtual storage or local filesystem."""
-        assert_mutable_target(target_name)
-        self._target_storage[target_name] = content
-        file_path = self.repo_root / target_name
-        if file_path.is_file():
+        file_path = resolve_improvement_target(self.repo_root, target_name, self._target_storage)
+        if file_path is None:
+            self._target_storage[target_name] = content
+            return
+        if file_path.is_file():  # only existing allowlisted prompt files are rewritten; nothing is created
             file_path.write_text(content, encoding="utf-8")
 
     def propose_mutation(
         self, owner_id: UUID, req: ProposalCreateRequest
     ) -> PromptMutationProposal:
-        assert_mutable_target(req.target_name)
+        resolve_improvement_target(self.repo_root, req.target_name, self._target_storage)
         original = self.get_target_content(req.target_name)
         diff = generate_unified_diff(original, req.proposed_content, req.target_name)
 

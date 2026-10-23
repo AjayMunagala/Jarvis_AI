@@ -120,16 +120,17 @@ class ResearchService:
                 )
                 findings.append(f"From {doc.filename}: {snippet}")
 
-        # Gather web evidence
+        # Web URLs are recorded as references only. v4.1: nothing fetches them, so the
+        # citation must not claim the content was read or verified.
         for url in req.web_urls:
             citations.append(
                 Citation(
                     source=url,
                     reference=url,
-                    quote="External web resource verified by research scanner.",
+                    quote="Not fetched: URL recorded as a reference only; its content was not read or verified.",
                 )
             )
-            findings.append(f"From {url}: external domain evidence.")
+            findings.append(f"{url}: listed as a reference; content not retrieved.")
 
         summary_text = (
             f"Synthesis on '{req.topic}':\n"
