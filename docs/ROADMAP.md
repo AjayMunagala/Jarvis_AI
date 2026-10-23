@@ -284,3 +284,14 @@ The long-term vision includes natural conversation and voice; desktop and suppor
 
 - v5.1 model registry, routing policies, bounded fallback, repeatable evaluation; v5.2 knowledge graph; v5.3 memory selection and context packaging; v5.4 multimodal foundation (mock adapters only); v5.5 plan-quality evaluation (12/13 vs 5/13 baseline on an author-written dataset); v5.6 controlled personalization.
 - Built in parallel with v3.1–v4.0 and not yet integrated with it; integration contracts are listed in `docs/ADVANCED_INTELLIGENCE.md`. v6 and later are not started.
+
+## v4.1–v5.0 (Claude; branch `claude/jarvis-v4.1-to-v5.0` from `3a35dda`)
+
+The scope was derived from the repository, because no earlier document defined these versions. See `docs/V41_V50_PROGRAM.md` for the version map, dependencies, acceptance gates and status ledger.
+
+- **v4.1 Foundation and safety repair: implemented, awaiting acceptance.**
+  - Migrations 0008–0013 can be installed (the reference to a non-existent users table was removed).
+  - Quarantine is confined to the repository, and self-improvement targets are allowlisted.
+  - Knowledge chunk reads are owner-scoped.
+  - Workflows report honest failures instead of placeholder successes, and the `knowledge.search` step no longer crashes.
+  - Research citations no longer claim that URLs were verified.

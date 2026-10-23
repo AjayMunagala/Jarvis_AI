@@ -596,3 +596,17 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - Central audit of all intelligence mutations under the new category `intelligence` (migration `0058_audit_intelligence_category.sql`; 0006 unchanged).
 - Adapter boundaries: `reasoning/adapters.py` (neutral plan document v1), `contextual/sources.py`, `knowledge_graph/adapters.py`. Chat is unchanged.
 - Live PostgreSQL validation (PostgreSQL 18.6, disposable generated databases): the opt-in `integration_tests` suite passed 43/43, including 11 intelligence tests (restart durability, interrupted-proposal recovery, cross-session and two-OS-process races, quotas, import rollback, upgrade from the v3.0 migration state, durable `intelligence` audit). A stale pre-existing test expectation was corrected, and the session fixture moved to `integration_tests/conftest.py`. Live model providers were not run. Details: `docs/ADVANCED_INTELLIGENCE.md`, *Live PostgreSQL validation*.
+
+## v4.1 — Foundation and safety repair (Claude; awaiting owner acceptance)
+
+- **Branch:** `claude/jarvis-v4.1-to-v5.0`, created from `jarvis/integration-v3-to-v5-candidate` at `3a35dda`.
+- **Fixes:**
+  - Migrations 0008–0013 were repaired in place, with owner approval. The change removes only the `REFERENCES jarvis_app.users(id)` clauses, and is proven byte-exact against `tests/fixtures/migrations_before_v41/`.
+  - Quarantine is confined to the repository.
+  - Self-improvement uses an allowlist.
+  - Knowledge chunk reads are owner-scoped.
+  - Workflows fail honestly with `StepUnavailableError`.
+  - The workflow `knowledge.search` step is fixed.
+  - Research URL citations are honest.
+- **Live PostgreSQL:** a fresh install of all 18 migrations now succeeds. `integration_tests/test_v41_postgres_stores.py` exercises every v3.1–v3.7 store.
+- **Details and deferred items:** `docs/V41_V50_PROGRAM.md`.
