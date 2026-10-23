@@ -4,7 +4,7 @@
 
 CREATE TABLE IF NOT EXISTS jarvis_app.health_snapshots (
     id UUID PRIMARY KEY,
-    owner_id UUID NOT NULL REFERENCES jarvis_app.users(id) ON DELETE CASCADE,
+    owner_id UUID NOT NULL,
     cpu_percent NUMERIC(5, 2) NOT NULL,
     memory_percent NUMERIC(5, 2) NOT NULL,
     disk_free_gb NUMERIC(10, 2) NOT NULL,
@@ -16,12 +16,12 @@ CREATE INDEX IF NOT EXISTS idx_health_snapshots_owner ON jarvis_app.health_snaps
 
 CREATE TABLE IF NOT EXISTS jarvis_app.quarantined_files (
     id UUID PRIMARY KEY,
-    owner_id UUID NOT NULL REFERENCES jarvis_app.users(id) ON DELETE CASCADE,
+    owner_id UUID NOT NULL,
     original_path VARCHAR(500) NOT NULL,
     quarantine_path VARCHAR(500) NOT NULL,
     reason VARCHAR(300) NOT NULL,
     hash_sha256 VARCHAR(64) NOT NULL,
-    approved_by UUID REFERENCES jarvis_app.users(id),
+    approved_by UUID,
     quarantined_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     restored_at TIMESTAMPTZ
 );

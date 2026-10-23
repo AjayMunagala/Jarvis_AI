@@ -4,7 +4,7 @@
 
 CREATE TABLE IF NOT EXISTS jarvis_app.parsed_documents (
     id UUID PRIMARY KEY,
-    owner_id UUID NOT NULL REFERENCES jarvis_app.users(id) ON DELETE CASCADE,
+    owner_id UUID NOT NULL,
     filename VARCHAR(300) NOT NULL,
     content_type VARCHAR(100) NOT NULL,
     file_size_bytes BIGINT NOT NULL,
@@ -18,7 +18,7 @@ CREATE INDEX IF NOT EXISTS idx_parsed_docs_owner ON jarvis_app.parsed_documents(
 
 CREATE TABLE IF NOT EXISTS jarvis_app.research_syntheses (
     id UUID PRIMARY KEY,
-    owner_id UUID NOT NULL REFERENCES jarvis_app.users(id) ON DELETE CASCADE,
+    owner_id UUID NOT NULL,
     topic VARCHAR(300) NOT NULL,
     source_urls JSONB NOT NULL DEFAULT '[]'::jsonb,
     source_document_ids JSONB NOT NULL DEFAULT '[]'::jsonb,

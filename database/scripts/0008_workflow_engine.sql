@@ -4,7 +4,7 @@
 
 CREATE TABLE IF NOT EXISTS jarvis_app.workflow_definitions (
     id UUID PRIMARY KEY,
-    owner_id UUID NOT NULL REFERENCES jarvis_app.users(id) ON DELETE CASCADE,
+    owner_id UUID NOT NULL,
     name VARCHAR(200) NOT NULL,
     description TEXT,
     dag_spec JSONB NOT NULL,
@@ -18,7 +18,7 @@ CREATE INDEX IF NOT EXISTS idx_workflow_definitions_owner ON jarvis_app.workflow
 CREATE TABLE IF NOT EXISTS jarvis_app.workflow_runs (
     id UUID PRIMARY KEY,
     workflow_id UUID REFERENCES jarvis_app.workflow_definitions(id) ON DELETE SET NULL,
-    owner_id UUID NOT NULL REFERENCES jarvis_app.users(id) ON DELETE CASCADE,
+    owner_id UUID NOT NULL,
     status VARCHAR(50) NOT NULL DEFAULT 'pending',
     inputs JSONB NOT NULL DEFAULT '{}'::jsonb,
     outputs JSONB NOT NULL DEFAULT '{}'::jsonb,

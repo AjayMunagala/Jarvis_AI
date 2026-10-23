@@ -4,7 +4,7 @@
 
 CREATE TABLE IF NOT EXISTS jarvis_app.scheduled_jobs (
     id UUID PRIMARY KEY,
-    owner_id UUID NOT NULL REFERENCES jarvis_app.users(id) ON DELETE CASCADE,
+    owner_id UUID NOT NULL,
     name VARCHAR(200) NOT NULL,
     schedule_type VARCHAR(20) NOT NULL,
     schedule_expr VARCHAR(100) NOT NULL,
@@ -22,7 +22,7 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_owner_next ON jarvis_app.scheduled
 
 CREATE TABLE IF NOT EXISTS jarvis_app.notifications (
     id UUID PRIMARY KEY,
-    owner_id UUID NOT NULL REFERENCES jarvis_app.users(id) ON DELETE CASCADE,
+    owner_id UUID NOT NULL,
     category VARCHAR(50) NOT NULL,
     title VARCHAR(300) NOT NULL,
     message TEXT NOT NULL,

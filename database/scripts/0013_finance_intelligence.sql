@@ -4,7 +4,7 @@
 
 CREATE TABLE IF NOT EXISTS jarvis_app.financial_accounts (
     id UUID PRIMARY KEY,
-    owner_id UUID NOT NULL REFERENCES jarvis_app.users(id) ON DELETE CASCADE,
+    owner_id UUID NOT NULL,
     name VARCHAR(200) NOT NULL,
     account_type VARCHAR(50) NOT NULL,
     institution VARCHAR(200) NOT NULL,
@@ -20,7 +20,7 @@ CREATE INDEX IF NOT EXISTS idx_financial_accounts_owner ON jarvis_app.financial_
 CREATE TABLE IF NOT EXISTS jarvis_app.financial_transactions (
     id UUID PRIMARY KEY,
     account_id UUID NOT NULL REFERENCES jarvis_app.financial_accounts(id) ON DELETE CASCADE,
-    owner_id UUID NOT NULL REFERENCES jarvis_app.users(id) ON DELETE CASCADE,
+    owner_id UUID NOT NULL,
     amount NUMERIC(15, 2) NOT NULL,
     category VARCHAR(100) NOT NULL,
     description VARCHAR(500) NOT NULL,
@@ -33,7 +33,7 @@ CREATE INDEX IF NOT EXISTS idx_financial_tx_account ON jarvis_app.financial_tran
 
 CREATE TABLE IF NOT EXISTS jarvis_app.financial_snapshots (
     id UUID PRIMARY KEY,
-    owner_id UUID NOT NULL REFERENCES jarvis_app.users(id) ON DELETE CASCADE,
+    owner_id UUID NOT NULL,
     total_assets NUMERIC(15, 2) NOT NULL,
     total_liabilities NUMERIC(15, 2) NOT NULL,
     net_worth NUMERIC(15, 2) NOT NULL,
