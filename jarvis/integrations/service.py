@@ -9,13 +9,19 @@
   changes state needs its own approved request, bound to the enrollment, the
   action and its exact arguments.
 - The secret reference is resolved only when an action runs; its value is
-  never stored, returned, logged or audited.
+  never stored, returned, logged or audited. It must be a real process
+  environment variable (values in ``.env`` are not exported to the process).
+- Revoke and actions on the same enrollment are serialized (one lock per
+  enrollment), so a revoke waits for an in-flight action and every later
+  action sees the revocation. The lock is per process; a multi-process
+  deployment would need a database row lock as well.
 """
 
 import hashlib
 import json
 import logging
 import secrets
+import threading
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -47,6 +53,12 @@ class IntegrationService:
         self.audit_service = audit_service
         self.adapters = adapters if adapters is not None else default_adapters()
         self.approval_service: Any = None
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _lock(self, enrollment_id: str) -> threading.Lock:
+        with self._locks_guard:
+            return self._locks.setdefault(enrollment_id, threading.Lock())
 
     # ------------------------------------------------------------ helpers
 
@@ -143,11 +155,14 @@ class IntegrationService:
         enrollment = self._get(owner_id, enrollment_id)
         if enrollment.state == "revoked":
             return self._view(enrollment)
-        updated = self._storage(self.store.transition, owner_id, enrollment_id, from_states=("pending", "active"),
-                                to_state="revoked", now=_now())
-        if updated is None:  # revoked concurrently
-            return self._view(self._get(owner_id, enrollment_id))
-        self._adapter(updated.adapter_id).forget(enrollment_id)
+        with self._lock(enrollment_id):  # waits for an in-flight action on this enrollment to finish
+            updated = self._storage(self.store.transition, owner_id, enrollment_id,
+                                    from_states=("pending", "active"), to_state="revoked", now=_now())
+            if updated is None:  # revoked concurrently
+                return self._view(self._get(owner_id, enrollment_id))
+            adapter = self.adapters.get(updated.adapter_id)  # an adapter removed from the registry cannot block it
+            if adapter is not None:
+                adapter.forget(enrollment_id)
         self._audit(owner_id, "integration.revoke", updated, {"state": "revoked"})
         return self._view(updated)
 
@@ -157,7 +172,9 @@ class IntegrationService:
         enrollment = self._get(owner_id, enrollment_id)
         if enrollment.state != "active":
             raise IntegrationError(409, f"The enrollment is {enrollment.state}; actions need an active enrollment.")
-        adapter = self._adapter(enrollment.adapter_id)
+        adapter = self.adapters.get(enrollment.adapter_id)
+        if adapter is None:
+            raise IntegrationError(503, f"The adapter '{enrollment.adapter_id}' is not available.")
         spec = adapter.action(req.action)
         if spec is None:
             raise IntegrationError(422, f"The adapter has no action '{req.action}'.")
@@ -167,14 +184,17 @@ class IntegrationService:
             raise IntegrationError(422, str(exc)) from exc
 
         def run_now() -> ActionResult:
-            current = self._get(owner_id, enrollment_id)  # re-checked right before running: revoke wins
-            if current.state != "active":
-                raise IntegrationError(409, f"The enrollment is {current.state}; nothing was executed.")
-            secret = resolve_secret(current.secret_ref)
-            if current.secret_ref is not None and secret is None:
-                raise IntegrationError(503, "The secret reference does not resolve; nothing was executed.")
-            output = adapter.execute(enrollment_id, req.action, arguments, secret)
-            self._storage(self.store.touch, owner_id, enrollment_id, _now())
+            with self._lock(enrollment_id):  # serialized with revoke: a revoke either happens first or waits
+                current = self._get(owner_id, enrollment_id)
+                if current.state != "active":
+                    raise IntegrationError(409, f"The enrollment is {current.state}; nothing was executed.")
+                secret = resolve_secret(current.secret_ref)
+                if current.secret_ref is not None and secret is None:
+                    raise IntegrationError(503, "The secret reference does not resolve; nothing was executed.")
+                output = adapter.execute(enrollment_id, req.action, arguments, secret)
+                if not self._storage(self.store.touch, owner_id, enrollment_id, _now()):
+                    # Only possible with another process: report it instead of a clean success.
+                    raise IntegrationError(409, "The enrollment was revoked while the action ran; check the device.")
             return ActionResult(enrollment_id=enrollment_id, action=req.action, read_only=spec.read_only, mode="mock",
                                 output=output, executed_at=_now().isoformat(timespec="milliseconds"),
                                 approval_id=None if spec.read_only else req.approval_id)

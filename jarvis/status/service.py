@@ -195,7 +195,7 @@ class StatusService:
                             limitations=("Proposals and snapshots are kept in memory and lost on restart (v4.9).",
                                          "Apply and restore wait for an approved request (v4.3).")),
             SubsystemReport(key="integrations", name="Integrations and devices (v4.8)", state="mock",
-                            storage=_storage(getattr(getattr(state, "integration_service", None), "store", None)),
+                            storage=_storage(getattr(state, "integration_service", None)),
                             checks=(f"adapters: {', '.join(getattr(state.integration_service, 'adapters', {})) or 'none'}",)
                             if getattr(state, "integration_service", None) else (),
                             limitations=("Only a simulated adapter exists; no real device is controlled.",

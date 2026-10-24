@@ -54,7 +54,7 @@ def test_only_the_mock_adapter_exists(client):
     adapters = client.get("/integrations/adapters").json()
     assert [item["adapter_id"] for item in adapters] == ["mock.lamp"] and adapters[0]["mode"] == "mock"
     integrations = next(item for item in client.get("/status").json()["subsystems"] if item["key"] == "integrations")
-    assert integrations["state"] == "mock"
+    assert integrations["state"] == "mock" and integrations["storage"] == "memory"
 
 
 def test_enrollment_needs_approval_to_activate_and_does_nothing_while_pending(client):
@@ -129,12 +129,63 @@ def test_invalid_actions_and_arguments_are_refused(client):
 
 
 def test_enrollments_are_owner_scoped(client):
+    from jarvis.integrations.models import ActionRequest
+    from jarvis.integrations.service import IntegrationError
+
     enrollment_id = enroll(client)
+    activate(client, enrollment_id)
     service = client.app_ref.state.integration_service
     other = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
     assert service.list_enrollments(other).enrollments == ()
-    with pytest.raises(Exception):
-        service.get_enrollment(other, enrollment_id)
+    for call in (lambda: service.get_enrollment(other, enrollment_id),
+                 lambda: service.activate(other, enrollment_id),
+                 lambda: service.revoke(other, enrollment_id),
+                 lambda: service.act(other, enrollment_id, ActionRequest(action="read_state"))):
+        with pytest.raises(IntegrationError) as refused:
+            call()
+        assert refused.value.status_code == 404
+    assert client.get(f"/integrations/enrollments/{enrollment_id}").json()["enrollment"]["state"] == "active"
+
+
+def test_an_approval_for_one_enrollment_or_action_does_not_cover_another(client):
+    first, second = enroll(client), enroll(client)
+    activate(client, first)
+    activate(client, second)
+    approval_id = act(client, first, "set_power", {"on": True}).json()["approval"]["approval_id"]
+    client.post(f"/approvals/{approval_id}/approve", json={})
+    assert act(client, second, "set_power", {"on": True}, approval_id).status_code == 409
+    assert act(client, first, "set_brightness", {"level": 1}, approval_id).status_code == 409
+    assert act(client, first, "set_power", {"on": True}, approval_id).status_code == 200
+
+
+def test_a_revoke_waits_for_an_in_flight_action_and_wins_afterwards(client):
+    import threading
+
+    enrollment_id = enroll(client)
+    activate(client, enrollment_id)
+    service = client.app_ref.state.integration_service
+    adapter = service.adapters["mock.lamp"]
+    started, release, revoked = threading.Event(), threading.Event(), threading.Event()
+    original = adapter.execute
+
+    def slow_execute(*args):
+        started.set()
+        release.wait(5)
+        return original(*args)
+
+    adapter.execute = slow_execute
+    worker = threading.Thread(target=lambda: act(client, enrollment_id, "read_state"))
+    worker.start()
+    assert started.wait(5)
+    revoker = threading.Thread(target=lambda: (service.revoke(OWNER, enrollment_id), revoked.set()))
+    revoker.start()
+    assert not revoked.wait(0.3)  # the revoke waits while the action runs
+    release.set()
+    worker.join()
+    revoker.join()
+    assert revoked.is_set() and enrollment_id not in adapter._state  # forgotten after the action finished
+    adapter.execute = original
+    assert act(client, enrollment_id, "read_state").status_code == 409
 
 
 def test_migration_0065_matches_the_models():

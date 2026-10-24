@@ -1,4 +1,4 @@
-"""Enrollment storage (v4.8): in memory (non-durable) or PostgreSQL (durable, migration 0064).
+"""Enrollment storage (v4.8): in memory (non-durable) or PostgreSQL (durable, migration 0065).
 
 State changes are single conditional updates, so an enrollment can be
 activated at most once, and a revoked enrollment can never become active
