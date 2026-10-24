@@ -38,6 +38,7 @@ The v5.1 router stays available for evaluations. Routing chat across several mod
 |---|---|---|
 | v6.1 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (recording blocked the request), since fixed with six other findings | Python 1247 passed; live PostgreSQL 68 passed (clean e371e13); real NVIDIA call recorded 48/383 tokens |
 | v6.2 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (pypdf limit errors reached the API as HTTP 500), since fixed with five other findings | Python 1261 passed (with v6.1 and v6.3); hostile PDFs refused with 422 in under 1 s |
+| v6.3 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found no blocking issues; two medium and five low findings fixed | Python 1266 passed; live PostgreSQL 69 passed |
 
 ## v6.1 — Usage and cost tracking, fallback model
 
@@ -118,4 +119,29 @@ Five more findings, all addressed:
 5. Test gaps: tests now cover three hostile files (each must fail on a pypdf limit), the 422 through the API, and the "not installed" status.
 
 **Known flaky test (not v6.2):** `tests/test_memory.py::test_retrieval_diagnostics_are_allowlisted_and_privacy_safe` failed once in a full run and passed in the next full run and alone.
+
+## v6.3 — Daily briefing and calendar conflicts
+
+### What it does
+- `GET /assistant/briefing?utc_offset_minutes=N` (authenticated, `assistant.read`): for the owner's local day:
+  - overdue tasks (due before the local day began) and tasks due today;
+  - today's events (those overlapping the local day; one ending exactly at midnight belongs to the day before);
+  - pending reminders in the next 24 hours;
+  - calendar conflicts in the next 7 days;
+  - a plain-text summary built only from stored records; no model writes it.
+- `GET /assistant/calendar/conflicts?days=1..90` returns `{conflicts, truncated}`. Overlapping pairs are listed once; events that only touch are not conflicts.
+- A scheduler job with `action_type: "daily_briefing"` sends the summary as a "briefing" notification. Quiet hours hold it; the anti-fatigue throttle never drops it.
+- **Cron is UTC.** For 07:00 at UTC+05:30, schedule `30 1 * * *`.
+- **Date-only due dates:** send full local timestamps; midnight UTC can fall on the previous local day for a negative offset.
+- **Limits:** at most 50 items per list. `truncated` is true whenever a list was shortened or a read limit was reached; nothing is cut off silently.
+
+### v6.3 independent review and acceptance
+No blocking issues. Findings, all fixed with tests:
+1. **Medium:** stale past-due reminders filled the 200-row read and hid upcoming ones. The query now has a lower bound (`due_after`), in memory and in SQL.
+2. **Medium-low:** events ending at midnight, or starting at the next midnight, appeared in today's events. They are now filtered to real overlap.
+3. **Low:** the 500-event read for conflicts could cut off later days silently; a full page now sets `truncated`.
+4. **Low:** a second briefing within 15 minutes was dropped by the throttle; briefings are now exempt, like reminders.
+5. **Low (docs):** cron runs in UTC; documented with an example.
+6. **Low (design):** the overdue and date-only rules are documented.
+7. **Low:** tests added for a negative offset, day boundaries, out-of-range offsets, stale reminders, conflict truncation, the throttle, and a live PostgreSQL run.
 

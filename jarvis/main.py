@@ -303,6 +303,7 @@ def create_app(
     scheduler = app.state.scheduler_service
     scheduler.assistant_service = app.state.assistant_service
     # v6.3: a "daily_briefing" job delivers today's briefing as a notification (owner's local day).
+    # Cron expressions are evaluated in UTC: for 07:00 at UTC+05:30 schedule "30 1 * * *".
     scheduler.briefing_builder = lambda owner: build_briefing(
         app.state.assistant_service, owner, utc_offset_minutes=resolved_settings.scheduler_utc_offset_minutes)
     # Scheduled workflows start in the background, so a long run never delays reminders (v4.5 review finding 10).

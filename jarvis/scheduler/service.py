@@ -8,7 +8,7 @@ v4.5 bounded proactive runtime:
   even with several workers; missed runs after downtime collapse into one.
 - Due assistant reminders are delivered once (pending -> triggered).
 - Notifications during quiet hours are stored but held, and delivered when
-  the quiet hours end; reminders are never dropped by the anti-fatigue throttle.
+  the quiet hours end; reminders and daily briefings (v6.3) are never dropped by the anti-fatigue throttle.
   The throttle reads the last delivery time from storage, so a restart does
   not reset it.
 - Workflow jobs run through the workflow engine. A workflow with write steps
@@ -440,7 +440,7 @@ class SchedulerService:
         held = self.in_quiet_hours(now) and req.priority != "urgent"
         if held and self.store.held_notification_exists(owner_id, req.category, req.title):
             return None  # the same notification is already waiting for the end of quiet hours
-        if req.category != "reminder":  # reminders were asked for: never dropped
+        if req.category not in ("reminder", "briefing"):  # reminders and briefings were asked for: never dropped
             allowed, reason = self.throttler.should_allow(
                 owner_id=owner_id,
                 category=req.category,

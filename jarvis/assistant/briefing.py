@@ -7,6 +7,14 @@ configured offset, the same setting the scheduler's quiet hours use).
 
 Conflicts are calendar events whose times overlap (back-to-back events that
 touch at one instant do not count). Each overlapping pair is listed once.
+
+Definitions: a task is overdue when its due time is before the start of the
+local day (a task due earlier today is "due today"); a date-only due date
+stored as midnight UTC can therefore fall on the previous local day for a
+negative offset, so clients should send full local timestamps. "Today's
+events" are those overlapping the local day (an event ending exactly at
+midnight belongs to the day before). Whenever a list reaches a read limit,
+``truncated`` is true; nothing is cut off silently.
 """
 
 from datetime import date, datetime, time as clock_time, timedelta, timezone
@@ -17,6 +25,8 @@ from pydantic import BaseModel, ConfigDict
 from jarvis.assistant.models import CalendarEvent, ReminderStatus, Task, TaskStatus
 
 MAX_ITEMS = 50
+FETCH_LIMIT = 200
+CONFLICT_EVENT_LIMIT = 500
 
 
 class Frozen(BaseModel):
@@ -48,6 +58,11 @@ class Conflict(Frozen):
     first: BriefingEvent
     second: BriefingEvent
     overlap_minutes: int
+
+
+class ConflictReport(Frozen):
+    conflicts: tuple[Conflict, ...]
+    truncated: bool  # more events than were read, or more conflicts than listed
 
 
 class DailyBriefing(Frozen):
@@ -84,9 +99,19 @@ def find_conflicts(events: list[CalendarEvent]) -> tuple[Conflict, ...]:
     return tuple(conflicts)
 
 
-def conflicts_between(service, owner_id: UUID, start: datetime, end: datetime) -> tuple[Conflict, ...]:
-    events = service.list_calendar_events(owner_id, start_range=start, end_range=end, limit=500).items
-    return find_conflicts(list(events))
+def conflicts_between(service, owner_id: UUID, start: datetime, end: datetime) -> ConflictReport:
+    page = service.list_calendar_events(owner_id, start_range=start, end_range=end, limit=CONFLICT_EVENT_LIMIT)
+    conflicts = find_conflicts(list(page.items))
+    # Calendar pages report only what was returned, so a full page counts as possibly cut off.
+    truncated = len(page.items) >= CONFLICT_EVENT_LIMIT or len(conflicts) > MAX_ITEMS
+    return ConflictReport(conflicts=conflicts[:MAX_ITEMS], truncated=truncated)
+
+
+def _overlaps_day(event: CalendarEvent, day_start: datetime, day_end: datetime) -> bool:
+    start, end = _aware(event.start_time), _aware(event.end_time)
+    if start == end:  # a zero-length event belongs to the day containing its instant
+        return day_start <= start < day_end
+    return end > day_start and start < day_end
 
 
 def _local_day_bounds(now: datetime, offset_minutes: int) -> tuple[date, datetime, datetime]:
@@ -100,19 +125,27 @@ def build_briefing(service, owner_id: UUID, *, now: datetime | None = None, utc_
     now = _aware(now or datetime.now(timezone.utc))
     day, day_start, day_end = _local_day_bounds(now, utc_offset_minutes)
     open_tasks: list[Task] = []
+    read_limit_hit = False
     for status in (TaskStatus.IN_PROGRESS, TaskStatus.PENDING):
-        open_tasks.extend(service.list_tasks(owner_id, status=status, limit=200).items)
+        page = service.list_tasks(owner_id, status=status, limit=FETCH_LIMIT)
+        open_tasks.extend(page.items)
+        read_limit_hit |= page.total > len(page.items)
     dated = sorted((task for task in open_tasks if task.due_date is not None), key=lambda task: _aware(task.due_date))
     overdue = [task for task in dated if _aware(task.due_date) < day_start]
     due_today = [task for task in dated if day_start <= _aware(task.due_date) < day_end]
-    events_today = sorted(service.list_calendar_events(owner_id, start_range=day_start, end_range=day_end,
-                                                       limit=200).items, key=lambda event: _aware(event.start_time))
-    reminders = service.list_reminders(owner_id, status=ReminderStatus.PENDING, due_before=now + timedelta(hours=24),
-                                       limit=200).items
-    upcoming = sorted((reminder for reminder in reminders if _aware(reminder.remind_at) >= now),
-                      key=lambda reminder: _aware(reminder.remind_at))
-    conflicts = conflicts_between(service, owner_id, day_start, day_start + timedelta(days=7))
-    truncated = any(len(items) > MAX_ITEMS for items in (overdue, due_today, events_today, upcoming, conflicts))
+    event_page = service.list_calendar_events(owner_id, start_range=day_start, end_range=day_end, limit=FETCH_LIMIT)
+    read_limit_hit |= len(event_page.items) >= FETCH_LIMIT  # a full page may be cut off
+    # The store's range is inclusive at both ends; keep only events that really overlap the local day.
+    events_today = sorted((event for event in event_page.items if _overlaps_day(event, day_start, day_end)),
+                          key=lambda event: _aware(event.start_time))
+    reminder_page = service.list_reminders(owner_id, status=ReminderStatus.PENDING, due_after=now,
+                                           due_before=now + timedelta(hours=24), limit=FETCH_LIMIT)
+    read_limit_hit |= reminder_page.total > len(reminder_page.items)
+    upcoming = sorted(reminder_page.items, key=lambda reminder: _aware(reminder.remind_at))
+    report = conflicts_between(service, owner_id, day_start, day_start + timedelta(days=7))
+    conflicts = report.conflicts
+    truncated = read_limit_hit or report.truncated or any(
+        len(items) > MAX_ITEMS for items in (overdue, due_today, events_today, upcoming))
 
     def task(item: Task) -> BriefingTask:
         return BriefingTask(id=item.id, title=item.title, priority=item.priority.value,

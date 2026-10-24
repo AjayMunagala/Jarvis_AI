@@ -17,7 +17,7 @@ from jarvis.assistant.models import (
     Reminder, ReminderCreateRequest, ReminderPage, ReminderStatus, ReminderUpdateRequest,
     Task, TaskCreateRequest, TaskPage, TaskPriority, TaskStatus, TaskUpdateRequest,
 )
-from jarvis.assistant.briefing import Conflict, DailyBriefing, build_briefing, conflicts_between
+from jarvis.assistant.briefing import ConflictReport, DailyBriefing, build_briefing, conflicts_between
 from jarvis.assistant.service import AssistantService
 from jarvis.models.schemas import ErrorResponse
 from jarvis.security.policy import Capability
@@ -348,13 +348,13 @@ async def daily_briefing(
     return await run_in_threadpool(build_briefing, _service(request), owner, utc_offset_minutes=offset)
 
 
-@router.get("/calendar/conflicts", response_model=tuple[Conflict, ...], responses=_ERRORS)
+@router.get("/calendar/conflicts", response_model=ConflictReport, responses=_ERRORS)
 async def calendar_conflicts(
     request: Request,
     days: int = Query(default=7, ge=1, le=90),
     owner_id: UUID | None = Depends(authenticated_owner),
-) -> tuple[Conflict, ...]:
-    """Pairs of overlapping calendar events from now until ``days`` ahead."""
+) -> ConflictReport:
+    """Pairs of overlapping calendar events from now until ``days`` ahead (``truncated`` when limits were hit)."""
     owner = _owner(owner_id)
     enforce_capability(request, owner, Capability.ASSISTANT_READ)
     from datetime import timedelta, timezone

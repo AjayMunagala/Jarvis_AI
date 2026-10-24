@@ -66,6 +66,7 @@ class AssistantStore(Protocol):
         *,
         status: ReminderStatus | None = None,
         due_before: datetime | None = None,
+        due_after: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[Reminder], int]: ...
@@ -226,6 +227,7 @@ class MemoryAssistantStore:
         *,
         status: ReminderStatus | None = None,
         due_before: datetime | None = None,
+        due_after: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[Reminder], int]:
@@ -235,6 +237,7 @@ class MemoryAssistantStore:
                 if r.owner_id == owner_id
                 and (status is None or r.status == status)
                 and (due_before is None or r.remind_at <= due_before)
+                and (due_after is None or r.remind_at >= due_after)
             ]
             matched.sort(key=lambda x: x.remind_at)
             total = len(matched)
@@ -583,6 +586,7 @@ class PostgresAssistantStore:
         *,
         status: ReminderStatus | None = None,
         due_before: datetime | None = None,
+        due_after: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[Reminder], int]:
@@ -595,6 +599,9 @@ class PostgresAssistantStore:
         if due_before:
             clauses.append("remind_at <= %s")
             params.append(due_before)
+        if due_after:  # v6.3: lets the briefing skip stale past-due reminders in SQL
+            clauses.append("remind_at >= %s")
+            params.append(due_after)
         where = " AND ".join(clauses)
         count_sql = f"SELECT COUNT(*) FROM jarvis_app.reminders WHERE {where}"
         data_sql = f"SELECT id, owner_id, task_id, title, remind_at, status, created_at, updated_at FROM jarvis_app.reminders WHERE {where} ORDER BY remind_at ASC LIMIT %s OFFSET %s"
