@@ -8,7 +8,11 @@ authenticated.
 - A 403 is recorded with ``decision="denied"``. Any other failure is recorded
   with ``decision="allowed"`` (the caller was permitted, but the attempt
   failed).
-- ``status`` is always ``"failed"``, and ``details.mutated`` is always false.
+- ``status`` is always ``"failed"``. ``details`` holds only the HTTP status:
+  whether state changed before the failure is not observed here, so it is not
+  claimed.
+- The database write runs in a worker thread, so a slow audit store never
+  blocks the event loop.
 - The subject is the method plus the path, with IDs replaced by ``{id}``.
   Bodies, query strings and error messages are never recorded.
 - Unauthenticated requests (401) cannot be attributed to an owner, so they
@@ -21,6 +25,7 @@ their own failures (tools, browser, approvals, intelligence).
 import logging
 import re
 
+import anyio.to_thread
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
@@ -65,7 +70,7 @@ class FailedMutationAuditMiddleware:
         try:
             await self.app(scope, receive, capture)
         finally:
-            self._record(scope, category, status_holder.get("status", 500))
+            await anyio.to_thread.run_sync(self._record, scope, category, status_holder.get("status", 500))
 
     @staticmethod
     def _record(scope: Scope, category: str, status: int) -> None:
@@ -84,7 +89,7 @@ class FailedMutationAuditMiddleware:
                 decision="denied" if status == 403 else "allowed", status="failed",
                 subject=f"{scope.get('method')} {template_path(scope.get('path', ''))}",
                 correlation_id=state.get("correlation_id"),
-                details={"http_status": status, "mutated": False},
+                details={"http_status": status},
             )
         except Exception:  # noqa: BLE001 - auditing must never break the response path
             logger.warning("Failed-mutation audit could not be recorded", extra={"outcome": "audit_error"})

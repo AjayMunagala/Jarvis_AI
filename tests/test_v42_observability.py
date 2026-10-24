@@ -135,7 +135,7 @@ def test_failed_and_denied_mutations_are_audited_without_request_content():
     assert by_category["assistant"]["correlation_id"] == "trace-fail" and by_category["assistant"]["details"]["http_status"] == 422
     assert by_category["finance"]["subject"] == "DELETE /finance/accounts/{id}"
     assert by_category["knowledge"]["decision"] == "denied" and by_category["knowledge"]["event_type"] == "request_denied"
-    assert all(item["status"] == "failed" and item["details"]["mutated"] is False for item in recorded)
+    assert all(item["status"] == "failed" and set(item["details"]) == {"http_status"} for item in recorded)
     assert len(recorded) == 3 and "secret" not in json.dumps(recorded)
 
 
@@ -200,6 +200,82 @@ def test_unreachable_database_is_unavailable_and_never_leaks_the_url():
     database = next(item for item in report["subsystems"] if item["key"] == "database")
     assert database["state"] == "unavailable" and report["overall"] == "degraded"
     assert "not-a-real-password" not in response.text and "jarvis_user" not in response.text
+
+
+def test_database_backed_subsystems_are_unavailable_when_the_database_is():
+    secret_url = "postgresql://jarvis_user:" + "not-a-real-password@127.0.0.1:1/jarvis_missing"
+    app, client = make_client(persistence_enabled=True, persistence_database_url=SecretStr(secret_url))
+    with client:
+        report = client.get("/status").json()
+    for item in report["subsystems"]:
+        if item["storage"] == "postgresql" and item["state"] != "disabled":
+            assert item["state"] == "unavailable", item["key"]
+    memory = next(item for item in report["subsystems"] if item["key"] == "memory")
+    assert memory["state"] == "unavailable" and "PostgreSQL is unreachable" in memory["limitations"][0]
+
+
+# ------------------------------------------------------------- review fixes
+
+def test_unhandled_errors_keep_the_correlation_id(caplog):
+    app, _ = make_client()
+
+    @app.get("/v42-boom")
+    async def boom():
+        raise RuntimeError("boom")
+
+    with TestClient(app, headers=HEADERS, raise_server_exceptions=False) as client, caplog.at_level(logging.ERROR):
+        response = client.get("/v42-boom", headers={"X-Request-ID": "trace-500"})
+    assert response.status_code == 500 and response.headers["x-request-id"] == "trace-500"
+    record = next(item for item in caplog.records if item.getMessage() == "Unhandled application error")
+    assert json.loads(JsonFormatter().format(record))["correlation_id"] == "trace-500"
+
+
+def test_failure_audit_is_written_off_the_event_loop():
+    import asyncio
+
+    app, client = make_client()
+    seen = []
+    with client:
+        original = app.state.audit_service.record
+
+        def record(**kwargs):
+            try:
+                asyncio.get_running_loop()
+                seen.append("event-loop")
+            except RuntimeError:
+                seen.append("worker-thread")
+            return original(**kwargs)
+
+        app.state.audit_service.record = record
+        client.post("/assistant/tasks", json={"title": ""})
+    assert "worker-thread" in seen and "event-loop" not in seen
+
+
+def test_autonomous_diagnostic_step_survives_unmeasured_disk(monkeypatch):
+    app, client = make_client()
+
+    def broken(path):
+        raise OSError("no disk")
+
+    monkeypatch.setattr(probes.shutil, "disk_usage", broken)
+    with client:
+        output, message = app.state.autonomous_coordinator._dispatch_action(OWNER, "health", "diagnostic.run", {})
+    assert output["disk_free_gb"] is None and "disk free not measured" in message
+
+
+def test_linux_probes_tolerate_malformed_input_and_ignore_guest_time(monkeypatch):
+    import io
+
+    files = {"/proc/meminfo": "MemTotal: 1000 kB\nBroken:\nMemAvailable: 250 kB\n",
+             "/proc/stat": "cpu 10 0 10 70 10 0 0 0 500 500\n"}
+    monkeypatch.setattr(probes, "open", lambda path, encoding=None: io.StringIO(files[path]), raising=False)
+    assert probes._linux_memory_percent() == 75.0
+    assert probes._linux_cpu_times() == (80, 100)
+    files["/proc/meminfo"] = ":\n"
+    monkeypatch.setattr(probes.sys, "platform", "linux")
+    assert probes.measure_memory_percent() is None
+    files["/proc/meminfo"] = "MemTotal: x\n"
+    assert probes.measure_memory_percent() is None
 
 
 # ------------------------------------------------------------- telemetry

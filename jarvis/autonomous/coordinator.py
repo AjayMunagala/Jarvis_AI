@@ -248,7 +248,9 @@ class AutonomousCoordinator:
                 return {
                     "disk_free_gb": report.telemetry.disk_free_gb,
                     "findings_count": len(report.secret_findings),
-                }, f"Diagnostics completed: disk free {report.telemetry.disk_free_gb:.1f} GB, {len(report.secret_findings)} secret findings."
+                }, ("Diagnostics completed: disk free "
+                    + (f"{report.telemetry.disk_free_gb:.1f} GB" if report.telemetry.disk_free_gb is not None else "not measured")
+                    + f", {len(report.secret_findings)} secret findings.")
 
         # 6. Improvement Subsystem
         elif subsystem == "improvement":

@@ -114,12 +114,13 @@ class StatusService:
         demo = getattr(provider, "is_demo", False) is True
         audit = getattr(state, "audit_service", None)
         audit_failures = getattr(audit, "failures", 0) or 0
+        database = self._database()
         reports = [
             SubsystemReport(key="provider", name="Model provider", state="mock" if demo else "operational",
                             checks=(f"configured provider: {getattr(provider, 'name', 'none')}",),
                             limitations=("Demo replies only; no language model is used.",) if demo else
                             ("The provider is not contacted by this check.",)),
-            self._database(),
+            database,
             SubsystemReport(key="chat", name="Chat and orchestration", state="operational",
                             limitations=("Chat does not yet use v3.x services or the v5 intelligence layer (v4.7).",)),
             SubsystemReport(key="memory", name="Conversations and memory",
@@ -187,6 +188,14 @@ class StatusService:
                 SubsystemReport(key="multimodal", name="Multimodal (v5.4)", state="disabled",
                                 limitations=("No multimodal model adapter is configured.",)),
             ]
+        if database.state == "unavailable":
+            # A subsystem that stores its data in PostgreSQL cannot be operational while the database is unreachable.
+            reports = [item.model_copy(update={
+                "state": "unavailable",
+                "limitations": ("PostgreSQL is unreachable, so this subsystem cannot read or write its data.",)
+                + item.limitations})
+                if item.key != "database" and item.storage == "postgresql" and item.state != "disabled" else item
+                for item in reports]
         counts: dict[str, int] = {}
         for item in reports:
             counts[item.state] = counts.get(item.state, 0) + 1

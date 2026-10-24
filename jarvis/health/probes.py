@@ -61,7 +61,9 @@ def _linux_memory_percent() -> float | None:
     with open("/proc/meminfo", encoding="ascii") as handle:
         for line in handle:
             name, _, rest = line.partition(":")
-            values[name] = int(rest.split()[0])
+            parts = rest.split()
+            if parts:
+                values[name] = int(parts[0])
     total, available = values.get("MemTotal"), values.get("MemAvailable")
     if not total or available is None:
         return None
@@ -73,6 +75,8 @@ def _linux_cpu_times() -> tuple[int, int] | None:
         fields = [int(item) for item in handle.readline().split()[1:]]
     if len(fields) < 5:
         return None
+    # user nice system idle iowait irq softirq steal; guest time is already counted in user/nice.
+    fields = fields[:8]
     idle = fields[3] + fields[4]  # idle + iowait
     return idle, sum(fields)
 
@@ -83,7 +87,7 @@ def measure_memory_percent() -> float | None:
             return _windows_memory_percent()
         if sys.platform.startswith("linux"):
             return _linux_memory_percent()
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, IndexError):
         return None
     return None
 
@@ -98,7 +102,7 @@ def measure_cpu_percent(interval_seconds: float = 0.2) -> float | None:
         first = sampler()
         time.sleep(interval_seconds)
         second = sampler()
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, IndexError):
         return None
     if first is None or second is None:
         return None

@@ -309,8 +309,12 @@ def create_app(
 
     @app.exception_handler(Exception)
     async def unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:
-        logger.error("Unhandled application error", extra={"error_type": type(exc).__name__})
-        return JSONResponse(status_code=500, content={"error": "internal_error", "detail": "An unexpected server error occurred."})
+        # Runs in ServerErrorMiddleware, outside CorrelationIdMiddleware, so the ID is read from request state.
+        correlation_id = getattr(request.state, "correlation_id", None)
+        logger.error("Unhandled application error",
+                     extra={"error_type": type(exc).__name__, "correlation_id": correlation_id})
+        return JSONResponse(status_code=500, content={"error": "internal_error", "detail": "An unexpected server error occurred."},
+                            headers={"x-request-id": correlation_id} if correlation_id else None)
 
     return app
 
