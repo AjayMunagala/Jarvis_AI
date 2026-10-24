@@ -325,3 +325,6 @@ The scope was derived from the repository, because no earlier document defined t
 - **v4.9 Controlled evolution hardening: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
   - Durable, owner-scoped proposals and snapshots (migration 0066); every proposal is evaluated against the current content.
   - Regressions cannot be approved; rule-line changes need an explicit acknowledgement; restores never undo later changes.
+- **v5.0 Integration and release readiness: accepted by the project lead on 2026-10-24. Verdict: READY to merge into main.**
+  - Fresh-install and upgrade-from-v4.0 tests, release checks, and a combined regression on the release commit, all green.
+  - Open owner decisions: a PDF library, the real-model check, and installing the migrations on `jarvis_AI` after a backup.

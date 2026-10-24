@@ -686,3 +686,20 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - **Evaluation:** every proposal is evaluated against the current content with offline static checks, and a regression cannot be approved. A rule-line change needs `acknowledge_rule_changes`.
 - **Safety:** conditional writes protect against concurrent applies, and restore is refused after a later change.
 - **Details:** `docs/V41_V50_PROGRAM.md`.
+
+## v5.0 — Integration and release readiness (accepted by the project lead on 2026-10-24)
+
+- **Verdict:** READY to merge `claude/jarvis-v4.1-to-v5.0` into `main`. The owner merges.
+- **Regression on the release commit:**
+  - Python: 1230 passed.
+  - Live PostgreSQL: 67 passed.
+  - Vitest: 132 passed.
+  - TypeScript and build: pass.
+  - E2E: 11 passed.
+  - Live smoke: passed.
+- **Migrations:** fresh install and upgrade from v4.0 are verified and idempotent.
+- **Owner decisions:**
+  - a PDF library;
+  - the real-model check;
+  - installing the migrations on `jarvis_AI` after a backup.
+- **Details:** `docs/V41_V50_PROGRAM.md`.

@@ -67,7 +67,7 @@ Results are always labelled as real, mock or unavailable.
 | v4.7 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review (no blocking issues; 7 findings, all fixed) | Python 1194 passed; live PostgreSQL 63 passed; Vitest 132; E2E 11 | branch head at push |
 | v4.8 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review (no blocking issues; 2 medium and 4 low findings, all fixed) | Python 1204 passed; live PostgreSQL 64 passed | branch head at push |
 | v4.9 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review (no blocking issues; 5 medium and 4 low findings, all fixed) | Python 1226 passed; live PostgreSQL 65 passed | branch head at push |
-| v5.0 | IN PROGRESS | — | — |
+| v5.0 | ACCEPTED by Claude as project lead on 2026-10-24. Verdict: READY to merge into main (owner merges; three owner decisions remain, listed in the v5.0 section) | Python 1230 passed; live PostgreSQL 67 passed; Vitest 132; tsc and build pass; E2E 11 passed; live Uvicorn smoke passed (all on clean 72af343) | `72af343` |
 
 ---
 
@@ -712,4 +712,50 @@ These were run on the v4.9 commit in a separate clean checkout.
 - Approving a proposal can now return 422 when it regresses.
 - Rewording a rule line needs `acknowledge_rule_changes`.
 - The proposal model gains an `evaluation` field.
+
+## v5.0 — Integration and release readiness
+
+### Carry-over fix
+Assistant date-times without a time zone are now read as UTC. Mixing naive and zone-aware due dates made task listing fail; the v4.7 review found this.
+
+### Release checks
+- **Migrations:** they are append-only and uniquely numbered, and 0060–0066 drop, truncate or delete nothing.
+- **Defaults:** the execution-disabled defaults hold. Tools, chat tools, browser, the scheduler runner and chat workspace context are all off by default.
+- **Fresh install (live):** every local migration is applied, and `verify` passes.
+- **Upgrade from the v4.0 schema (live).** The test starts from migrations 0001–0059 with existing approval and knowledge rows, then installs the full set:
+  - it applies 0060–0066 only;
+  - the existing rows survive, picking up the new column defaults;
+  - `verify` passes;
+  - a second install changes nothing.
+
+### Combined regression
+All of these ran on a clean checkout of `72af343`:
+
+| Suite | Result |
+|---|---|
+| Python unit and API | 1230 passed, 0 failed, 17 skipped (symlink tests need Windows privileges) |
+| Live PostgreSQL 18.6 | 67 passed, 0 failed, 0 skipped |
+| Frontend Vitest | 132 passed |
+| TypeScript and production build | pass |
+| Playwright E2E | 11 passed |
+| Live Uvicorn smoke | approval flow: 202, then 409 before approval, then 200 with exactly one write, then 409 on reuse; token absent from the log |
+
+### Verdict: READY to merge into main
+Every version v4.1–v5.0 was accepted after an independent review, with every finding fixed or explicitly documented. All suites pass on the release commit. Database changes are forward-only.
+
+You merge the pull request yourself. Three decisions are still yours:
+1. **PDF parsing.** It needs a PDF library, which is a new dependency. Until you approve one, PDF uploads are refused.
+2. **Real-model check.** Put your API key and exact model ID in the git-ignored `.env`, then run a plain chat and a tool-assisted chat.
+3. **Installing on `jarvis_AI`.** The working database has not been touched. The new migrations should be installed only with your consent, after a backup:
+   1. `python -m database.runner backup`
+   2. `install`
+   3. `verify`
+
+### Known limits carried forward
+- **Locks are per process:** the integration revoke/action lock and the file-backed prompt writes.
+- **A timed-out workflow step keeps running:** its thread cannot be stopped, so its outcome is reported as unknown.
+- **Scheduler delivery is at most once.**
+- **Improvement evaluation is offline:** static checks only; no model is run.
+- **The only device adapter is simulated.**
+- **Chat uses the configured provider,** not the v5.1 model router.
 
