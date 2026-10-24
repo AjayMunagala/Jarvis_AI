@@ -18,7 +18,7 @@ dependencies = [
 dev = ["pytest>=8.0,<9.0"]
 persistence = ["psycopg[binary]>=3.1,<4.0"]
 # PDF text extraction for research documents (v6.2). Pure Python.
-documents = ["pypdf>=5.0,<7.0"]
+documents = ["pypdf>=6.21,<7.0"]  # 6.21+ has the configurable decompression and parsing limits
 # Optional real-browser provider (v2.6). Exact pin: each release expects one Chromium build.
 browser = ["playwright==1.64.0"]
 

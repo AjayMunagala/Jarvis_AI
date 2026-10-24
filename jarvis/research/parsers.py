@@ -71,51 +71,84 @@ def _is_pdf(filename: str, content_type: str, raw_bytes: bytes) -> bool:
     return raw_bytes[:5] == b"%PDF-" or content_type == "application/pdf" or filename.endswith(".pdf")
 
 
+# v6.2: tighter than pypdf's defaults (75 MB per stream, 2 M content-stream operands, page tree depth 100),
+# so a hostile file fails quickly with a pypdf limit error instead of using seconds of CPU and tens of MB.
+PDF_LIMITS = {
+    "zlib_maximum_output_length": 16_000_000,
+    "lzw_maximum_output_length": 16_000_000,
+    "run_length_maximum_output_length": 16_000_000,
+    "brotli_maximum_output_length": 16_000_000,
+    "array_based_stream_maximum_output_length": 16_000_000,
+    "maximum_declared_stream_length": 16_000_000,
+    "image_maximum_buffer_size": 16_000_000,
+    "stream_decoding_work_maximum_length": 64_000_000,
+    "stream_parsing_work_maximum_count": 200_000,
+    "page_tree_maximum_depth": 32,
+    "page_tree_maximum_entries": 10_000,
+    "xform_maximum_invocations_per_extraction": 500,
+}
+
+
 def extract_pdf_text(raw_bytes: bytes) -> tuple[str, int]:
-    """Text and page count of a PDF, read with pypdf under strict limits (v6.2)."""
+    """Text and number of pages read from a PDF, using pypdf under strict limits (v6.2).
+
+    Every failure inside pypdf (damaged file, a limit reached, a missing
+    optional decoder) becomes a ``DocumentParsingError``, so the API answers
+    422 and never 500. The time budget is checked between pages; a single page
+    is bounded by ``PDF_LIMITS`` rather than by the clock.
+    """
+    import logging
     import time
 
     try:
-        from pypdf import PdfReader
-        from pypdf.errors import PdfReadError
+        from pypdf import PdfReader, apply_configuration
     except ImportError as exc:
         raise DocumentParsingError("PDF parsing needs the optional 'documents' extra (pip install -e \".[documents]\"). "
                                    "Nothing was stored.") from exc
+    pypdf_logger = logging.getLogger("pypdf")
+    previous_level = pypdf_logger.level
+    pypdf_logger.setLevel(logging.ERROR)  # a damaged file otherwise logs one warning per repaired object
+    pages_read = 0
     try:
-        reader = PdfReader(io.BytesIO(raw_bytes), strict=False)
-        if reader.is_encrypted:
-            raise DocumentParsingError("The PDF is encrypted or password-protected; it was not opened. Nothing was stored.")
-        total_pages = len(reader.pages)
-        started = time.monotonic()
-        parts: list[str] = []
-        chars = 0
-        stopped = None
-        for index, page in enumerate(reader.pages):
-            if index >= MAX_PAGES:
-                stopped = f"[Only the first {MAX_PAGES} of {total_pages} pages were read]"
-                break
-            if time.monotonic() - started > PDF_TIME_BUDGET_SECONDS:
-                stopped = f"[Extraction stopped after {index} of {total_pages} pages: time limit reached]"
-                break
-            text = page.extract_text() or ""
-            parts.append(text.strip())
-            chars += len(text)
-            if chars > MAX_EXTRACTED_CHARS:
-                stopped = f"[Extraction stopped after {index + 1} of {total_pages} pages: text limit reached]"
-                break
+        with apply_configuration(**PDF_LIMITS):
+            reader = PdfReader(io.BytesIO(raw_bytes), strict=False)
+            if reader.is_encrypted:
+                raise DocumentParsingError("The PDF is encrypted or password-protected; it was not opened. "
+                                           "Nothing was stored.")
+            total_pages = len(reader.pages)
+            started = time.monotonic()
+            parts: list[str] = []
+            chars = 0
+            stopped = None
+            for index in range(total_pages):
+                if index >= MAX_PAGES:
+                    stopped = f"Only the first {MAX_PAGES} of {total_pages} pages were read"
+                    break
+                if time.monotonic() - started > PDF_TIME_BUDGET_SECONDS:
+                    stopped = f"Extraction stopped after {index} of {total_pages} pages: time limit reached"
+                    break
+                text = reader.pages[index].extract_text() or ""
+                pages_read = index + 1
+                parts.append(text.strip())
+                chars += len(text)
+                if chars > MAX_EXTRACTED_CHARS:
+                    stopped = f"Extraction stopped after {pages_read} of {total_pages} pages: text limit reached"
+                    break
     except DocumentParsingError:
         raise
-    except (PdfReadError, ValueError, KeyError, TypeError, AttributeError, IndexError, RecursionError,
-            OSError, NotImplementedError) as exc:
-        raise DocumentParsingError("The PDF could not be read (it may be damaged or use unsupported features). "
-                                   "Nothing was stored.") from exc
+    except Exception as exc:  # noqa: BLE001 - pypdf raises many types (PyPdfError, LimitReachedError, DependencyError, ...)
+        raise DocumentParsingError("The PDF could not be read (it may be damaged, too complex, or use unsupported "
+                                   "features). Nothing was stored.") from exc
+    finally:
+        pypdf_logger.setLevel(previous_level)
     text = "\n\n".join(part for part in parts if part)
     if not text.strip():
         raise DocumentParsingError("The PDF contains no extractable text (it may be scanned images; OCR is not "
                                    "supported). Nothing was stored.")
     if stopped:
-        text += "\n" + stopped
-    return text, max(1, min(total_pages, MAX_PAGES))
+        # The note is the last line and names the real counts; the stored page count says the same.
+        text += f"\n[JARVIS: {stopped}]"
+    return text, max(1, pages_read)
 
 
 def _is_docx(filename: str, content_type: str) -> bool:

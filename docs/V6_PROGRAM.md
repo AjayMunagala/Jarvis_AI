@@ -37,7 +37,7 @@ The v5.1 router stays available for evaluations. Routing chat across several mod
 | Version | Status | Evidence |
 |---|---|---|
 | v6.1 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (recording blocked the request), since fixed with six other findings | Python 1247 passed; live PostgreSQL 68 passed (clean e371e13); real NVIDIA call recorded 48/383 tokens |
-| v6.2 | IMPLEMENTED, TESTED; in review | Python 1252 passed (with v6.1) |
+| v6.2 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (pypdf limit errors reached the API as HTTP 500), since fixed with five other findings | Python 1261 passed (with v6.1 and v6.3); hostile PDFs refused with 422 in under 1 s |
 
 ## v6.1 — Usage and cost tracking, fallback model
 
@@ -92,4 +92,30 @@ It also found six more issues, all fixed with tests:
    - aggregates in SQL;
    - notes that failed calls may still be billed;
    - reports dropped and evicted events.
+
+## v6.2 — PDF text extraction
+
+### What it does
+- **Library:** `pypdf` (pure Python), the optional `documents` extra: `pip install -e ".[documents]"`, pinned `>=6.21,<7` because earlier versions lack configurable decompression and parsing limits.
+- **Without the library:** a PDF is refused with a message saying how to enable it, and `/status` shows "PDF extraction not installed".
+- **Refused:** encrypted PDFs, PDFs with no extractable text (scanned images; there is no OCR), and damaged or hostile files.
+- **Limits:**
+  - the first 100 pages, the 500 KB text cap and a 20 s budget checked between pages; a visible `[JARVIS: ...]` note gives the real counts when one stops extraction;
+  - pypdf's own limits are tightened (`PDF_LIMITS`): 16 MB per decoded stream, 200,000 content-stream operands, page tree depth 32, 500 form XObjects per page.
+- **Page count** is the number of pages actually read.
+- The text is fenced as untrusted content, like every other document.
+
+### v6.2 independent review and acceptance
+The reviewer found one blocking defect, fixed before acceptance: pypdf's limit and parse errors (`LimitReachedError`, `ParseError` and others) and `DependencyError` were not caught, so a deep page tree, a decompression bomb or a content stream with millions of operands produced HTTP 500.
+
+**The fix.** Every exception from pypdf becomes "The PDF could not be read" (HTTP 422), and the tighter limits make those files fail in well under a second.
+
+Five more findings, all addressed:
+1. The version floor admitted pypdf releases without the limits; it is now `>=6.21`.
+2. One page could run for 5–15 s before the clock was checked; the tighter limits now bound a single page.
+3. Damaged files flooded the log with repair warnings; the `pypdf` logger is set to ERROR during extraction.
+4. The page count after an early stop could overstate what was read, and the stop note looked like document text; both are fixed.
+5. Test gaps: tests now cover three hostile files (each must fail on a pypdf limit), the 422 through the API, and the "not installed" status.
+
+**Known flaky test (not v6.2):** `tests/test_memory.py::test_retrieval_diagnostics_are_allowlisted_and_privacy_safe` failed once in a full run and passed in the next full run and alone.
 

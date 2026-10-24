@@ -102,3 +102,67 @@ def test_pdf_through_the_api_and_into_knowledge():
     assert hits and hits[0]["chunk"]["untrusted"] is True
     research = next(item for item in status["subsystems"] if item["key"] == "research")
     assert research["checks"] == ["PDF extraction available"]
+
+
+def raw_pdf(objects: list[bytes]) -> bytes:
+    """A PDF from numbered object bodies (object 1 is the catalog), for hostile-file tests."""
+    body = b"%PDF-1.7\n"
+    offsets = []
+    for number, item in enumerate(objects, start=1):
+        offsets.append(len(body))
+        body += f"{number} 0 obj ".encode() + item + b" endobj\n"
+    xref = len(body)
+    body += f"xref\n0 {len(offsets) + 1}\n0000000000 65535 f \n".encode()
+    body += b"".join(f"{offset:010d} 00000 n \n".encode() for offset in offsets)
+    body += f"trailer << /Size {len(offsets) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode()
+    return body
+
+
+def one_page_with(stream: bytes, filter_name: str = "") -> bytes:
+    flt = f" /Filter /{filter_name}" if filter_name else ""
+    return raw_pdf([b"<< /Type /Catalog /Pages 2 0 R >>",
+                    b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                    b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+                    b"/Resources << /Font << /F1 5 0 R >> >> >>",
+                    f"<< /Length {len(stream)}{flt} >> stream\n".encode() + stream + b"\nendstream",
+                    b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"])
+
+
+def deep_page_tree(depth: int) -> bytes:
+    objects = [b"<< /Type /Catalog /Pages 2 0 R >>"]
+    for level in range(depth):
+        number = 2 + level
+        parent = f" /Parent {number - 1} 0 R" if level else ""
+        objects.append(f"<< /Type /Pages /Kids [{number + 1} 0 R] /Count 1{parent} >>".encode())
+    objects.append(f"<< /Type /Page /Parent {depth + 1} 0 R /MediaBox [0 0 612 792] >>".encode())
+    return raw_pdf(objects)
+
+
+@pytest.mark.parametrize("name, data", [
+    ("deep page tree", deep_page_tree(150)),
+    ("decompression bomb", one_page_with(__import__("zlib").compress(
+        b"BT /F1 12 Tf 72 720 Td (" + b"a" * 40_000_000 + b") Tj ET", 9), "FlateDecode")),
+    ("too many operands", one_page_with(b"BT /F1 12 Tf 72 720 Td " + b"1 " * 300_000 + b"(x) Tj ET")),
+], ids=["deep-page-tree", "decompression-bomb", "too-many-operands"])
+def test_hostile_pdfs_are_refused_as_unreadable_not_crashes(name, data):
+    import time
+
+    started = time.monotonic()
+    with pytest.raises(DocumentParsingError, match="could not be read") as refused:
+        extract_document_text(f"{name}.pdf", "application/pdf", raw_bytes=data)
+    assert time.monotonic() - started < 10, name
+    assert type(refused.value.__cause__).__name__ == "LimitReachedError"  # a pypdf limit stopped it
+
+
+def test_a_hostile_pdf_gets_422_from_the_api_and_status_reports_a_missing_library(monkeypatch):
+    app = create_app(settings=Settings(_env_file=None, environment="test", log_level="ERROR",
+                                       local_auth_token=SecretStr(TOKEN), owner_id=OWNER))
+    with TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}) as client:
+        refused = client.post("/research/documents/parse", json={
+            "filename": "tree.pdf", "content_type": "application/pdf",
+            "data_base64": base64.b64encode(deep_page_tree(150)).decode()})
+        monkeypatch.setattr("jarvis.status.service._pypdf_available", lambda: False)
+        status = client.get("/status").json()
+    assert refused.status_code == 422 and "could not be read" in refused.text
+    research = next(item for item in status["subsystems"] if item["key"] == "research")
+    assert research["checks"] == ["PDF extraction not installed"]
