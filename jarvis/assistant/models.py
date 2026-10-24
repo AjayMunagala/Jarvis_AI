@@ -1,11 +1,11 @@
 """Strict domain and API schemas for personal assistant capabilities (v3.1)."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class TaskStatus(StrEnum):
@@ -31,6 +31,15 @@ class ReminderStatus(StrEnum):
 
 class StrictSchema(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    @field_validator("*", mode="after")
+    @classmethod
+    def _naive_datetimes_are_utc(cls, value: Any) -> Any:
+        # v5.0: a date-time without a zone is read as UTC, so naive and zone-aware values can be compared
+        # (mixing them made task listing fail; found in the v4.7 review).
+        if isinstance(value, datetime) and value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
 
 
 # ------------------------------------------------------------- Entities
