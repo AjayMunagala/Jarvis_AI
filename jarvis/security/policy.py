@@ -69,6 +69,9 @@ class Capability(StrEnum):
     # Tutor (v6.5): learning goals, study plans, exercises and progress.
     TUTOR_READ = "tutor.read"
     TUTOR_WRITE = "tutor.write"
+    # Travel and decision planning (v7.4): no booking, purchasing or account access.
+    TRAVEL_READ = "travel.read"
+    TRAVEL_WRITE = "travel.write"
 
 
 _OWNER_CAPABILITIES = frozenset({
@@ -116,6 +119,8 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.PERSONALIZATION_MANAGE,
     Capability.TUTOR_READ,
     Capability.TUTOR_WRITE,
+    Capability.TRAVEL_READ,
+    Capability.TRAVEL_WRITE,
 })
 
 

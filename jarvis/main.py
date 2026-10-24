@@ -42,6 +42,9 @@ from jarvis.sources.service import SourcesService
 from jarvis.sources.stores import MemorySourceStore, PostgresSourceStore
 from jarvis.tutor.service import TutorService
 from jarvis.tutor.stores import MemoryTutorStore, PostgresTutorStore
+from jarvis.api.routes.travel import router as travel_router
+from jarvis.travel.service import TravelService
+from jarvis.travel.stores import MemoryTravelStore, PostgresTravelStore
 from jarvis.integrations.service import IntegrationService
 from jarvis.integrations.stores import MemoryEnrollmentStore, PostgresEnrollmentStore
 from jarvis.autonomous.coordinator import AutonomousCoordinator
@@ -219,6 +222,7 @@ def create_app(
         health_store = PostgresHealthStore(url, **timeouts)
         finance_store = PostgresFinanceStore(url, **timeouts)
         tutor_store = PostgresTutorStore(url, **timeouts)
+        travel_store = PostgresTravelStore(url, **timeouts)
     else:
         assistant_store = MemoryAssistantStore()
         workflow_store = MemoryWorkflowStore()
@@ -228,6 +232,7 @@ def create_app(
         health_store = MemoryHealthStore()
         finance_store = MemoryFinanceStore()
         tutor_store = MemoryTutorStore()
+        travel_store = MemoryTravelStore()
     app.state.assistant_service = AssistantService(assistant_store, audit_service=app.state.audit_service)
     app.state.knowledge_service = KnowledgeService(
         knowledge_store,
@@ -256,6 +261,12 @@ def create_app(
     # v6.5 tutor: goals, plans, exercises and progress; explanations and generation use the resolved provider.
     app.state.tutor_service = TutorService(
         tutor_store, audit_service=app.state.audit_service,
+        model_timeout_seconds=resolved_settings.provider_connect_timeout_seconds
+        + resolved_settings.provider_read_timeout_seconds * 2 + 5,
+    )
+    # v7.4 travel and decision planning: no booking; departure reminders go through the assistant service.
+    app.state.travel_service = TravelService(
+        travel_store, audit_service=app.state.audit_service, assistant_service=app.state.assistant_service,
         model_timeout_seconds=resolved_settings.provider_connect_timeout_seconds
         + resolved_settings.provider_read_timeout_seconds * 2 + 5,
     )
@@ -378,6 +389,7 @@ def create_app(
     app.include_router(usage_router)
     app.include_router(integrations_router)
     app.include_router(tutor_router)
+    app.include_router(travel_router)
     app.include_router(sources_router)
 
     @app.exception_handler(RequestValidationError)
