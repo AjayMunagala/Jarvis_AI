@@ -251,8 +251,10 @@ class StatusService:
                                          "Explanations and exercise generation need a real model provider; "
                                          "with the demo provider explanations are labeled demo and generation "
                                          "is refused.")),
-            SubsystemReport(key="travel", name="Travel and decisions (v7.4)", state="limited",
+            SubsystemReport(key="travel", name="Travel and decisions (v7.4)",
+                            state=getattr(getattr(state, "travel_service", None), "status_state", "limited"),
                             storage=_storage(getattr(state, "travel_service", None)),
+                            checks=tuple(getattr(getattr(state, "travel_service", None), "status_checks", ())),
                             limitations=("No booking, purchasing, payment or account access; nothing is looked up.",
                                          "Options, prices and times are owner-entered and unverified.",
                                          "No currency conversion: segment costs must use the trip currency.",

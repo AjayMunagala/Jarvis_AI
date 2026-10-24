@@ -152,17 +152,68 @@ def test_unknown_values_are_left_out_and_reweighted_and_ties_share_a_rank():
     assert (by_name["A"].score, by_name["A"].rank, by_name["A"].tied) == (50.0, 2, True)
     assert (by_name["B"].score, by_name["B"].rank, by_name["B"].tied) == (50.0, 2, True)
     assert result.winners == ["C"] and not by_name["C"].tied
-    assert "'C' has no value for 'hours'; its score uses its other criteria only" in result.explanation
+    # C has values for half the used weight, A and B for all of it: not a clear winner.
+    assert (by_name["C"].coverage, by_name["A"].coverage) == (0.5, 1.0) and result.low_confidence_winner is True
+    assert "'C' has no value for 'hours'; its score uses its other criteria only (coverage 50%)" in result.explanation
+    assert result.explanation.startswith("Caution: 'C' has the highest score (80.0 of 100) but has values for only "
+                                         "50% of the used criteria weight")
+    assert "ranks first" not in result.explanation
 
 
-def test_an_all_equal_criterion_scores_one_for_everyone_and_is_reported():
+def test_an_all_equal_criterion_is_not_used_and_is_reported():
     options = [("A", {"price": 100.0, "wifi": 1.0}), ("B", {"price": 50.0, "wifi": 1.0})]
     result = evaluate_decision(decision(options, [("price", 50.0, "lower_better"), ("wifi", 50.0, "higher_better")]))
-    assert result.constant_criteria == ["wifi"]
+    assert [(item.criterion, item.reason) for item in result.excluded_criteria] == [("wifi", "same_for_all")]
     by_name = {item.option: item for item in result.ranking}
-    assert by_name["A"].breakdown[1].normalized == 1.0 and by_name["B"].breakdown[1].normalized == 1.0
-    assert (by_name["B"].score, by_name["A"].score) == (100.0, 50.0)
-    assert "'wifi' is the same for every option" in result.explanation
+    assert by_name["A"].breakdown[1].normalized is None and by_name["B"].breakdown[1].weight_share is None
+    assert (by_name["B"].score, by_name["A"].score) == (100.0, 0.0)
+    assert by_name["A"].coverage == 1.0 and result.low_confidence_winner is False
+    assert "'wifi' is not used: it is the same for all options that have a value." in result.explanation
+
+
+def test_review_repro_an_option_rated_on_one_criterion_cannot_win():
+    options = [("Grand", {"price": 120.0, "distance": 1.0}), ("Plaza", {"price": 100.0, "distance": 2.0}),
+               ("Dive", {"rating": 1.0})]
+    result = evaluate_decision(decision(options, [("price", 40.0, "lower_better"), ("distance", 30.0, "lower_better"),
+                                                  ("rating", 30.0, "higher_better")]))
+    by_name = {item.option: item for item in result.ranking}
+    # rating has one value, so it is used for nobody. price: Plaza 1, Grand 0; distance: Grand 1, Plaza 0.
+    # Plaza 40/70 = 57.14, Grand 30/70 = 42.86; Dive has no used value and cannot be scored.
+    assert [(item.option, item.rank, item.score) for item in result.ranking] == [
+        ("Plaza", 1, 57.14), ("Grand", 2, 42.86), ("Dive", None, None)]
+    assert by_name["Dive"].coverage == 0.0 and by_name["Plaza"].coverage == 1.0
+    assert result.winners == ["Plaza"] and result.low_confidence_winner is False
+    assert [(item.criterion, item.reason) for item in result.excluded_criteria] == [("rating", "one_value")]
+    assert "'rating' is not used: only one option has a value" in result.explanation
+    assert "'Dive' has no value for 'price', 'distance', so it cannot be scored." in result.explanation
+    assert "'Plaza' ranks first with 57.1 of 100." in result.explanation
+    rating = next(item for item in result.sensitivity if item.criterion == "rating")
+    assert rating.statement.startswith("'rating' does not separate the options")
+
+
+def test_review_repro_sparse_versus_full():
+    options = [("Sparse", {"price": 100.0}), ("Full", {"price": 101.0, "distance": 1.0, "rating": 5.0})]
+    result = evaluate_decision(decision(options, [("price", 40.0, "lower_better"), ("distance", 30.0, "lower_better"),
+                                                  ("rating", 30.0, "higher_better")]))
+    # Only price can be compared; distance and rating have one value each and count for nobody.
+    assert [(item.option, item.score, item.coverage) for item in result.ranking] == [
+        ("Sparse", 100.0, 1.0), ("Full", 0.0, 1.0)]
+    assert [(item.criterion, item.reason) for item in result.excluded_criteria] == [
+        ("distance", "one_value"), ("rating", "one_value")]
+    assert result.low_confidence_winner is False
+    assert "'distance' is not used: only one option has a value" in result.explanation
+
+
+def test_a_low_coverage_winner_is_flagged_and_never_called_clear():
+    options = [("A", {"price": 100.0, "distance": 5.0}), ("B", {"price": 200.0, "distance": 1.0}),
+               ("C", {"price": 50.0})]
+    result = evaluate_decision(decision(options, [("price", 20.0, "lower_better"), ("distance", 80.0, "lower_better")]))
+    by_name = {item.option: item for item in result.ranking}
+    # C: price 1 on its own -> 100 with 20% coverage; B: 80; A: 0.6667 * 20 = 13.33.
+    assert (by_name["C"].score, by_name["C"].coverage, by_name["B"].score) == (100.0, 0.2, 80.0)
+    assert result.winners == ["C"] and result.low_confidence_winner is True
+    assert "Caution: 'C' has the highest score (100.0 of 100) but has values for only 20%" in result.explanation
+    assert "while 'B' has values for 100%" in result.explanation and "not a clear winner" in result.explanation
 
 
 def test_a_tie_is_reported_as_a_tie_without_a_sensitivity_check():
@@ -180,12 +231,12 @@ def test_sensitivity_reports_the_flip_thresholds_and_they_are_right():
     # price weight w (hours 40): Bus w/(w+40) = Train (0.5714w + 20)/(w+40) at w = 46.67.
     assert price.lower_threshold == 46.67 and price.lower_new_winner == ["Train"] and price.upper_threshold is None
     assert price.smallest_change == -13.33
-    assert price.statement == ("The winner changes from 'Bus' to 'Train' if the 'price' weight drops below 46.67 "
-                               "(now 60).")
+    assert price.statement == ("The top option changes from 'Bus' to 'Train' if the 'price' weight drops below "
+                               "46.67 (now 60).")
     # hours weight h (price 60): 60/(60+h) = (34.29 + 0.5h)/(60+h) at h = 51.43.
     assert hours.upper_threshold == 51.43 and hours.upper_new_winner == ["Train"] and hours.lower_threshold is None
     assert "rises above 51.43" in hours.statement
-    assert "Most sensitive: the winner changes from 'Bus' to 'Train' if the 'hours' weight rises above 51.43" \
+    assert "Most sensitive: the top option changes from 'Bus' to 'Train' if the 'hours' weight rises above 51.43" \
         in result.explanation
 
     def winner_with(price_weight, hours_weight):
@@ -202,16 +253,85 @@ def test_a_dominant_option_has_no_flip():
     options = [("A", {"price": 10.0, "hours": 1.0}), ("B", {"price": 20.0, "hours": 2.0})]
     result = evaluate_decision(decision(options, [("price", 50.0, "lower_better"), ("hours", 50.0, "lower_better")]))
     assert all(item.lower_threshold is None and item.upper_threshold is None for item in result.sensitivity)
-    assert result.sensitivity[0].statement.startswith("No weight for 'price' between 0 and 100 changes the winner")
-    assert "No single weight change between 0 and 100 changes the winner." in result.explanation
+    assert result.sensitivity[0].statement.startswith("No weight for 'price' between 0 and 100 changes the top")
+    assert "No single weight change between 0 and 100 changes the top option." in result.explanation
 
 
 def test_zero_weight_and_valueless_criteria_are_unused():
     options = [("A", {"price": 10.0, "noise": 3.0}), ("B", {"price": 20.0})]
     result = evaluate_decision(decision(options, [("price", 50.0, "lower_better"), ("noise", 0.0, "lower_better"),
                                                   ("view", 30.0, "higher_better")]))
-    assert result.unused_criteria == ["noise", "view"]
-    assert "No option has a value for 'view', so it was left out." in result.explanation
+    assert [(item.criterion, item.reason) for item in result.excluded_criteria] == [
+        ("noise", "one_value"), ("view", "no_values")]
+    assert "'view' is not used: no option has a value." in result.explanation
+    separating = evaluate_decision(decision([("A", {"price": 10.0, "noise": 3.0}), ("B", {"price": 20.0, "noise": 1.0})],
+                                            [("price", 50.0, "lower_better"), ("noise", 0.0, "lower_better")]))
+    assert [(item.criterion, item.reason) for item in separating.excluded_criteria] == [("noise", "zero_weight")]
+    assert "'noise' has weight 0, so it does not count." in separating.explanation
+
+
+def test_sensitivity_at_weight_zero_and_with_a_single_weighted_criterion():
+    # extra has weight 0; C is known only on extra, so any weight above 0 lets C (scaled 1.0) in at the top.
+    options = [("A", {"price": 10.0, "extra": 1.0}), ("B", {"price": 20.0}), ("C", {"extra": 5.0})]
+    result = evaluate_decision(decision(options, [("price", 50.0, "lower_better"), ("extra", 0.0, "higher_better")]))
+    assert result.winners == ["A"]
+    extra = next(item for item in result.sensitivity if item.criterion == "extra")
+    assert (extra.upper_threshold, extra.upper_new_winner, extra.lower_threshold) == (0.0, ["C"], None)
+    assert "rises above 0 (now 0)" in extra.statement
+    # With only one weighted criterion, setting it to 0 is not a valid decision, so no "set to 0" is reported.
+    single = evaluate_decision(decision([("A", {"price": 10.0}), ("B", {"price": 20.0})],
+                                        [("price", 50.0, "lower_better")]))
+    assert single.sensitivity[0].lower_threshold is None and "set to 0" not in single.sensitivity[0].statement
+
+
+def _winners_at(base, index, weight):
+    criteria = [item.model_copy(update={"weight": weight}) if i == index else item
+                for i, item in enumerate(base.criteria)]
+    if not any(item.weight > 0 for item in criteria):
+        return None
+    return evaluate_decision(base.model_copy(update={"criteria": criteria})).winners
+
+
+def test_sensitivity_matches_a_brute_force_grid():
+    import random
+
+    rng = random.Random(74)
+    margin, checked, cases = 0.02, 0, 0
+    for _ in range(200):
+        n_options, n_criteria = rng.randint(2, 5), rng.randint(1, 4)
+        criteria = [(f"c{j}", float(rng.choice([0, 0, rng.randint(1, 100)])),
+                     rng.choice(["higher_better", "lower_better"])) for j in range(n_criteria)]
+        if not any(weight > 0 for _, weight, _ in criteria):
+            criteria[0] = (criteria[0][0], 50.0, criteria[0][2])
+        options = [(f"o{i}", {f"c{j}": None if rng.random() < 0.25 else float(rng.randint(0, 20))
+                              for j in range(n_criteria)}) for i in range(n_options)]
+        base = decision(options, criteria)
+        result = evaluate_decision(base)
+        if len(result.winners) != 1:
+            continue
+        cases += 1
+        winner = result.winners
+        for index, item in enumerate(result.sensitivity):
+            low, high, current = item.lower_threshold, item.upper_threshold, item.weight
+            for step in range(201):
+                weight = step / 2
+                found = _winners_at(base, index, weight)
+                if found is None or abs(weight - current) < 1e-9:
+                    continue
+                if weight < current:
+                    if low is not None and weight <= low + margin:
+                        continue
+                elif high is not None and weight >= high - margin:
+                    continue
+                assert found == winner, (options, criteria, item, weight, found)
+                checked += 1
+            # Every reported threshold is real: just past it the top option is different.
+            if low is not None:
+                probe = 0.0 if low == 0 else max(low - margin / 2, 0.0)
+                assert _winners_at(base, index, probe) not in (None, winner), (options, criteria, item)
+            if high is not None:
+                assert _winners_at(base, index, min(high + margin / 2, 100.0)) != winner, (options, criteria, item)
+    assert cases > 50 and checked > 10_000
 
 
 @pytest.mark.parametrize("body", [
@@ -486,9 +606,16 @@ def test_a_reminder_deleted_in_the_assistant_is_recreated_and_departed_segments_
     assert {item.segment_id: item.action for item in again.items}[future.id] == "recreated"
     assert assistant.list_reminders(OWNER).total == 1
     # A lead time that reaches into the past is clamped to now.
-    soon = service.sync_reminders(OWNER, trip.id, now=datetime(2027, 3, 1, 9, 30, tzinfo=timezone.utc))
-    assert {item.segment_id: item.remind_at for item in soon.items}[future.id] == datetime(
-        2027, 3, 1, 9, 30, tzinfo=timezone.utc)
+    inside = datetime(2027, 3, 1, 9, 30, tzinfo=timezone.utc)
+    soon = {item.segment_id: item for item in service.sync_reminders(OWNER, trip.id, now=inside).items}
+    assert (soon[future.id].action, soon[future.id].remind_at) == (
+        "unchanged", datetime(2027, 3, 1, 9, 0, tzinfo=timezone.utc))  # both times past: the stored one is kept
+    late = service.create_segment(OWNER, trip.id, segment_request(kind="bus", title="Bus",
+                                                                  start_local="2027-03-01T10:15",
+                                                                  end_local="2027-03-01T11:00"))
+    fresh = {item.segment_id: item for item in service.sync_reminders(OWNER, trip.id, now=inside).items}
+    assert (fresh[late.id].action, fresh[late.id].remind_at) == ("created", inside)  # clamped to now
+    assert service.sync_reminders(OWNER, trip.id, now=inside + timedelta(minutes=5)).items[-1].action == "unchanged"
     service.delete_trip(OWNER, trip.id)
     assert assistant.list_reminders(OWNER).total == 0
 
@@ -539,7 +666,7 @@ def test_suggest_sends_fenced_trip_data_without_references_or_notes():
     call = provider.calls[0]
     message, system = call["message"], call["system"]
     assert message.startswith("<<<UNTRUSTED_DOCUMENT_CONTENT") and message.count("<<<END_UNTRUSTED_DOCUMENT_CONTENT>>>") == 1
-    assert "Heathrow" in message and "owner-entered cost 99 EUR" in message
+    assert "Heathrow" in message and "owner-entered cost 99.00 EUR" in message
     assert "Owner's question: Is the connection safe?" in message
     assert SECRET_REF not in message and "private note 42" not in message
     assert "never present prices, availability" in system and "official government sources" in system
@@ -667,7 +794,7 @@ def test_api_crud_summary_reminders_and_validation():
         trip = client.post("/travel/trips", json=trip_request(budget="500").model_dump(mode="json"))
         assert trip.status_code == 201, trip.text
         trip_id = trip.json()["id"]
-        assert trip.json()["budget"] == "500"
+        assert trip.json()["budget"] == "500.00"
         assert client.post("/travel/trips", json={**trip_request().model_dump(mode="json"),
                                                   "home_timezone": "Bad/Zone"}).status_code == 422
         seg = client.post(f"/travel/trips/{trip_id}/segments", json={
@@ -686,7 +813,7 @@ def test_api_crud_summary_reminders_and_validation():
             "end_local": "2027-03-02T11:00"}).status_code == 422
         summary = client.get(f"/travel/trips/{trip_id}/summary").json()
         assert summary["timeline"][0]["duration_minutes"] == 120 and summary["timeline"][0]["has_reference"] is True
-        assert summary["cost"]["label"] == "estimate" and summary["cost"]["remaining"] == "379.5"
+        assert summary["cost"]["label"] == "estimate" and summary["cost"]["remaining"] == "379.50"
         assert SECRET_REF not in json.dumps(summary)
         reminders = client.post(f"/travel/trips/{trip_id}/reminders")
         assert reminders.status_code == 200 and reminders.json()["items"][0]["action"] == "created"
@@ -745,3 +872,253 @@ def test_status_migration_and_audit_wiring():
     assert "ON DELETE CASCADE" in sql and "'travel'" in sql and "'tutor'" in sql and "'scheduler'" in sql
     assert "REFERENCES jarvis_app.travel_trips (id, owner_id) ON DELETE CASCADE" in sql
     assert category_for("/travel/trips") == "travel"
+
+
+# ------------------------------------------------------------------ v7.4 review fixes
+
+
+class FlakyAssistantStore(MemoryAssistantStore):
+    """Raises on the reminder operations named in ``broken``."""
+
+    def __init__(self):
+        super().__init__()
+        self.broken: set[str] = set()
+
+    def _check(self, name):
+        if name in self.broken:
+            raise RuntimeError("assistant store down")
+
+    def create_reminder(self, reminder):
+        self._check("create")
+        return super().create_reminder(reminder)
+
+    def get_reminder(self, owner_id, reminder_id):
+        self._check("get")
+        return super().get_reminder(owner_id, reminder_id)
+
+    def update_reminder(self, owner_id, reminder_id, updates):
+        self._check("update")
+        return super().update_reminder(owner_id, reminder_id, updates)
+
+    def delete_reminder(self, owner_id, reminder_id):
+        self._check("delete")
+        return super().delete_reminder(owner_id, reminder_id)
+
+
+def flaky_service():
+    store = FlakyAssistantStore()
+    audit = RecordingAudit()
+    return TravelService(MemoryTravelStore(), audit, assistant_service=AssistantService(store)), store, audit
+
+
+def test_assistant_failures_never_turn_a_saved_change_into_a_500():
+    from jarvis.travel.service import TravelUnavailable
+
+    service, store, audit = flaky_service()
+    trip = service.create_trip(OWNER, trip_request())
+    flight = service.create_segment(OWNER, trip.id, segment_request())
+    store.broken = {"create", "get", "update", "delete"}
+    with pytest.raises(TravelUnavailable, match="nothing was changed"):
+        service.sync_reminders(OWNER, trip.id, now=NOW)  # nothing could be done: 503
+    store.broken = set()
+    train = service.create_segment(OWNER, trip.id, segment_request(kind="train", title="Train",
+                                                                   start_local="2027-03-02T09:00",
+                                                                   end_local="2027-03-02T10:00"))
+    assert [item.action for item in service.sync_reminders(OWNER, trip.id, now=NOW).items] == ["created", "created"]
+    bus = service.create_segment(OWNER, trip.id, segment_request(kind="bus", title="Bus",
+                                                                 start_local="2027-03-03T09:00",
+                                                                 end_local="2027-03-03T10:00"))
+    store.broken = {"create"}
+    mixed = {item.segment_id: item for item in service.sync_reminders(OWNER, trip.id, now=NOW).items}
+    assert (mixed[flight.id].action, mixed[train.id].action, mixed[bus.id].action) == (
+        "unchanged", "unchanged", "failed")
+    assert "could not be reached" in mixed[bus.id].detail
+    store.broken = {"get", "update"}
+    moved = service.update_segment(OWNER, trip.id, flight.id, SegmentUpdateRequest(start_local="2027-03-01T11:00",
+                                                                                  end_local="2027-03-01T13:00"))
+    assert moved.reminder_status == "unavailable"
+    assert service.get_segment(OWNER, trip.id, flight.id).start_local == datetime(2027, 3, 1, 11, 0)  # saved
+    store.broken = {"delete"}
+    changed = service.update_segment(OWNER, trip.id, train.id, SegmentUpdateRequest(kind="activity"))
+    assert changed.reminder_status == "orphaned" and service.store.get_link(OWNER, train.id) is not None
+    orphan = {item.segment_id: item for item in service.sync_reminders(OWNER, trip.id, now=NOW).items}[train.id]
+    assert orphan.action == "orphaned" and orphan.reminder_id is not None
+    store.broken = set()
+    retried = {item.segment_id: item for item in service.sync_reminders(OWNER, trip.id, now=NOW).items}
+    assert retried[train.id].action == "removed" and service.store.get_link(OWNER, train.id) is None
+    store.broken = {"delete"}
+    service.delete_segment(OWNER, trip.id, flight.id)  # the segment goes; the orphan is counted in the audit
+    assert audit.records[-1]["details"]["reminders_orphaned"] == 1
+
+
+def test_api_maps_an_unreachable_assistant_to_503_only_when_nothing_was_done():
+    app, client = make_client()
+    with client:
+        store = FlakyAssistantStore()
+        app.state.travel_service.assistant_service = AssistantService(store)
+        trip_id = client.post("/travel/trips", json=trip_request().model_dump(mode="json")).json()["id"]
+        seg = client.post(f"/travel/trips/{trip_id}/segments", json={
+            "kind": "flight", "title": "BA 1", "start_local": "2027-03-01T10:00", "start_timezone": "Europe/London",
+            "end_local": "2027-03-01T12:00"}).json()
+        store.broken = {"create"}
+        assert client.post(f"/travel/trips/{trip_id}/reminders").status_code == 503
+        store.broken = set()
+        assert client.post(f"/travel/trips/{trip_id}/reminders").status_code == 200
+        store.broken = {"get"}
+        patched = client.patch(f"/travel/trips/{trip_id}/segments/{seg['id']}", json={"title": "BA 2"})
+        assert patched.status_code == 200 and patched.json()["reminder_status"] == "unavailable"
+        assert patched.json()["title"] == "BA 2"
+
+
+def test_snoozes_and_statuses_are_kept_unless_the_departure_moves():
+    from jarvis.assistant.models import ReminderStatus, ReminderUpdateRequest
+
+    service, _, assistant = make_service()
+    trip = service.create_trip(OWNER, trip_request())
+    flight = service.create_segment(OWNER, trip.id, segment_request(title="BA 1"))
+    reminder_id = service.sync_reminders(OWNER, trip.id, now=NOW).items[0].reminder_id
+    snoozed = datetime(2027, 3, 1, 8, 15, tzinfo=timezone.utc)
+    assistant.update_reminder(OWNER, reminder_id, ReminderUpdateRequest(remind_at=snoozed,
+                                                                         status=ReminderStatus.ACKNOWLEDGED))
+    again = service.sync_reminders(OWNER, trip.id, ReminderRequest(flight_lead_minutes=120), now=NOW).items[0]
+    assert again.action == "unchanged" and again.remind_at == snoozed
+    kept = assistant.get_reminder(OWNER, reminder_id)
+    assert (kept.remind_at, kept.status) == (snoozed, "acknowledged")
+    renamed = service.update_segment(OWNER, trip.id, flight.id, SegmentUpdateRequest(title="BA 9"))
+    kept = assistant.get_reminder(OWNER, reminder_id)
+    assert renamed.reminder_status == "updated" and kept.title.endswith("'BA 9'")
+    assert (kept.remind_at, kept.status) == (snoozed, "acknowledged")  # title only: snooze and status kept
+    service.update_segment(OWNER, trip.id, flight.id, SegmentUpdateRequest(start_local="2027-03-01T15:00",
+                                                                          end_local="2027-03-01T17:00"))
+    moved = assistant.get_reminder(OWNER, reminder_id)
+    # The departure moved to a future time: stored lead 120 min applies and the reminder is pending again.
+    assert (moved.remind_at, moved.status) == (datetime(2027, 3, 1, 13, 0, tzinfo=timezone.utc), "pending")
+
+
+def test_one_trips_reminder_lock_does_not_block_another_trip():
+    import threading
+
+    service, _, _ = make_service()
+    first = service.create_trip(OWNER, trip_request())
+    second = service.create_trip(OWNER, trip_request())
+    service.create_segment(OWNER, second.id, segment_request())
+    done = threading.Event()
+    with service._trip_lock(first.id):
+        worker = threading.Thread(target=lambda: (service.sync_reminders(OWNER, second.id, now=NOW), done.set()))
+        worker.start()
+        assert done.wait(5), "a sync for another trip was blocked"
+    worker.join()
+
+
+def test_money_uses_the_currency_minor_units():
+    service, _, _ = make_service()
+    with pytest.raises(ValidationError, match="more decimals than JPY allows"):
+        trip_request(currency="JPY", budget="1000.5")
+    jpy = service.create_trip(OWNER, trip_request(currency="JPY", travellers=3, budget="1000"))
+    with pytest.raises(TravelInvalid, match="more decimals than JPY allows"):
+        service.create_segment(OWNER, jpy.id, segment_request(cost_amount="12.5"))
+    service.create_segment(OWNER, jpy.id, segment_request(cost_amount="1000"))
+    cost = service.summary(OWNER, jpy.id).cost
+    assert cost.minor_units == 0 and str(cost.per_traveller) == "333" and str(cost.total) == "1000"
+    assert cost.model_dump(mode="json")["remaining"] == "0"
+    kwd = service.create_trip(OWNER, trip_request(currency="KWD", budget="10.125"))
+    assert str(kwd.budget) == "10.125"
+    service.create_segment(OWNER, kwd.id, segment_request(cost_amount="1.5"))
+    kwd_cost = service.summary(OWNER, kwd.id).cost
+    assert str(kwd_cost.total) == "1.500" and str(kwd_cost.remaining) == "8.625"
+    eur = service.create_trip(OWNER, trip_request(budget="500", daily_food="10"))
+    assert eur.model_dump(mode="json")["budget"] == "500.00" and str(eur.daily_food) == "10.00"
+    with pytest.raises(TravelInvalid, match="more decimals than EUR allows"):
+        service.create_segment(OWNER, eur.id, segment_request(cost_amount="1.005"))
+
+
+def test_changing_to_a_currency_with_fewer_decimals_checks_the_amounts():
+    service, _, _ = make_service()
+    eur = service.create_trip(OWNER, trip_request(budget="500.50"))
+    with pytest.raises(TravelInvalid, match="more decimals than JPY allows"):
+        service.update_trip(OWNER, eur.id, TripUpdateRequest(currency="JPY"))
+    whole = service.create_trip(OWNER, trip_request(budget="500"))
+    assert str(service.update_trip(OWNER, whole.id, TripUpdateRequest(currency="JPY")).budget) == "500"
+
+
+def test_end_zone_follows_a_start_zone_change_and_says_so():
+    service, _, _ = make_service()
+    trip = service.create_trip(OWNER, trip_request())
+    seg = service.create_segment(OWNER, trip.id, segment_request(kind="train", title="Local train"))
+    updated = service.update_segment(OWNER, trip.id, seg.id, SegmentUpdateRequest(start_timezone="Europe/Paris"))
+    assert updated.end_timezone == "Europe/Paris" and "end_timezone also changed to Europe/Paris" in updated.notices[0]
+    flight = service.create_segment(OWNER, trip.id, segment_request(end_timezone="Europe/Paris"))
+    kept = service.update_segment(OWNER, trip.id, flight.id, SegmentUpdateRequest(start_timezone="Europe/Dublin"))
+    assert kept.end_timezone == "Europe/Paris" and kept.notices == []
+
+
+def test_outside_dates_transport_only_place_checks_and_date_line_transit():
+    service, _, _ = make_service()
+    trip = service.create_trip(OWNER, trip_request(start_date="2027-05-01", end_date="2027-05-03",
+                                                   home_timezone="Asia/Tokyo"))
+    # Tokyo 20:00 (11:00 UTC) to Honolulu 08:00 the same local day (18:00 UTC): under way at Tokyo midnight.
+    flight = service.create_segment(OWNER, trip.id, segment_request(
+        title="Tokyo to Honolulu", from_place="Tokyo", to_place="Honolulu", start_local="2027-05-01T20:00",
+        start_timezone="Asia/Tokyo", end_local="2027-05-01T08:00", end_timezone="Pacific/Honolulu", cost_amount="900"))
+    service.create_segment(OWNER, trip.id, segment_request(
+        kind="activity", title="Beach", from_place="Waikiki", start_local="2027-05-01T10:00",
+        start_timezone="Pacific/Honolulu", end_local="2027-05-01T12:00"))
+    service.create_segment(OWNER, trip.id, segment_request(
+        kind="bus", title="Bus", from_place="Honolulu", to_place="Hilo", start_local="2027-05-01T14:00",
+        start_timezone="Pacific/Honolulu", end_local="2027-05-01T15:00"))
+    late = service.create_segment(OWNER, trip.id, segment_request(
+        kind="ferry", title="Late ferry", from_place="Kona", start_local="2027-05-04T10:00",
+        start_timezone="Pacific/Honolulu", end_local="2027-05-04T11:00", cost_amount="50"))
+    summary = service.summary(OWNER, trip.id)
+    assert [(gap.night_of.isoformat(), gap.in_transit) for gap in summary.gaps] == [
+        ("2027-05-01", True), ("2027-05-02", False)]
+    mismatches = [w for w in summary.connection_warnings if w.kind == "place_mismatch"]
+    # Beach (an activity) is not checked; bus (Hilo) to ferry (Kona) is.
+    assert [(w.to_segment_id) for w in mismatches] == [late.id]
+    assert [item.segment_id for item in summary.outside_trip_dates] == [late.id]
+    assert "still counted" in summary.outside_trip_dates[0].message
+    assert summary.cost.segments_total == Decimal("950")
+    assert any("outside the trip dates are included" in note for note in summary.cost.notes)
+    assert summary.timeline[0].segment_id == flight.id
+
+
+def test_time_zone_database_problems_are_reported_and_do_not_break_reads(monkeypatch):
+    from zoneinfo import ZoneInfoNotFoundError
+
+    from jarvis.travel import itinerary, models
+    from jarvis.travel.service import TravelUnavailable
+
+    service, _, _ = make_service()
+    trip = service.create_trip(OWNER, trip_request())
+    service.create_segment(OWNER, trip.id, segment_request())
+
+    def missing(name):
+        raise ZoneInfoNotFoundError(name)
+
+    monkeypatch.setattr(models, "ZoneInfo", missing)
+    monkeypatch.setattr(itinerary, "ZoneInfo", missing)
+    assert models.timezone_database_available() is False
+    with pytest.raises(ValueError) as caught:
+        models.validate_timezone("Europe/London")
+    assert "no time zone database" in str(caught.value) and "Europe/London" not in str(caught.value)
+    # Stored rows are not re-checked against the database, so reads keep working.
+    assert service.list_trips(OWNER).total == 1 and service.list_segments(OWNER, trip.id).total == 1
+    assert service.get_trip(OWNER, trip.id).home_timezone == "Europe/London"
+    with pytest.raises(TravelUnavailable, match="no time zone database"):
+        service.summary(OWNER, trip.id)
+    assert service.status_state == "unavailable" and "missing" in service.status_checks[0]
+    _, client = make_client()
+    with client:
+        travel = next(item for item in client.get("/status").json()["subsystems"] if item["key"] == "travel")
+        assert travel["state"] == "unavailable" and "missing" in travel["checks"][0]
+    monkeypatch.undo()
+    with pytest.raises(ValueError, match="'Mars/Base' is not a known IANA time zone name"):
+        models.validate_timezone("Mars/Base")
+
+
+def test_tzdata_is_a_declared_dependency():
+    import tomllib
+    from pathlib import Path
+
+    project = tomllib.loads((Path(runner.MIGRATIONS_DIR).parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    assert any(item.replace(" ", "").startswith("tzdata") for item in project["project"]["dependencies"])

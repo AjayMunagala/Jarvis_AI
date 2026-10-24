@@ -48,6 +48,7 @@ CREATE TABLE jarvis_app.travel_trips (
     CONSTRAINT travel_trips_name_length CHECK (char_length(name) BETWEEN 1 AND 200),
     CONSTRAINT travel_trips_travellers_range CHECK (travellers BETWEEN 1 AND 20),
     CONSTRAINT travel_trips_currency_format CHECK (currency ~ '^[A-Z]{3}$'),
+    -- Amounts are kept at the currency's minor units by the application (at most 3 decimals for any currency).
     CONSTRAINT travel_trips_money_range CHECK (
         (budget IS NULL OR budget BETWEEN 0 AND 1000000000)
         AND (daily_food IS NULL OR daily_food BETWEEN 0 AND 1000000000)
@@ -110,6 +111,7 @@ CREATE TABLE jarvis_app.travel_reminder_links (
     reminder_id uuid NOT NULL,
     lead_minutes integer NOT NULL,
     remind_at timestamptz NOT NULL,
+    departure_utc timestamptz NOT NULL,
     created_at timestamptz NOT NULL,
     updated_at timestamptz NOT NULL,
     CONSTRAINT travel_reminder_links_segment FOREIGN KEY (segment_id, trip_id, owner_id)

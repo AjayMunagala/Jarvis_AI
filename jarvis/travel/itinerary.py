@@ -9,19 +9,25 @@ Checks in the summary:
   do things while a room is booked); two stays that overlap are a conflict.
 * overnight gaps (multi-day trips): a night ``d`` (from ``start_date`` to the day before ``end_date``) is
   covered by a stay whose local start date is on or before ``d`` and local end date after ``d``. An uncovered
-  night is reported, marked ``in_transit`` when a transport segment runs through it the same way.
+  night is reported, marked ``in_transit`` when a transport segment is under way (in absolute time) at the
+  midnight that ends night ``d`` in the trip's home zone, so date-line crossings are handled.
 * connections: non-stay segments in start order; the next one starting less than the minimum after the
-  previous one ends (the flight minimum when either is a flight, else the other minimum) is a warning, and so
-  is a start place that differs from the previous end place (case-insensitive text; a warning only).
+  previous one ends (the flight minimum when either is a flight, else the other minimum) is a warning.
+  Between consecutive transport segments, a start place that differs from the previous end place
+  (case-insensitive text) is also a warning.
+* segments whose local dates fall outside the trip dates are listed as a warning; they still count in the
+  timeline and the cost estimate.
+
+Money is reported at the trip currency's minor units; per traveller is rounded half-up to them.
 """
 
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jarvis.travel.models import (
-    TRANSPORT_KINDS, ConnectionWarning, CostEstimate, OvernightGap, Segment, SegmentConflict, TimelineEntry, Trip,
-    TripSummary,
+    TRANSPORT_KINDS, ConnectionWarning, CostEstimate, OutsideTripDates, OvernightGap, Segment, SegmentConflict,
+    TimelineEntry, Trip, TripSummary, minor_units, quantum,
 )
 
 MAX_LISTED = 200
@@ -76,14 +82,16 @@ def find_conflicts(segments: list[Segment]) -> list[SegmentConflict]:
     return conflicts
 
 
-def find_gaps(trip: Trip, segments: list[Segment]) -> list[OvernightGap]:
+def find_gaps(trip: Trip, segments: list[Segment], home: ZoneInfo) -> list[OvernightGap]:
     stays = [s for s in segments if s.kind == "stay"]
     moving = [s for s in segments if s.kind in TRANSPORT_KINDS]
     gaps = []
     night = trip.start_date
     while night < trip.end_date:
         if not any(_covers_night(stay, night) for stay in stays):
-            in_transit = any(_covers_night(item, night) for item in moving)
+            midnight = datetime.combine(night + timedelta(days=1), datetime.min.time(), tzinfo=home)
+            midnight = midnight.astimezone(timezone.utc)
+            in_transit = any(item.start_utc <= midnight < item.end_utc for item in moving)
             gaps.append(OvernightGap(
                 night_of=night, in_transit=in_transit,
                 message=(f"No stay covers the night of {night.isoformat()}"
@@ -104,6 +112,8 @@ def find_connection_warnings(trip: Trip, segments: list[Segment]) -> list[Connec
                 kind="short_connection", from_segment_id=previous.id, to_segment_id=following.id, minutes=gap,
                 minimum_minutes=minimum,
                 message=f"Only {gap} min between '{previous.title}' and '{following.title}' (minimum {minimum} min)."))
+    transport = [s for s in chain if s.kind in TRANSPORT_KINDS]
+    for previous, following in zip(transport, transport[1:]):
         end, start = _place(_end_place(previous)), _place(_start_place(following))
         if end and start and end != start:
             warnings.append(ConnectionWarning(
@@ -113,11 +123,24 @@ def find_connection_warnings(trip: Trip, segments: list[Segment]) -> list[Connec
     return warnings
 
 
-def _money(value: Decimal) -> Decimal:
-    return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+def find_outside(trip: Trip, segments: list[Segment]) -> list[OutsideTripDates]:
+    items = []
+    for segment in sorted(segments, key=lambda s: (s.start_utc, str(s.id))):
+        if segment.start_local.date() < trip.start_date or segment.end_local.date() > trip.end_date:
+            items.append(OutsideTripDates(
+                segment_id=segment.id, title=segment.title,
+                message=(f"'{segment.title}' ({segment.start_local.date().isoformat()} to "
+                         f"{segment.end_local.date().isoformat()}, local) is outside the trip dates "
+                         f"{trip.start_date.isoformat()} to {trip.end_date.isoformat()}; it is still counted.")))
+    return items
 
 
 def estimate_costs(trip: Trip, segments: list[Segment]) -> CostEstimate:
+    step = quantum(trip.currency)
+
+    def money(value: Decimal) -> Decimal:
+        return value.quantize(step, rounding=ROUND_HALF_UP)
+
     by_kind: dict[str, Decimal] = {}
     without = 0
     for segment in segments:
@@ -140,15 +163,24 @@ def estimate_costs(trip: Trip, segments: list[Segment]) -> CostEstimate:
     notes = ["Estimate only: every price is owner-entered and unverified; nothing was booked or looked up.",
              f"All amounts are in {trip.currency}; there is no currency conversion.",
              f"Daily costs are for the whole party per day, times {days} trip day(s) (start and end dates included).",
-             "per_traveller is the total divided by the number of travellers, rounded to 2 decimals."]
+             f"per_traveller is the total divided by the number of travellers, rounded half-up to "
+             f"{minor_units(trip.currency)} decimal place(s) ({trip.currency} minor units)."]
     if without:
         notes.append(f"{without} segment(s) have no cost entered and add nothing to the total.")
-    return CostEstimate(currency=trip.currency, by_kind=by_kind, segments_total=segments_total,
-                        segments_without_cost=without, days=days, daily_food=trip.daily_food,
-                        daily_local_transport=trip.daily_local_transport, daily_other=trip.daily_other,
-                        daily_per_day=per_day, daily_total=daily_total, total=total, travellers=trip.travellers,
-                        per_traveller=_money(total / trip.travellers), budget=trip.budget, remaining=remaining,
-                        over_by=over_by, notes=notes)
+    if find_outside(trip, segments):
+        notes.append("Segments outside the trip dates are included in these totals.")
+
+    def optional(value: Decimal | None) -> Decimal | None:
+        return money(value) if value is not None else None
+
+    return CostEstimate(currency=trip.currency, minor_units=minor_units(trip.currency),
+                        by_kind={kind: money(value) for kind, value in by_kind.items()},
+                        segments_total=money(segments_total), segments_without_cost=without, days=days,
+                        daily_food=optional(trip.daily_food), daily_local_transport=optional(trip.daily_local_transport),
+                        daily_other=optional(trip.daily_other), daily_per_day=money(per_day),
+                        daily_total=money(daily_total), total=money(total), travellers=trip.travellers,
+                        per_traveller=money(total / trip.travellers), budget=optional(trip.budget),
+                        remaining=optional(remaining), over_by=optional(over_by), notes=notes)
 
 
 def build_summary(trip: Trip, segments: list[Segment]) -> TripSummary:
@@ -161,7 +193,7 @@ def build_summary(trip: Trip, segments: list[Segment]) -> TripSummary:
                                    (segment.end_local, segment.end_timezone, "ends")):
             try:
                 _, ambiguous = resolve_local_time(local, zone)
-            except ValueError:
+            except (ValueError, ZoneInfoNotFoundError, OSError):
                 ambiguous = False  # stored before a time zone database change; the stored instant is used
             if ambiguous:
                 time_notes.append(f"'{segment.title}' {which} at {local.isoformat(sep=' ', timespec='minutes')}, "
@@ -176,6 +208,7 @@ def build_summary(trip: Trip, segments: list[Segment]) -> TripSummary:
             has_reference=segment.reference is not None))
     return TripSummary(trip_id=trip.id, name=trip.name, home_timezone=trip.home_timezone,
                        start_date=trip.start_date, end_date=trip.end_date, timeline=timeline,
-                       conflicts=find_conflicts(segments)[:MAX_LISTED], gaps=find_gaps(trip, segments),
+                       conflicts=find_conflicts(segments)[:MAX_LISTED], gaps=find_gaps(trip, segments, home),
                        connection_warnings=find_connection_warnings(trip, segments)[:MAX_LISTED],
-                       time_notes=time_notes, cost=estimate_costs(trip, segments))
+                       outside_trip_dates=find_outside(trip, segments), time_notes=time_notes,
+                       cost=estimate_costs(trip, segments))

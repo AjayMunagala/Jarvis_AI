@@ -3,6 +3,14 @@
 Everything here is owner-entered: options, prices and times. Nothing is booked, bought or looked up.
 A segment's booking ``reference`` is sensitive: it is returned to the owner on segment reads only, and is
 never written to audit records, logs, summaries or model prompts (``repr=False`` keeps it out of reprs).
+
+Time zones are checked against the time zone database only on input (request models). Stored models built
+from database rows check the name's shape only, so a missing or changed database cannot make reads fail.
+
+Money: amounts are exact decimals in the currency's minor units (2 by default, 3 for e.g. KWD, 0 for e.g. JPY;
+see ``MINOR_UNITS``). An amount with more decimals than the currency allows is refused, and every amount is
+returned at the currency's scale. In JSON, amounts are strings (e.g. ``"379.50"``, ``"12000"`` for JPY) so no
+precision is lost; requests may send numbers or strings.
 """
 
 from datetime import date, datetime
@@ -13,7 +21,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import re
 
 from pydantic import (
-    BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StringConstraints, field_validator, model_validator,
+    BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StringConstraints, ValidationInfo, field_validator,
+    model_validator,
 )
 
 # ------------------------------------------------------------------ shared
@@ -49,20 +58,41 @@ MKD MMK MNT MOP MRU MUR MVR MWK MXN MYR MZN NAD NGN NIO NOK NPR NZD OMR PAB PEN 
 RUB RWF SAR SBD SCR SDG SEK SGD SHP SLE SLL SOS SRD SSP STN SVC SYP SZL THB TJS TMT TND TOP TRY TTD TWD TZS UAH
 UGX USD UYU UZS VED VES VND VUV WST XAF XCD XCG XOF XPF YER ZAR ZMW ZWG
 """.split())
+# ISO 4217 minor units that differ from the default of 2.
+MINOR_UNITS = {
+    **{code: 3 for code in ("BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND")},
+    **{code: 0 for code in ("BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG", "RWF", "UGX", "VND",
+                            "VUV", "XAF", "XOF", "XPF")},
+}
 
 _ZONE_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_+\-]*(/[A-Za-z0-9_+\-]+){0,2}$")
 
 
-def validate_timezone(name: str) -> str:
-    """Return the IANA zone name if ``zoneinfo`` knows it, else raise ``ValueError`` with a plain message."""
+def timezone_database_available() -> bool:
+    try:
+        ZoneInfo("UTC")
+        return True
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return False
+
+
+def _zone_shape(name: str) -> str:
     name = name.strip()
     if not 1 <= len(name) <= 64 or not _ZONE_NAME.fullmatch(name) or name.lower() in {"localtime", "local"}:
-        raise ValueError("Use an IANA time zone name such as 'Europe/London' or 'Asia/Kolkata'.")
+        raise ValueError(f"'{name[:64]}' is not an IANA time zone name (a name like 'Region/City').")
+    return name
+
+
+def validate_timezone(name: str) -> str:
+    """Return the IANA zone name if ``zoneinfo`` knows it, else raise ``ValueError`` with a plain message."""
+    name = _zone_shape(name)
     try:
         ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError, OSError) as exc:
-        raise ValueError(f"'{name}' is not a time zone known to this system's time zone database "
-                         "(use an IANA name such as 'Europe/London').") from exc
+        if not timezone_database_available():
+            raise ValueError("Time zones cannot be checked: this system has no time zone database "
+                             "(install the 'tzdata' package).") from exc
+        raise ValueError(f"'{name}' is not a known IANA time zone name.") from exc
     return name
 
 
@@ -71,6 +101,26 @@ def validate_currency(value: str) -> str:
     if code not in ISO_4217:
         raise ValueError("Use a three-letter ISO 4217 currency code such as 'EUR', 'GBP', 'INR' or 'USD'.")
     return code
+
+
+def minor_units(currency: str) -> int:
+    return MINOR_UNITS.get(currency, 2)
+
+
+def quantum(currency: str) -> Decimal:
+    return Decimal(1).scaleb(-minor_units(currency))
+
+
+def fit_money(value: Decimal | None, currency: str, what: str) -> Decimal | None:
+    """Return ``value`` at the currency's scale; refuse more decimals than the currency has."""
+    if value is None:
+        return None
+    step = quantum(currency)
+    if value != value.quantize(step):
+        units = minor_units(currency)
+        raise ValueError(f"{what} has more decimals than {currency} allows "
+                         f"({units} decimal place{'' if units == 1 else 's'}).")
+    return value.quantize(step)
 
 
 class StrictSchema(BaseModel):
@@ -175,19 +225,31 @@ class DecisionPage(StrictSchema):
 class CriterionScore(StrictSchema):
     criterion: str
     value: float | None
-    normalized: float | None = Field(description="0..1 after direction-aware min-max scaling; null when unknown.")
+    normalized: float | None = Field(description="0..1 after direction-aware min-max scaling; null when the value "
+                                                 "is unknown or the criterion is not used.")
     weight_share: float | None = Field(description="Share of this option's score weight (re-weighted over its "
-                                                    "known criteria); null when unknown or weight 0.")
+                                                    "known used criteria); null when not counted.")
     contribution: float | None = Field(description="Points of the 0..100 score this criterion contributed.")
 
 
 class OptionResult(StrictSchema):
     option: str
     rank: int | None = Field(description="1 is best; tied options share a rank; null when it cannot be scored.")
-    score: float | None = Field(description="0..100, rounded to 2 decimals; null when no weighted value is known.")
+    score: float | None = Field(description="0..100, rounded to 2 decimals; null when no used value is known.")
+    coverage: float = Field(ge=0, le=1, description="Weight of the used criteria this option has values for, "
+                                                    "divided by the weight of all used criteria.")
     tied: bool
     unknown_criteria: list[str]
     breakdown: list[CriterionScore]
+
+
+ExclusionReason = Literal["no_values", "one_value", "same_for_all", "zero_weight"]
+
+
+class ExcludedCriterion(StrictSchema):
+    criterion: str
+    reason: ExclusionReason
+    message: str
 
 
 class SensitivityItem(StrictSchema):
@@ -195,7 +257,8 @@ class SensitivityItem(StrictSchema):
     weight: float
     lower_threshold: float | None = Field(description="Below this weight the winner changes (0 means 'set to 0').")
     lower_new_winner: list[str] | None = None
-    upper_threshold: float | None = Field(description="Above this weight the winner changes.")
+    upper_threshold: float | None = Field(description="Above this weight the winner changes (0 means 'any weight "
+                                                      "above 0').")
     upper_new_winner: list[str] | None = None
     smallest_change: float | None = Field(description="Signed weight change to the nearest threshold.")
     statement: str
@@ -204,14 +267,18 @@ class SensitivityItem(StrictSchema):
 class DecisionResult(StrictSchema):
     decision_id: UUID
     question: str
-    method: str = ("Each criterion is min-max scaled across the options (direction-aware; all-equal values score "
-                   "1.0). An option's score is the weighted mean of its known scaled values; unknown values are "
-                   "left out and the remaining weights re-scaled. Scores are relative to these options only.")
+    method: str = ("Each used criterion is min-max scaled across the options that have a value (direction-aware). "
+                   "A criterion that cannot separate the options (no value, a value for only one option, or the "
+                   "same value for all) is not used for anyone. An option's score is the weighted mean of its "
+                   "known scaled values; unknown values are left out and its remaining weights re-scaled, and its "
+                   "coverage says how much of the used weight it has values for. Scores are relative to these "
+                   "options only.")
     ranking: list[OptionResult]
     winners: list[str]
     tie: bool
-    constant_criteria: list[str]
-    unused_criteria: list[str] = Field(description="Criteria no option has a value for, or with weight 0.")
+    low_confidence_winner: bool = Field(description="The top option has values for under half of the used weight, "
+                                                    "or for less than the runner-up: not a clear winner.")
+    excluded_criteria: list[ExcludedCriterion]
     sensitivity: list[SensitivityItem]
     explanation: str
 
@@ -219,7 +286,16 @@ class DecisionResult(StrictSchema):
 # ------------------------------------------------------------------ trips
 
 
-class _TripFields(StrictSchema):
+class _TripMoney(StrictSchema):
+    @field_validator("budget", "daily_food", "daily_local_transport", "daily_other", check_fields=False)
+    @classmethod
+    def _fits_currency(cls, value, info: ValidationInfo):
+        currency = info.data.get("currency")
+        return fit_money(value, currency, info.field_name) if isinstance(currency, str) and value is not None \
+            else value
+
+
+class _TripInput(_TripMoney):
     @field_validator("currency", mode="before", check_fields=False)
     @classmethod
     def _currency(cls, value):
@@ -231,7 +307,14 @@ class _TripFields(StrictSchema):
         return validate_timezone(value) if isinstance(value, str) else value
 
 
-class TripCreateRequest(_TripFields):
+def _check_dates(start: date, end: date) -> None:
+    if end < start:
+        raise ValueError("end_date must be on or after start_date.")
+    if (end - start).days + 1 > MAX_TRIP_DAYS:
+        raise ValueError(f"A trip can span at most {MAX_TRIP_DAYS} days.")
+
+
+class TripCreateRequest(_TripInput):
     name: Title
     travellers: StrictInt = Field(default=1, ge=1, le=20)
     currency: str = Field(description="ISO 4217 code; every segment cost must use it (no conversion).")
@@ -252,15 +335,9 @@ class TripCreateRequest(_TripFields):
         return self
 
 
-def _check_dates(start: date, end: date) -> None:
-    if end < start:
-        raise ValueError("end_date must be on or after start_date.")
-    if (end - start).days + 1 > MAX_TRIP_DAYS:
-        raise ValueError(f"A trip can span at most {MAX_TRIP_DAYS} days.")
-
-
-class TripUpdateRequest(_TripFields):
-    """Fields left out are unchanged; ``null`` clears an optional field."""
+class TripUpdateRequest(_TripInput):
+    """Fields left out are unchanged; ``null`` clears an optional field. Amounts are checked against the
+    trip's (possibly new) currency when the change is applied."""
 
     name: Title | None = None
     travellers: StrictInt | None = Field(default=None, ge=1, le=20)
@@ -283,12 +360,14 @@ class TripUpdateRequest(_TripFields):
         return self
 
 
-class Trip(_TripFields):
+class Trip(_TripMoney):
+    """Stored trip. Zone and currency are checked for shape only (they were fully checked on input)."""
+
     id: UUID
     owner_id: UUID
     name: Title
     travellers: StrictInt = Field(ge=1, le=20)
-    currency: str
+    currency: Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")]
     budget: Money | None = None
     start_date: date
     end_date: date
@@ -301,6 +380,11 @@ class Trip(_TripFields):
     notes: Notes | None = None
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("home_timezone")
+    @classmethod
+    def _zone(cls, value: str) -> str:
+        return _zone_shape(value)
 
     @model_validator(mode="after")
     def _dates(self) -> "Trip":
@@ -323,7 +407,7 @@ def _naive(value: datetime | None, name: str) -> datetime | None:
     return value
 
 
-class _SegmentFields(StrictSchema):
+class _SegmentInput(StrictSchema):
     @field_validator("start_timezone", "end_timezone", mode="before", check_fields=False)
     @classmethod
     def _zone(cls, value):
@@ -336,11 +420,11 @@ class _SegmentFields(StrictSchema):
 
     @field_validator("start_local", "end_local", check_fields=False)
     @classmethod
-    def _local(cls, value, info):
+    def _local(cls, value, info: ValidationInfo):
         return _naive(value, info.field_name)
 
 
-class SegmentCreateRequest(_SegmentFields):
+class SegmentCreateRequest(_SegmentInput):
     kind: SegmentKind
     title: Title
     from_place: Place | None = None
@@ -351,13 +435,14 @@ class SegmentCreateRequest(_SegmentFields):
     end_timezone: str | None = Field(default=None, description="IANA zone of the end; defaults to start_timezone.")
     reference: Reference | None = Field(default=None, repr=False,
                                         description="Booking reference you typed; kept private, never audited.")
-    cost_amount: Money | None = None
     cost_currency: str | None = Field(default=None, description="Must equal the trip currency (defaults to it).")
+    cost_amount: Money | None = Field(default=None, description="At most the currency's decimal places.")
     notes: Notes | None = None
 
 
-class SegmentUpdateRequest(_SegmentFields):
-    """Fields left out are unchanged; ``null`` clears an optional field."""
+class SegmentUpdateRequest(_SegmentInput):
+    """Fields left out are unchanged; ``null`` clears an optional field. When ``start_timezone`` changes and the
+    end used the same zone as the old start, the end zone follows unless ``end_timezone`` is given."""
 
     kind: SegmentKind | None = None
     title: Title | None = None
@@ -368,8 +453,8 @@ class SegmentUpdateRequest(_SegmentFields):
     end_local: datetime | None = None
     end_timezone: str | None = None
     reference: Reference | None = Field(default=None, repr=False)
-    cost_amount: Money | None = None
     cost_currency: str | None = None
+    cost_amount: Money | None = None
     notes: Notes | None = None
 
     @model_validator(mode="after")
@@ -378,7 +463,9 @@ class SegmentUpdateRequest(_SegmentFields):
         return self
 
 
-class Segment(_SegmentFields):
+class Segment(StrictSchema):
+    """Stored segment. Zones are checked for shape only; the UTC instants were derived on input."""
+
     id: UUID
     owner_id: UUID
     trip_id: UUID
@@ -393,11 +480,22 @@ class Segment(_SegmentFields):
     start_utc: datetime
     end_utc: datetime
     reference: Reference | None = Field(default=None, repr=False)
+    cost_currency: Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")] | None = None
     cost_amount: Money | None = None
-    cost_currency: str | None = None
     notes: Notes | None = None
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("start_timezone", "end_timezone")
+    @classmethod
+    def _zone(cls, value: str) -> str:
+        return _zone_shape(value)
+
+    @field_validator("cost_amount")
+    @classmethod
+    def _fits_currency(cls, value, info: ValidationInfo):
+        currency = info.data.get("cost_currency")
+        return fit_money(value, currency, "cost_amount") if value is not None and isinstance(currency, str) else value
 
     @model_validator(mode="after")
     def _consistent(self) -> "Segment":
@@ -406,6 +504,19 @@ class Segment(_SegmentFields):
         if (self.cost_amount is None) != (self.cost_currency is None):
             raise ValueError("cost_amount and cost_currency go together.")
         return self
+
+
+ReminderFollow = Literal["none", "unchanged", "updated", "removed", "orphaned", "unavailable"]
+
+
+class SegmentUpdateResult(Segment):
+    """The updated segment, plus what happened to its departure reminder and any automatic adjustment."""
+
+    reminder_status: ReminderFollow = Field(
+        default="none", description="none (no reminder), unchanged, updated, removed, orphaned (the reminder could "
+                                    "not be deleted; the link is kept and the next sync retries) or unavailable "
+                                    "(the assistant failed; the segment change is saved).")
+    notices: list[str] = Field(default_factory=list)
 
 
 class SegmentPage(StrictSchema):
@@ -443,7 +554,8 @@ class SegmentConflict(StrictSchema):
 
 class OvernightGap(StrictSchema):
     night_of: date
-    in_transit: bool = Field(description="A transport segment runs through this night.")
+    in_transit: bool = Field(description="A transport segment is under way at local midnight (home zone) "
+                                         "ending this night.")
     message: str
 
 
@@ -456,9 +568,16 @@ class ConnectionWarning(StrictSchema):
     message: str
 
 
+class OutsideTripDates(StrictSchema):
+    segment_id: UUID
+    title: str
+    message: str
+
+
 class CostEstimate(StrictSchema):
     label: Literal["estimate"] = "estimate"
     currency: str
+    minor_units: int
     by_kind: dict[str, Decimal]
     segments_total: Decimal
     segments_without_cost: int
@@ -487,6 +606,7 @@ class TripSummary(StrictSchema):
     conflicts: list[SegmentConflict]
     gaps: list[OvernightGap]
     connection_warnings: list[ConnectionWarning]
+    outside_trip_dates: list[OutsideTripDates]
     time_notes: list[str]
     cost: CostEstimate
 
@@ -505,12 +625,14 @@ class ReminderLink(StrictSchema):
     segment_id: UUID
     reminder_id: UUID
     lead_minutes: int = Field(ge=15, le=1440)
-    remind_at: datetime
+    remind_at: datetime = Field(description="The reminder time JARVIS last set.")
+    departure_utc: datetime = Field(description="The segment start the reminder was last set for.")
     created_at: datetime
     updated_at: datetime
 
 
-ReminderAction = Literal["created", "recreated", "updated", "unchanged", "removed", "skipped_departed"]
+ReminderAction = Literal["created", "recreated", "updated", "unchanged", "removed", "skipped_departed", "orphaned",
+                         "failed"]
 
 
 class ReminderOutcome(StrictSchema):
@@ -518,15 +640,18 @@ class ReminderOutcome(StrictSchema):
     reminder_id: UUID | None
     action: ReminderAction
     remind_at: datetime | None = None
+    detail: str | None = None
 
 
 class ReminderResult(StrictSchema):
     trip_id: UUID
     items: list[ReminderOutcome]
     note: str = ("One assistant reminder per transport segment (flight, train, bus, car, ferry) that has not "
-                 "departed. Running this again does not duplicate reminders. Editing a segment moves its "
-                 "reminder; deleting it, or changing it to a non-transport kind or to a time already past, "
-                 "removes the reminder.")
+                 "departed. Running this again does not duplicate reminders. A reminder time you changed in the "
+                 "assistant (snooze) and its status are kept unless the departure itself moves. Editing a "
+                 "segment's departure moves its reminder; deleting it, or changing it to a non-transport kind or "
+                 "to a time already past, removes the reminder. 'orphaned' means a reminder could not be deleted "
+                 "(the next run retries); 'failed' means the assistant could not be reached for that segment.")
 
 
 # ------------------------------------------------------------------ model-assisted

@@ -15,7 +15,7 @@ from jarvis.models.schemas import ErrorResponse
 from jarvis.security.policy import Capability
 from jarvis.travel.models import (
     Decision, DecisionCreateRequest, DecisionPage, DecisionResult, DecisionUpdateRequest, ReminderRequest,
-    ReminderResult, Segment, SegmentCreateRequest, SegmentPage, SegmentUpdateRequest, SuggestRequest,
+    ReminderResult, Segment, SegmentCreateRequest, SegmentPage, SegmentUpdateRequest, SegmentUpdateResult, SuggestRequest,
     SuggestResponse, Trip, TripCreateRequest, TripPage, TripSummary, TripUpdateRequest,
 )
 from jarvis.travel.service import (
@@ -209,9 +209,9 @@ async def get_segment(request: Request, trip_id: UUID, segment_id: UUID,
     return await _call(service.get_segment, owner, trip_id, segment_id)
 
 
-@router.patch("/trips/{trip_id}/segments/{segment_id}", response_model=Segment, responses=_ERRORS)
+@router.patch("/trips/{trip_id}/segments/{segment_id}", response_model=SegmentUpdateResult, responses=_ERRORS)
 async def update_segment(request: Request, trip_id: UUID, segment_id: UUID, body: SegmentUpdateRequest,
-                         owner_id: UUID | None = Depends(authenticated_owner)) -> Segment:
+                         owner_id: UUID | None = Depends(authenticated_owner)) -> SegmentUpdateResult:
     owner, service = _authorize(request, owner_id, Capability.TRAVEL_WRITE)
     return await _call(service.update_segment, owner, trip_id, segment_id, body)
 

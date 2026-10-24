@@ -12,6 +12,9 @@ dependencies = [
     "httpx>=0.27,<1.0",
     "pydantic-settings>=2.2,<3.0",
     "uvicorn>=0.27,<1.0",
+    # v7.4 travel: IANA time zones for itineraries. Unconditional, not just Windows: Windows has no system time
+    # zone database, and slim Linux containers often lack one; zoneinfo still prefers the system copy when present.
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

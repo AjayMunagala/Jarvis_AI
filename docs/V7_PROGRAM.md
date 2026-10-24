@@ -9,7 +9,7 @@ Owner decision (2026-10-24): Claude leads JARVIS and proceeds without asking for
 | v7.1 | 12 | Import transactions from bank CSV files, with data-quality checks and duplicate detection | Phase 12 asks for data ingestion and quality checks; today transactions can only be typed in one at a time |
 | v7.2 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (drift warnings counted repeated daily snapshots as separate months), since fixed with six other findings | Committed state tested alone from a clean copy (see the v7.2 section) |
 | v7.3 | 11 | Opt-in event sources: RSS/Atom feeds and a watched local folder, isolated from each other | Phase 11 asks for opt-in sources whose failures stay isolated |
-| v7.4 | 13 | Travel and decision planning: compare options, itineraries, cost estimates (no booking) | Master reference 3.15 |
+| v7.4 | ACCEPTED by Claude as owner on 2026-10-25, after an independent review found one blocking defect (an option rated on one criterion could win with a perfect score), since fixed with seven other findings | Committed state tested alone from a clean copy (see the v7.4 section) |
 | v7.5 | 13 | Life administration: documents with expiry dates, bills and renewals, with reminders | Phase 13 life administration |
 | v7.6 | 13 | Creative: reports and documents built from the owner's notes and knowledge | Master reference 3.14 |
 
@@ -115,4 +115,31 @@ Six more findings, all fixed with tests:
 4. **Low:** net-cash-flow MAPE exploded near zero; it is no longer reported for net.
 5. **Low:** the memory store returned mutable stored objects.
 6. **Low:** wording now says a snapshot is a recomputation at save time.
+
+## v7.4 — Travel and decision planning
+
+### What it does
+- **Decisions** (`/travel/decisions`): options scored against weighted criteria (higher or lower better), scaled across the options. A criterion is used only when at least two options have different values; others are listed as excluded with the reason. Each option shows its coverage (how much of the used weight it has values for); when the winner's coverage is under 50% or below the runner-up's, the result is flagged and the explanation says it is not a clear winner. Sensitivity reports, per criterion, the exact weight at which the winner changes.
+- **Trips** (`/travel/trips`): segments (flight, train, bus, car, ferry, stay, activity, other) with local times and IANA time zones; nonexistent local times are refused, repeated ones use the first occurrence and are noted. The summary shows the timeline in local and home time, overlaps, nights without a stay, tight connections, segments outside the trip dates, and costs.
+- **Costs:** exact amounts in the currency's own decimal places (0 for JPY, 3 for KWD), totals by kind, per traveller and against budget, plus daily estimates. No currency conversion.
+- **Departure reminders** through the assistant: one per transport segment, idempotent, following segment edits, keeping the owner's snooze and status unless the departure moves.
+- **Suggestions** (`POST /travel/trips/{id}/suggest`): the model sees the trip as fenced untrusted data without booking references or notes, and answers are labelled unverified (and demo with the demo provider). Nothing is stored.
+- **No booking, payments, account access or network lookups.** Booking references are never in audit records, logs or prompts.
+- **Storage:** migration 0072 (travel tables and the `travel` audit category). `tzdata` is now a main dependency; without a time zone database `/status` shows travel as unavailable.
+
+### Known limits
+- Reminders and travel data are separate stores; a reminder that cannot be deleted is reported as orphaned.
+- The per-trip lock works within one process; across processes the database's one-link-per-segment rule prevents duplicates.
+
+### v7.4 independent review and acceptance
+The reviewer found one blocking defect, fixed before acceptance: a criterion with only one known value counted as "constant" and gave that option full marks, so a 1-star place with no price beat two fully priced hotels with a perfect 100.
+
+Seven more findings, all fixed with tests:
+1. **Medium:** sensitivity was wrong for criteria with weight 0; it is now checked against a brute-force test over 200 random decisions.
+2. **Medium:** `tzdata` was not a declared dependency, so a fresh install could not use travel at all.
+3. **Medium:** a reminder failure after a saved edit returned 500; the edit now succeeds and reports the reminder separately.
+4. **Low:** reminders rewrote themselves inside the lead window, re-armed after dismissal, overwrote snoozes, dropped orphans silently, and shared one process-wide lock.
+5. **Low:** money ignored each currency's decimal places.
+6. **Low:** changing a start zone kept a stale end zone; segments outside the trip dates went unflagged; place mismatches were noisy; date-line flights never counted as overnight travel.
+7. **Low:** caps are now tested under concurrency in PostgreSQL.
 

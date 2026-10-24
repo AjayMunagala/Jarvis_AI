@@ -1,4 +1,5 @@
-"""v7.4 live PostgreSQL validation: travel decisions, trips, segments, cascade delete and persisted reminder links."""
+"""v7.4 live PostgreSQL validation: travel decisions, trips, segments, cascade delete, persisted reminder links
+and caps that hold under concurrent writers using separate store instances."""
 
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -127,3 +128,58 @@ def test_segment_cap_and_cascade_from_a_segment(isolated_postgres, monkeypatch):
     assert [link.segment_id for link in service.store.list_links(owner, trip.id)] != [first.id]
     assert len(service.store.list_links(owner, trip.id)) == 1
     assert service.assistant_service.list_reminders(owner).total == 1
+
+
+def test_caps_hold_for_concurrent_writers_with_separate_store_instances(isolated_postgres, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from jarvis.travel import service as module
+    from jarvis.travel.models import DecisionCreateRequest
+    from jarvis.travel.service import TravelConflict
+
+    monkeypatch.setattr(module, "MAX_TRIPS_PER_OWNER", 3)
+    monkeypatch.setattr(module, "MAX_SEGMENTS_PER_TRIP", 2)
+    monkeypatch.setattr(module, "MAX_DECISIONS_PER_OWNER", 2)
+    url, owner = isolated_postgres.database_url, uuid4()
+    services = [_service(url) for _ in range(4)]  # separate store instances, as separate processes would have
+
+    def attempt(work):
+        try:
+            work()
+            return "ok"
+        except TravelConflict:
+            return "full"
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        trips = list(pool.map(lambda i: attempt(lambda: services[i % 4].create_trip(owner, _trip())), range(8)))
+    assert sorted(trips) == ["full"] * 5 + ["ok"] * 3
+    assert _service(url).list_trips(owner).total == 3
+    trip_id = _service(url).list_trips(owner).items[0].id
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        segments = list(pool.map(
+            lambda i: attempt(lambda: services[i % 4].create_segment(owner, trip_id, _segment())), range(6)))
+    assert sorted(segments) == ["full"] * 4 + ["ok"] * 2
+    assert _service(url).list_segments(owner, trip_id).total == 2
+    body = DecisionCreateRequest.model_validate({
+        "question": "q", "options": [{"name": "A"}, {"name": "B"}],
+        "criteria": [{"name": "c", "weight": 1, "direction": "higher_better"}]})
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        decisions = list(pool.map(lambda i: attempt(lambda: services[i % 4].create_decision(owner, body)), range(6)))
+    assert sorted(decisions) == ["full"] * 4 + ["ok"] * 2
+
+
+def test_reminder_link_keeps_the_departure_and_time_it_was_set_for(isolated_postgres):
+    from jarvis.assistant.models import ReminderUpdateRequest
+
+    url, owner = isolated_postgres.database_url, uuid4()
+    service = _service(url)
+    trip = service.create_trip(owner, _trip())
+    flight = service.create_segment(owner, trip.id, _segment())
+    created = service.sync_reminders(owner, trip.id).items[0]
+    link = _service(url).store.get_link(owner, flight.id)
+    assert link.departure_utc == flight.start_utc and link.remind_at == created.remind_at
+    snoozed = datetime(2027, 11, 1, 16, 0, tzinfo=timezone.utc)
+    service.assistant_service.update_reminder(owner, created.reminder_id, ReminderUpdateRequest(remind_at=snoozed))
+    again = _service(url).sync_reminders(owner, trip.id).items[0]
+    assert (again.action, again.remind_at) == ("unchanged", snoozed)
+    assert _service(url).store.get_link(owner, flight.id).remind_at == created.remind_at

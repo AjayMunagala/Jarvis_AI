@@ -223,7 +223,8 @@ _TRIP_COLUMNS = ("id, owner_id, name, travellers, currency, budget, start_date, 
 _SEGMENT_COLUMNS = ("id, owner_id, trip_id, kind, title, from_place, to_place, start_local, start_timezone, "
                     "end_local, end_timezone, start_utc, end_utc, reference, cost_amount, cost_currency, notes, "
                     "created_at, updated_at")
-_LINK_COLUMNS = "owner_id, trip_id, segment_id, reminder_id, lead_minutes, remind_at, created_at, updated_at"
+_LINK_COLUMNS = ("owner_id, trip_id, segment_id, reminder_id, lead_minutes, remind_at, departure_utc, created_at, "
+                 "updated_at")
 
 
 def _decision(row) -> Decision:
@@ -449,16 +450,16 @@ class PostgresTravelStore:
                 f"INSERT INTO jarvis_app.travel_reminder_links ({_LINK_COLUMNS}) VALUES ({_placeholders(_LINK_COLUMNS)}) "
                 "ON CONFLICT (segment_id) DO NOTHING",
                 (link.owner_id, link.trip_id, link.segment_id, link.reminder_id, link.lead_minutes, link.remind_at,
-                 link.created_at, link.updated_at)).rowcount == 1
+                 link.departure_utc, link.created_at, link.updated_at)).rowcount == 1
 
         return self._run(work, "Failed to store the reminder link.")
 
     def update_link(self, link: ReminderLink) -> bool:
         return self._run(lambda execute: execute(
             """UPDATE jarvis_app.travel_reminder_links SET reminder_id = %s, lead_minutes = %s, remind_at = %s,
-                   updated_at = %s WHERE segment_id = %s AND owner_id = %s""",
-            (link.reminder_id, link.lead_minutes, link.remind_at, link.updated_at, link.segment_id,
-             link.owner_id)).rowcount == 1, "Failed to update the reminder link.")
+                   departure_utc = %s, updated_at = %s WHERE segment_id = %s AND owner_id = %s""",
+            (link.reminder_id, link.lead_minutes, link.remind_at, link.departure_utc, link.updated_at,
+             link.segment_id, link.owner_id)).rowcount == 1, "Failed to update the reminder link.")
 
     def delete_link(self, owner_id, segment_id) -> bool:
         return self._run(lambda execute: execute(
