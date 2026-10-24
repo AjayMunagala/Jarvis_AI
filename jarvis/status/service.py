@@ -140,7 +140,11 @@ class StatusService:
                             ("The provider is not contacted by this check.",)),
             database,
             SubsystemReport(key="chat", name="Chat and orchestration", state="operational",
-                            limitations=("Chat does not yet use v3.x services or the v5 intelligence layer (v4.7).",)),
+                            checks=(f"workspace context {'on' if settings.chat_workspace_context_enabled else 'off'}",),
+                            limitations=(("Workspace context (knowledge, tasks, reminders, calendar) is read-only.",)
+                                         if settings.chat_workspace_context_enabled else
+                                         ("Workspace context is off (JARVIS_CHAT_WORKSPACE_CONTEXT_ENABLED=false).",))
+                            + ("Chat does not use the v5 model router; it uses the configured provider.",)),
             SubsystemReport(key="memory", name="Conversations and memory",
                             state="operational" if settings.persistence_enabled else "disabled",
                             storage="postgresql" if settings.persistence_enabled else "none"),

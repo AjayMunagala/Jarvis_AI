@@ -5,7 +5,7 @@ export interface ChatMemoryContext {
   memory_ids: string[]
 }
 
-export type ContextSourceType = 'conversation' | 'memory' | 'document'
+export type ContextSourceType = 'conversation' | 'memory' | 'document' | 'knowledge' | 'workspace'
 
 export interface ChatContextSource {
   ref: string
@@ -22,6 +22,8 @@ export interface ChatContextSource {
 export interface ChatContextSummary {
   history_status: 'included' | 'empty' | 'not_requested' | 'disabled' | 'unavailable'
   retrieval_status: 'success' | 'empty' | 'fallback' | 'disabled'
+  // v4.7: read-only workspace context (knowledge, tasks, reminders, calendar); absent from older servers.
+  workspace_status?: 'included' | 'empty' | 'disabled' | 'unavailable'
   sources: ChatContextSource[]
   omitted_count: number
   total_chars: number

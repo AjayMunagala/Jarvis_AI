@@ -25,7 +25,7 @@ class ChatContextSource(BaseModel):
     """One record supplied to the model; metadata only, never content."""
 
     ref: str
-    source_type: Literal["conversation", "memory", "document"]
+    source_type: Literal["conversation", "memory", "document", "knowledge", "workspace"]
     source_id: UUID
     label: str | None = None
     role: Literal["user", "assistant"] | None = None
@@ -40,6 +40,8 @@ class ChatContextSource(BaseModel):
 class ChatContextSummary(BaseModel):
     history_status: Literal["included", "empty", "not_requested", "disabled", "unavailable"]
     retrieval_status: Literal["success", "empty", "fallback", "disabled"]
+    # v4.7: workspace context (knowledge + tasks, reminders, calendar); "disabled" unless the owner enables it.
+    workspace_status: Literal["included", "empty", "disabled", "unavailable"] = "disabled"
     sources: list[ChatContextSource]
     omitted_count: int = Field(ge=0)
     total_chars: int = Field(ge=0)

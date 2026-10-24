@@ -24,6 +24,7 @@ from jarvis.memory.base import MemoryDeadlineExceeded
 from jarvis.memory.context import AssembledContext, HistoryEntry, assemble_context, cited_refs
 from jarvis.memory.query import extract_query_terms
 from jarvis.memory.retrieval import retrieve_context
+from jarvis.memory.workspace import WorkspaceGathering, gather_workspace_records
 from jarvis.orchestration.models import (
     ExpertExecutionError,
     ExpertTimeoutError,
@@ -126,14 +127,21 @@ async def chat(
         if monotonic() >= deadline:
             raise _request_timeout(context.execution_id)
 
+    workspace = WorkspaceGathering(records=(), status="disabled")
+    if settings.chat_workspace_context_enabled and owner_id is not None:
+        workspace = await _gather_workspace(request, owner_id, body.message, deadline=deadline,
+                                            execution_id=context.execution_id)
+
     assembled: AssembledContext | None = None
-    if repository is not None:
+    if repository is not None or settings.chat_workspace_context_enabled:
         assembled = assemble_context(
             history=history,
             retrieved=retrieval.records if retrieval is not None else (),
             terms=extract_query_terms(body.message),
             history_status=history_status,
             retrieval_status=retrieval.outcome if retrieval is not None else "disabled",
+            workspace=workspace.records,
+            workspace_status=workspace.status,
             history_limit=settings.context_history_messages,
             excerpt_max_chars=settings.context_excerpt_max_chars,
             max_chars=settings.context_max_chars,
@@ -225,6 +233,34 @@ async def chat(
     )
 
 
+async def _gather_workspace(request: Request, owner_id: UUID, message: str, *, deadline: float,
+                            execution_id: str) -> WorkspaceGathering:
+    """v4.7: read-only workspace context within the request deadline; never fails the chat request."""
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise _request_timeout(execution_id)
+    policy = request.app.state.authorization_policy
+
+    def allows(capability: str) -> bool:
+        try:
+            return bool(policy.allows(owner_id, Capability(capability)))
+        except Exception:  # noqa: BLE001 - a policy error is never permission
+            return False
+
+    task = asyncio.create_task(run_in_threadpool(gather_workspace_records, request.app.state, owner_id, message,
+                                                 allows=allows))
+    # At most half of the remaining time: the model call still needs the rest.
+    completed, _ = await asyncio.wait({task}, timeout=remaining / 2)
+    if not completed:
+        task.add_done_callback(_consume_background_result)
+        logger.warning("Workspace context timed out", extra={"execution_id": execution_id})
+        return WorkspaceGathering(records=(), status="unavailable", skipped=("all (timed out)",))
+    try:
+        return task.result()
+    except Exception:  # noqa: BLE001
+        return WorkspaceGathering(records=(), status="unavailable")
+
+
 async def _load_history(
     repository, conversation_id: UUID, *, limit: int, deadline: float, execution_id: str
 ) -> tuple[tuple[HistoryEntry, ...], str]:
@@ -278,6 +314,7 @@ def _context_summary(assembled: AssembledContext, reply: str) -> ChatContextSumm
     return ChatContextSummary(
         history_status=assembled.history_status,
         retrieval_status=assembled.retrieval_status,
+        workspace_status=assembled.workspace_status,
         sources=[
             ChatContextSource(
                 ref=item.ref,

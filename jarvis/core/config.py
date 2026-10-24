@@ -79,6 +79,9 @@ class Settings(BaseSettings):
     workflow_step_timeout_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
     workflow_run_timeout_seconds: float = Field(default=300.0, ge=5.0, le=3_600.0)
     workflow_max_active_runs: int = Field(default=4, ge=1, le=16)
+    # Workspace context for chat (v4.7): read-only knowledge excerpts and summaries of open tasks, upcoming
+    # reminders and calendar events are added to the model's context. Off by default; chat never writes.
+    chat_workspace_context_enabled: bool = False
     # Background scheduler runner (v4.5). Off by default (execution-disabled defaults); when on, it delivers due
     # reminders, runs due jobs once each, and holds non-urgent notifications during quiet hours ("22:00-07:00",
     # local time = UTC + the offset).
