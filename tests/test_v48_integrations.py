@@ -194,5 +194,6 @@ def test_migration_0065_matches_the_models():
                 .group(1).replace("'", "").replace(" ", "").replace("\n", "").split(","))
     approval = set(re.search(r"approval_requests_category_allowed\s+CHECK \(category IN \(([^)]*)\)\)", sql)
                    .group(1).replace("'", "").replace(" ", "").split(","))
-    assert audit == set(AuditCategory.__args__) and approval == set(ApprovalCategory.__args__)
+    # v6.5 (migration 0068) later adds the 'tutor' audit category.
+    assert audit == set(AuditCategory.__args__) - {"tutor"} and approval == set(ApprovalCategory.__args__)
     assert "DROP TABLE" not in sql.upper()

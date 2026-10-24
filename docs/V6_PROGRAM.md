@@ -40,6 +40,7 @@ The v5.1 router stays available for evaluations. Routing chat across several mod
 | v6.2 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (pypdf limit errors reached the API as HTTP 500), since fixed with five other findings | Python 1261 passed (with v6.1 and v6.3); hostile PDFs refused with 422 in under 1 s |
 | v6.3 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found no blocking issues; two medium and five low findings fixed | Python 1266 passed; live PostgreSQL 69 passed |
 | v6.4 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (mark-as-read used POST; the API only accepts PATCH), since fixed with six other findings | Vitest 141 passed (twice); Playwright E2E 11 passed; TypeScript clean |
+| v6.5 | IMPLEMENTED, TESTED; in review | Python 1315 passed; live PostgreSQL 73 passed |
 
 ## v6.1 — Usage and cost tracking, fallback model
 

@@ -35,6 +35,9 @@ from jarvis.api.routes.finance import router as finance_router
 from jarvis.api.routes.improvement import router as improvement_router
 from jarvis.api.routes.autonomous import router as autonomous_router
 from jarvis.api.routes.integrations import router as integrations_router
+from jarvis.api.routes.tutor import router as tutor_router
+from jarvis.tutor.service import TutorService
+from jarvis.tutor.stores import MemoryTutorStore, PostgresTutorStore
 from jarvis.integrations.service import IntegrationService
 from jarvis.integrations.stores import MemoryEnrollmentStore, PostgresEnrollmentStore
 from jarvis.autonomous.coordinator import AutonomousCoordinator
@@ -210,6 +213,7 @@ def create_app(
         scheduler_store = PostgresSchedulerStore(url, **timeouts)
         health_store = PostgresHealthStore(url, **timeouts)
         finance_store = PostgresFinanceStore(url, **timeouts)
+        tutor_store = PostgresTutorStore(url, **timeouts)
     else:
         assistant_store = MemoryAssistantStore()
         workflow_store = MemoryWorkflowStore()
@@ -218,6 +222,7 @@ def create_app(
         scheduler_store = MemorySchedulerStore()
         health_store = MemoryHealthStore()
         finance_store = MemoryFinanceStore()
+        tutor_store = MemoryTutorStore()
     app.state.assistant_service = AssistantService(assistant_store, audit_service=app.state.audit_service)
     app.state.knowledge_service = KnowledgeService(
         knowledge_store,
@@ -242,6 +247,12 @@ def create_app(
     app.state.finance_service = FinanceService(
         finance_store,
         audit_service=app.state.audit_service,
+    )
+    # v6.5 tutor: goals, plans, exercises and progress; explanations and generation use the resolved provider.
+    app.state.tutor_service = TutorService(
+        tutor_store, audit_service=app.state.audit_service,
+        model_timeout_seconds=resolved_settings.provider_connect_timeout_seconds
+        + resolved_settings.provider_read_timeout_seconds * 2 + 5,
     )
     # v4.9: proposals, snapshots and virtual prompt changes are durable when persistence is enabled.
     improvement_store = (PostgresImprovementStore(
@@ -347,6 +358,7 @@ def create_app(
     app.include_router(status_router)
     app.include_router(usage_router)
     app.include_router(integrations_router)
+    app.include_router(tutor_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

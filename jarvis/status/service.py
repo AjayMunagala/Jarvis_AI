@@ -214,6 +214,16 @@ class StatusService:
                             if getattr(state, "integration_service", None) else (),
                             limitations=("Only a simulated adapter exists; no real device is controlled.",
                                          "Activation and state-changing actions need an approved request.")),
+            SubsystemReport(key="tutor", name="Tutor (v6.5)", state="limited",
+                            storage=_storage(getattr(state, "tutor_service", None)),
+                            checks=("explanations and exercise generation: "
+                                    + ("demo provider (explanations labeled demo; generation refused)" if demo
+                                       else f"provider {getattr(provider, 'name', 'none')}"),),
+                            limitations=("Study plans, grading and spaced review are deterministic; short answers "
+                                         "match by normalized text or number, not by meaning.",
+                                         "Explanations and exercise generation need a real model provider; "
+                                         "with the demo provider explanations are labeled demo and generation "
+                                         "is refused.")),
             SubsystemReport(key="autonomous", name="Autonomous coordinator (v4.0)", state="limited",
                             limitations=("Keyword intent routing.",
                                          "Commands with write steps wait for an approved request (v4.3).")),
