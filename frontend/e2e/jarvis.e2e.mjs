@@ -348,3 +348,36 @@ test('offers opt-in browser voice that fills the composer without sending and re
   await expect.poll(() => page.evaluate(() => window.__voice.spoken)).toEqual([reply])
   expect(chatRequests).toBe(1)
 })
+
+test('v6.7 operations views: schedule a briefing, enroll the mock lamp and activate it through an approval', async ({ page }) => {
+  await unlock(page)
+
+  await page.getByRole('button', { name: 'Scheduler', exact: true }).click()
+  await expect(page.getByText('No scheduled jobs yet.')).toBeVisible()
+  await page.getByLabel('Name').fill('E2E briefing')
+  await page.getByLabel('Schedule type').selectOption('interval')
+  await page.getByLabel('Schedule expression').fill('3600')
+  await page.getByRole('button', { name: 'Create job' }).click()
+  const jobs = page.getByRole('region', { name: 'Scheduled jobs' })
+  await expect(jobs.getByText('E2E briefing')).toBeVisible()
+  await expect(jobs.getByText('daily_briefing')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Integrations', exact: true }).click()
+  await page.getByLabel('Display name').fill('E2E lamp')
+  await page.getByRole('button', { name: 'Enroll', exact: true }).click()
+  await expect(page.getByText(/"E2E lamp" enrolled as pending/)).toBeVisible()
+  await page.getByRole('button', { name: 'Activate E2E lamp' }).click()
+  await expect(page.getByText(/Approval requested for activating "E2E lamp"/)).toBeVisible()
+
+  await page.getByRole('button', { name: 'Open approvals' }).click()
+  await expect(page.getByRole('heading', { name: 'Activity' })).toBeVisible()
+  await page.getByRole('button', { name: 'Approve (allows one run)' }).click()
+  await expect(page.getByText(/Nothing has run yet/)).toBeVisible()
+
+  await page.getByRole('button', { name: 'Integrations', exact: true }).click()
+  await page.getByRole('button', { name: 'Activate with approval' }).click()
+  await expect(page.getByText('"E2E lamp" is active.')).toBeVisible()
+  const actions = page.getByRole('form', { name: 'Actions for E2E lamp' })
+  await actions.getByRole('button', { name: 'Run action' }).click()
+  await expect(page.getByText('{"power":"off","brightness":0,"simulated":true}')).toBeVisible()
+})

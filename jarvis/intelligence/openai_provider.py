@@ -1,5 +1,9 @@
 """Minimal asynchronous adapter for the OpenAI Chat Completions endpoint."""
 
+import asyncio
+from time import perf_counter
+from typing import Any, Callable
+
 import httpx
 from pydantic import AnyHttpUrl, BaseModel, SecretStr, ValidationError
 
@@ -143,8 +147,14 @@ class OpenAIProvider:
         connect_timeout_seconds: float,
         read_timeout_seconds: float,
         transport: httpx.AsyncBaseTransport | None = None,
+        role: str = "primary",
     ):
         self._api_key = api_key.get_secret_value()
+        self.model = model
+        self.role = role
+        # v6.1: set by the application to UsageService.record, which only enqueues (never blocks); called once per
+        # request, including when the request is cancelled by a deadline.
+        self.usage_recorder: Callable[..., Any] | None = None
         self._endpoint = f"{str(base_url).rstrip('/')}/chat/completions"
         self._model = model
         self._timeout = httpx.Timeout(
@@ -187,6 +197,34 @@ class OpenAIProvider:
                     "schema": _strict_response_schema(response_model),
                 },
             }
+        started = perf_counter()
+        usage: dict[str, int | None] = {}
+        outcome = "failed"
+        try:
+            content = await self._call(payload, response_model, usage)
+            outcome = "succeeded"
+            return content
+        except TransientProviderError as exc:
+            outcome = "timeout" if isinstance(exc.__cause__, httpx.TimeoutException) else "failed"
+            raise
+        except asyncio.CancelledError:
+            outcome = "cancelled"  # usually a request deadline; the provider may still bill the call
+            raise
+        finally:
+            self._record(outcome, (perf_counter() - started) * 1000, usage)  # never awaited: cannot delay or block
+
+    def _record(self, outcome: str, duration_ms: float, usage: dict[str, int | None]) -> None:
+        if self.usage_recorder is None:
+            return
+        try:
+            self.usage_recorder(provider=self.name, model=self.model, outcome=outcome, duration_ms=duration_ms,
+                                role=self.role, prompt_tokens=usage.get("prompt_tokens"),
+                                completion_tokens=usage.get("completion_tokens"))
+        except Exception:  # noqa: BLE001 - usage tracking never affects the reply
+            pass
+
+    async def _call(self, payload: dict[str, object], response_model: type[BaseModel] | None,
+                    usage: dict[str, int | None]) -> str:
         try:
             async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
                 response = await client.post(
@@ -207,6 +245,9 @@ class OpenAIProvider:
             raise ProviderError()
         try:
             completion = _ChatCompletion.model_validate(response.json())
+            if completion.usage is not None:
+                usage.update(prompt_tokens=completion.usage.prompt_tokens,
+                             completion_tokens=completion.usage.completion_tokens)
             choice = completion.choices[0]
             if choice.finish_reason not in (None, "stop", "length"):
                 raise ProviderError()
@@ -221,3 +262,46 @@ class OpenAIProvider:
             return ProviderReply(content=content).content
         except (ValueError, ValidationError) as exc:
             raise ProviderError() from exc
+
+
+class FallbackProvider:
+    """v6.1: the primary model, with one retry on a fallback model when the primary is temporarily unavailable.
+
+    Only transient failures (timeouts, network errors, HTTP 429 and 5xx) fall back; a request the provider
+    rejects (for example invalid input) is not sent again. Both calls are recorded in the usage log, so it shows
+    which model answered. When the fallback fails too, the error is final (not retryable), so the orchestrator's
+    own retries do not multiply the calls.
+    """
+
+    name = "openai"
+    is_demo = False
+
+    def __init__(self, primary: OpenAIProvider, fallback: OpenAIProvider):
+        self.primary = primary
+        self.fallback = fallback
+
+    @property
+    def model(self) -> str:
+        return self.primary.model
+
+    @property
+    def usage_recorder(self):
+        return self.primary.usage_recorder
+
+    @usage_recorder.setter
+    def usage_recorder(self, recorder) -> None:
+        self.primary.usage_recorder = recorder
+        self.fallback.usage_recorder = recorder
+
+    async def generate_reply(self, message: str, *, system_instruction: str | None = None,
+                             response_model: type[BaseModel] | None = None) -> str:
+        try:
+            return await self.primary.generate_reply(message, system_instruction=system_instruction,
+                                                     response_model=response_model)
+        except TransientProviderError:
+            try:
+                return await self.fallback.generate_reply(message, system_instruction=system_instruction,
+                                                          response_model=response_model)
+            except TransientProviderError as exc:
+                raise ProviderError("Both the configured model and its fallback are temporarily unavailable.") from exc
+

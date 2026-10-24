@@ -26,7 +26,15 @@ class _CompletionChoice(BaseModel):
     finish_reason: str | None = None
 
 
+class _CompletionUsage(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+
+
 class _ChatCompletion(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     choices: list[_CompletionChoice] = Field(min_length=1)
+    usage: _CompletionUsage | None = None  # v6.1: token counts, when the provider reports them

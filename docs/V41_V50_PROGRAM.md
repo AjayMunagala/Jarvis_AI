@@ -531,7 +531,7 @@ These were run on the v4.6 commit in a separate clean checkout.
 ## v4.7 — Integrated assistant experience in chat
 
 ### Why it was needed
-Chat used none of the v3.1–v4.6 services. The model could not see the owner's tasks, reminders, calendar or knowledge store, even though all of them exist in JARVIS. The Assistant view was already reachable in this branch, so v4.7 did not need to change it.
+Chat used none of the v3.1–v4.6 services. The model could not see the owner's tasks, reminders, calendar or knowledge store, even though all of them exist in JARVIS. **Correction (v6.4):** this record originally said the Assistant view was already reachable. That was wrong: its nav item was marked "SOON" and could not be opened. v6.4 made it reachable.
 
 ### Changes
 - **Workspace context, opt-in.** It is controlled by `JARVIS_CHAT_WORKSPACE_CONTEXT_ENABLED`, which is off by default, so default chat is unchanged. When it is on, chat adds two kinds of record to the model's context:

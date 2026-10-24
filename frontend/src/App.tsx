@@ -2,15 +2,19 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type Keyboard
 import {
   Activity, ArrowDown, ArrowUp, AudioLines, Check, CheckSquare, ChevronDown, CircleHelp,
   Clock3, Command, Compass, Cpu, FileText, Folder, Menu, MessageSquare, Plus, Search,
-  Settings2, ShieldCheck, Sparkles, X,
-} from 'lucide-react'
-import { getConversationMessages, getInterfaceConfig, getReadiness, listConversations, sendChatMessage, type ApiAuth, type ChatContextSummary, type ChatMemoryContext, type InterfaceConfig, type ToolActivity } from './services/api'
+  Settings2, ShieldCheck, Sparkles, X, Bell, Workflow, CalendarClock, Plug } from 'lucide-react'
+import { getConversationMessages, getInterfaceConfig, getReadiness, listConversations, sendChatMessage, type ApiAuth, type ChatContextSummary, type ChatMemoryContext, type InterfaceConfig, type ToolActivity, getNotifications } from './services/api'
 import MemoryManager from './components/MemoryManager'
 import CodingPanel from './components/CodingPanel'
 import BrowserPanel from './components/BrowserPanel'
 import CapabilitiesPanel from './components/CapabilitiesPanel'
 import ActivityPanel from './components/ActivityPanel'
 import AssistantPanel from './components/AssistantPanel'
+import NotificationsPanel, { desktopPermission } from './components/NotificationsPanel'
+import WorkflowsPanel from './components/WorkflowsPanel'
+import SchedulerPanel from './components/SchedulerPanel'
+import IntegrationsPanel from './components/IntegrationsPanel'
+import type { ApprovalMemo } from './components/ApprovalGate'
 import VoiceControls from './voice/VoiceControls'
 import { createBrowserSpeechProvider, type SpeechProvider } from './voice/speech'
 
@@ -52,8 +56,17 @@ const navItems = [
   { label: 'Memory', icon: Folder },
   { label: 'Coding', icon: Command },
   { label: 'Browser', icon: Compass },
+  { label: 'Workflows', icon: Workflow },
+  { label: 'Scheduler', icon: CalendarClock },
+  { label: 'Integrations', icon: Plug },
   { label: 'Activity', icon: Activity },
+  { label: 'Notifications', icon: Bell },
 ]
+// v6.4: every listed view is available (the Assistant view was built in v3.1 but could not be opened).
+// v6.7: Workflows, Scheduler and Integrations views; approvals stay in the Activity view.
+const AVAILABLE_VIEWS = ['Chat', 'Assistant', 'Memory', 'Coding', 'Browser', 'Capabilities', 'Workflows', 'Scheduler', 'Integrations', 'Activity', 'Notifications'] as const
+type View = typeof AVAILABLE_VIEWS[number]
+const NOTIFICATION_POLL_MS = 30_000
 
 function createId() {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -75,7 +88,15 @@ export default function App() {
   const [pending, setPending] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [notice, setNotice] = useState('')
-  const [activeView, setActiveView] = useState<'Chat' | 'Assistant' | 'Memory' | 'Coding' | 'Browser' | 'Capabilities' | 'Activity'>('Chat')
+  const [activeView, setActiveView] = useState<View>('Chat')
+  const [unreadCount, setUnreadCount] = useState(0)
+  const seenNotifications = useRef<Set<string>>(new Set())
+  // v6.4 review: announce only after a first successful poll, only items delivered after unlock, and drop
+  // results of polls started under an earlier unlock.
+  const notificationsPrimed = useRef(false)
+  const unlockedAt = useRef(0)
+  const pollGeneration = useRef(0)
+  const desktopBroken = useRef(false)
   const [inspectMemoryIds, setInspectMemoryIds] = useState<string[]>([])
   const [providerInfo, setProviderInfo] = useState<{ provider: string; demo: boolean } | null>(null)
   const [credential, setCredential] = useState('')
@@ -101,6 +122,9 @@ export default function App() {
   const sessionVersionRef = useRef(0)
   const sessionControllerRef = useRef(new AbortController())
   const readinessRequestRef = useRef(0)
+  // v6.7: approval IDs requested by gated workflow and integration actions, kept while the owner switches to the
+  // Activity view to approve them; replaced on every lock and unlock.
+  const approvalMemoRef = useRef<ApprovalMemo>(new Map())
 
   const setActiveConversationId = useCallback((id: string | null) => {
     activeIdRef.current = id
@@ -137,6 +161,7 @@ export default function App() {
     sessionVersionRef.current += 1
     sessionControllerRef.current.abort()
     sessionControllerRef.current = new AbortController()
+    approvalMemoRef.current = new Map()
     requestInFlightRef.current = false
     activeIdRef.current = null
     setCredential('')
@@ -371,8 +396,8 @@ export default function App() {
   }
 
   function selectNav(label: string) {
-    if (label === 'Chat' || label === 'Memory' || label === 'Coding' || label === 'Browser' || label === 'Capabilities' || label === 'Activity') {
-      setActiveView(label)
+    if ((AVAILABLE_VIEWS as readonly string[]).includes(label)) {
+      setActiveView(label as View)
       setNotice('')
       setMobileMenuOpen(false)
       return
@@ -380,6 +405,44 @@ export default function App() {
     setNotice(`${label} is coming soon. This section is not available in this version.`)
     setMobileMenuOpen(false)
   }
+
+  // v6.4: while JARVIS is open, check for new notifications and show each new one once as a desktop notification
+  // (only after the owner allowed it in the Notifications view). Nothing is polled while the workspace is locked.
+  async function pollNotifications() {
+    if (!credential) return
+    const generation = pollGeneration.current
+    try {
+      const page = await getNotifications(true, 50, currentAuth())
+      if (generation !== pollGeneration.current) return  // started under an earlier unlock
+      setUnreadCount(page.total)
+      const fresh = page.items.filter((item) => !seenNotifications.current.has(item.id)
+        && Date.parse(item.delivered_at ?? item.created_at) >= unlockedAt.current)
+      const primed = notificationsPrimed.current
+      page.items.forEach((item) => seenNotifications.current.add(item.id))
+      notificationsPrimed.current = true
+      if (!primed || desktopBroken.current || desktopPermission() !== 'granted') return
+      for (const item of fresh) {
+        try {
+          new window.Notification(item.title, { body: item.message.slice(0, 240), tag: item.id })
+        } catch {
+          desktopBroken.current = true  // e.g. Android Chrome, which only allows service-worker notifications
+          break
+        }
+      }
+    } catch { /* the badge simply keeps its last value */ }
+  }
+
+  useEffect(() => {
+    pollGeneration.current += 1
+    seenNotifications.current = new Set()
+    notificationsPrimed.current = false
+    unlockedAt.current = Date.now() - 60_000  // tolerate a little clock skew between browser and server
+    setUnreadCount(0)
+    if (!credential) return
+    void pollNotifications()
+    const timer = window.setInterval(() => void pollNotifications(), NOTIFICATION_POLL_MS)
+    return () => window.clearInterval(timer)
+  }, [credential]) // eslint-disable-line react-hooks/exhaustive-deps
 
   function featureOff(label: string) {
     const features = interfaceConfig?.features
@@ -412,9 +475,9 @@ export default function App() {
         <nav className="primary-nav">
           {navItems.map(({ label, icon: Icon }) => {
             const active = label === activeView
-            const available = label === 'Chat' || label === 'Memory' || label === 'Coding' || label === 'Browser' || label === 'Capabilities' || label === 'Activity'
+            const available = (AVAILABLE_VIEWS as readonly string[]).includes(label)
             return <button key={label} className={`nav-item ${active ? 'nav-active' : ''}`} onClick={() => selectNav(label)} aria-current={active ? 'page' : undefined}>
-              <Icon size={17} strokeWidth={1.8} /><span>{label}</span>{!available && <span className="nav-soon">SOON</span>}{available && featureOff(label) && <span className="nav-soon nav-off" aria-hidden="true" title="Disabled by the server configuration">OFF</span>}
+              <Icon size={17} strokeWidth={1.8} /><span>{label}</span>{!available && <span className="nav-soon">SOON</span>}{label === 'Notifications' && unreadCount > 0 && <span className="nav-badge"><span aria-hidden="true">{unreadCount}</span><span className="sr-only">, {unreadCount} unread</span></span>}{available && featureOff(label) && <span className="nav-soon nav-off" aria-hidden="true" title="Disabled by the server configuration">OFF</span>}
             </button>
           })}
         </nav>
@@ -446,7 +509,7 @@ export default function App() {
           <div className="topbar-right"><div className="provider-pill"><span className="provider-dot" /><span>{providerInfo ? `${providerInfo.demo ? 'DEMO' : 'MODEL'} · ${providerInfo.provider.toUpperCase()}` : 'PROVIDER MODE'}</span></div>{credential && <button type="button" className="workspace-lock" onClick={lockWorkspace}>Lock workspace</button>}<span className="topbar-divider" /><div className={`system-status ${readiness !== 'ready' && readiness !== 'loading' ? 'system-status-clickable' : ''}`} aria-label={`System status: ${readiness === 'ready' ? 'ready' : readiness === 'not_ready' ? 'not ready' : readiness === 'unreachable' ? 'offline' : 'checking'}`} onClick={readiness !== 'ready' && readiness !== 'loading' ? () => void fetchReadiness() : undefined} title={readiness === 'ready' ? 'System ready' : readiness === 'not_ready' ? 'System not ready — click to refresh' : readiness === 'unreachable' ? 'System offline — click to retry' : 'Checking system readiness…'}><span className={`status-ring status-${readiness}`}>{readiness === 'ready' ? <Check size={11} /> : readiness === 'loading' ? <Clock3 size={11} /> : readiness === 'not_ready' ? <CircleHelp size={11} /> : <X size={11} />}</span><span>{readiness === 'ready' ? 'System ready' : readiness === 'loading' ? 'Checking…' : readiness === 'not_ready' ? 'System not ready' : 'System offline'}</span></div></div>
         </header>
 
-        {activeView === 'Assistant' ? <div className="content-area"><AssistantPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Activity' ? <div className="content-area"><ActivityPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Capabilities' ? <div className="content-area"><CapabilitiesPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Browser' ? <div className="content-area"><BrowserPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Coding' ? <div className="content-area"><CodingPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Memory' ? <div className="content-area"><MemoryManager inspectIds={inspectMemoryIds} auth={{ token: credential || undefined, onUnauthorized: handleUnauthorized }} /></div> : <><div className={`content-area ${messages.length ? 'has-messages' : ''}`}>
+        {activeView === 'Workflows' ? <div className="content-area"><WorkflowsPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} onOpenApprovals={() => selectNav('Activity')} approvalMemo={approvalMemoRef.current} /></div> : activeView === 'Scheduler' ? <div className="content-area"><SchedulerPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Integrations' ? <div className="content-area"><IntegrationsPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} onOpenApprovals={() => selectNav('Activity')} approvalMemo={approvalMemoRef.current} /></div> : activeView === 'Notifications' ? <div className="content-area"><NotificationsPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} onChanged={() => void pollNotifications()} /></div> : activeView === 'Assistant' ? <div className="content-area"><AssistantPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Activity' ? <div className="content-area"><ActivityPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Capabilities' ? <div className="content-area"><CapabilitiesPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Browser' ? <div className="content-area"><BrowserPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Coding' ? <div className="content-area"><CodingPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Memory' ? <div className="content-area"><MemoryManager inspectIds={inspectMemoryIds} auth={{ token: credential || undefined, onUnauthorized: handleUnauthorized }} /></div> : <><div className={`content-area ${messages.length ? 'has-messages' : ''}`}>
           {notice && <div className="notice-banner" role="status"><CircleHelp size={16} /><span>{notice}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => setNotice('')}><X size={15} /></button></div>}
           {historyError && <div className="notice-banner conversation-error" role="alert"><CircleHelp size={16} /><span>{historyError}</span><button className="icon-button" aria-label="Dismiss conversation error" onClick={() => setHistoryError('')}><X size={15} /></button></div>}
           {historyLoading && <div className="notice-banner" role="status">Loading conversation history…</div>}
@@ -486,7 +549,7 @@ export default function App() {
           <div className="composer-footer"><span><ShieldCheck size={12} /> Memory saving is explicit</span><span><Clock3 size={12} /> Chat history depends on backend persistence</span></div>
         </div></>}
       </main>
-      {unlockOpen && <div className="credential-backdrop"><section className="credential-dialog" role="dialog" aria-modal="true" aria-labelledby="credential-title" aria-describedby="credential-help"><h2 id="credential-title">Unlock local workspace</h2><p id="credential-help">Enter the local access token configured for this JARVIS instance. It is kept in this page's memory only and must be entered again after reload.</p><form onSubmit={(event) => { event.preventDefault(); const token = credentialDraft.trim(); if (token.length < 32) return; sessionVersionRef.current += 1; sessionControllerRef.current = new AbortController(); setCredential(token); setCredentialDraft(''); setUnlockOpen(false) }}><label htmlFor="workspace-token">Local access token</label><input id="workspace-token" type="password" autoComplete="off" value={credentialDraft} onChange={(event) => setCredentialDraft(event.target.value)} autoFocus /><div className="credential-actions"><button type="submit" disabled={credentialDraft.trim().length < 32}>Unlock</button><button type="button" onClick={() => { setCredentialDraft(''); setUnlockOpen(false) }}>Continue without unlocking</button></div></form><p className="credential-warning">This single-owner local prototype is not approved for shared or public deployment. Plain HTTP is unsafe on untrusted networks, and XSS could expose the in-memory token.</p></section></div>}
+      {unlockOpen && <div className="credential-backdrop"><section className="credential-dialog" role="dialog" aria-modal="true" aria-labelledby="credential-title" aria-describedby="credential-help"><h2 id="credential-title">Unlock local workspace</h2><p id="credential-help">Enter the local access token configured for this JARVIS instance. It is kept in this page's memory only and must be entered again after reload.</p><form onSubmit={(event) => { event.preventDefault(); const token = credentialDraft.trim(); if (token.length < 32) return; sessionVersionRef.current += 1; sessionControllerRef.current.abort(); sessionControllerRef.current = new AbortController(); approvalMemoRef.current = new Map(); setCredential(token); setCredentialDraft(''); setUnlockOpen(false) }}><label htmlFor="workspace-token">Local access token</label><input id="workspace-token" type="password" autoComplete="off" value={credentialDraft} onChange={(event) => setCredentialDraft(event.target.value)} autoFocus /><div className="credential-actions"><button type="submit" disabled={credentialDraft.trim().length < 32}>Unlock</button><button type="button" onClick={() => { setCredentialDraft(''); setUnlockOpen(false) }}>Continue without unlocking</button></div></form><p className="credential-warning">This single-owner local prototype is not approved for shared or public deployment. Plain HTTP is unsafe on untrusted networks, and XSS could expose the in-memory token.</p></section></div>}
     </div>
   )
 }

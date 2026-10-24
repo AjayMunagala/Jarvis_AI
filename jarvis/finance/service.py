@@ -14,8 +14,10 @@ from jarvis.finance.analytics import (
     compute_cash_flow_and_runway,
     compute_net_worth,
 )
+from jarvis.finance.forecasting import build_forecast
 from jarvis.finance.models import (
     AccountCreateRequest,
+    FinanceForecast,
     FinancialAccount,
     FinancialAccountPage,
     FinancialAnalyticsReport,
@@ -27,6 +29,11 @@ from jarvis.finance.models import (
 from jarvis.finance.stores import FinanceStore
 
 logger = logging.getLogger(__name__)
+
+
+# v6.6: bounded single reads for on-demand forecasts (newest first; the rest is reported as truncated).
+FORECAST_MAX_TRANSACTIONS = 5000
+FORECAST_MAX_ACCOUNTS = 1000
 
 
 class FinanceService:
@@ -227,4 +234,36 @@ class FinanceService:
             transactions_count=total_txs,
             summary=summary,
             insights=insights,
+        )
+
+    # ========================================================= Forecasts (v6.6, analysis only)
+
+    def _read_bounded(self, reader: Any, owner_id: UUID, cap: int) -> tuple[list[Any], bool]:
+        # One query of cap + 1 rows: no offset paging (which can skip or repeat rows under concurrent
+        # writes) and no separate count; the extra row only signals truncation.
+        items, _ = reader(owner_id, limit=cap + 1, offset=0)
+        return list(items[:cap]), len(items) > cap
+
+    def get_forecast(
+        self,
+        owner_id: UUID,
+        horizon: int = 3,
+        min_train: int = 6,
+        as_of: datetime | None = None,
+    ) -> FinanceForecast:
+        """Computed on demand from the owner's stored data; nothing is written or audited (a read)."""
+        transactions, truncated = self._read_bounded(
+            self.store.list_transactions, owner_id, FORECAST_MAX_TRANSACTIONS
+        )
+        accounts, accounts_truncated = self._read_bounded(
+            self.store.list_accounts, owner_id, FORECAST_MAX_ACCOUNTS
+        )
+        return build_forecast(
+            accounts,
+            transactions,
+            horizon=horizon,
+            min_train=min_train,
+            truncated=truncated,
+            accounts_truncated=accounts_truncated,
+            as_of=as_of,
         )

@@ -20,6 +20,8 @@ from jarvis.advanced_intelligence import build_intelligence
 from jarvis.api.routes.intelligence import router as intelligence_router
 from jarvis.api.routes.interface import router as interface_router
 from jarvis.api.routes.status import router as status_router
+from jarvis.api.routes.usage import router as usage_router
+from jarvis.usage.service import MemoryUsageStore, PostgresUsageStore, Price, UsageService
 from jarvis.api.routes.memories import router as memories_router
 from jarvis.api.routes.repo import router as repo_router
 from jarvis.api.routes.tools import router as tools_router
@@ -33,6 +35,9 @@ from jarvis.api.routes.finance import router as finance_router
 from jarvis.api.routes.improvement import router as improvement_router
 from jarvis.api.routes.autonomous import router as autonomous_router
 from jarvis.api.routes.integrations import router as integrations_router
+from jarvis.api.routes.tutor import router as tutor_router
+from jarvis.tutor.service import TutorService
+from jarvis.tutor.stores import MemoryTutorStore, PostgresTutorStore
 from jarvis.integrations.service import IntegrationService
 from jarvis.integrations.stores import MemoryEnrollmentStore, PostgresEnrollmentStore
 from jarvis.autonomous.coordinator import AutonomousCoordinator
@@ -44,6 +49,7 @@ from jarvis.knowledge.service import KnowledgeService
 from jarvis.knowledge.stores import MemoryKnowledgeStore, PostgresKnowledgeStore
 from jarvis.research.service import ResearchService
 from jarvis.research.stores import MemoryResearchStore, PostgresResearchStore
+from jarvis.assistant.briefing import build_briefing
 from jarvis.scheduler.cron import ScheduleError
 from jarvis.scheduler.runner import SchedulerRunner
 from jarvis.scheduler.service import SchedulerService, parse_quiet_hours
@@ -128,6 +134,7 @@ def create_app(
         if resolved_settings.scheduler_runner_enabled:
             app.state.scheduler_runner.start()
         yield
+        app.state.usage_service.close()  # stores queued usage events (bounded wait)
         app.state.scheduler_runner.stop()
         app.state.workflow_service.close()
         # Browser contexts hold page state; close every session on shutdown.
@@ -143,6 +150,24 @@ def create_app(
     app.state.settings = resolved_settings
     app.state.authorization_policy = CapabilityPolicy(resolved_settings.owner_id)
     app.state.provider = resolved_provider
+    # v6.1: usage and cost tracking for real providers (durable when persistence is enabled).
+    prices = {}
+    if resolved_settings.openai_price_input_per_million is not None:  # validated: both prices and a source
+        prices[resolved_settings.openai_model] = Price(resolved_settings.openai_price_input_per_million,
+                                                       resolved_settings.openai_price_output_per_million,
+                                                       resolved_settings.openai_price_source)
+    if resolved_settings.openai_fallback_price_input_per_million is not None:
+        prices[resolved_settings.openai_fallback_model] = Price(
+            resolved_settings.openai_fallback_price_input_per_million,
+            resolved_settings.openai_fallback_price_output_per_million, resolved_settings.openai_price_source)
+    usage_store = (PostgresUsageStore(
+        resolved_settings.persistence_database_url.get_secret_value(),
+        connect_timeout_seconds=resolved_settings.persistence_connect_timeout_seconds,
+        operation_timeout_seconds=resolved_settings.persistence_operation_timeout_seconds)
+        if resolved_settings.persistence_enabled else MemoryUsageStore())
+    app.state.usage_service = UsageService(usage_store, prices)
+    if hasattr(resolved_provider, "usage_recorder"):
+        resolved_provider.usage_recorder = app.state.usage_service.record
     app.state.orchestration_service = orchestration_service
     app.state.conversation_repository = conversation_repository
     app.state.memory_repository = memory_repository
@@ -188,6 +213,7 @@ def create_app(
         scheduler_store = PostgresSchedulerStore(url, **timeouts)
         health_store = PostgresHealthStore(url, **timeouts)
         finance_store = PostgresFinanceStore(url, **timeouts)
+        tutor_store = PostgresTutorStore(url, **timeouts)
     else:
         assistant_store = MemoryAssistantStore()
         workflow_store = MemoryWorkflowStore()
@@ -196,6 +222,7 @@ def create_app(
         scheduler_store = MemorySchedulerStore()
         health_store = MemoryHealthStore()
         finance_store = MemoryFinanceStore()
+        tutor_store = MemoryTutorStore()
     app.state.assistant_service = AssistantService(assistant_store, audit_service=app.state.audit_service)
     app.state.knowledge_service = KnowledgeService(
         knowledge_store,
@@ -220,6 +247,12 @@ def create_app(
     app.state.finance_service = FinanceService(
         finance_store,
         audit_service=app.state.audit_service,
+    )
+    # v6.5 tutor: goals, plans, exercises and progress; explanations and generation use the resolved provider.
+    app.state.tutor_service = TutorService(
+        tutor_store, audit_service=app.state.audit_service,
+        model_timeout_seconds=resolved_settings.provider_connect_timeout_seconds
+        + resolved_settings.provider_read_timeout_seconds * 2 + 5,
     )
     # v4.9: proposals, snapshots and virtual prompt changes are durable when persistence is enabled.
     improvement_store = (PostgresImprovementStore(
@@ -280,6 +313,10 @@ def create_app(
     # runner only starts when JARVIS_SCHEDULER_RUNNER_ENABLED=true.
     scheduler = app.state.scheduler_service
     scheduler.assistant_service = app.state.assistant_service
+    # v6.3: a "daily_briefing" job delivers today's briefing as a notification (owner's local day).
+    # Cron expressions are evaluated in UTC: for 07:00 at UTC+05:30 schedule "30 1 * * *".
+    scheduler.briefing_builder = lambda owner: build_briefing(
+        app.state.assistant_service, owner, utc_offset_minutes=resolved_settings.scheduler_utc_offset_minutes)
     # Scheduled workflows start in the background, so a long run never delays reminders (v4.5 review finding 10).
     scheduler.workflow_trigger = lambda owner, workflow_id: app.state.workflow_service.trigger_run(
         owner, workflow_id, {}, None, False)
@@ -319,7 +356,9 @@ def create_app(
     app.include_router(autonomous_router)
     app.include_router(intelligence_router)
     app.include_router(status_router)
+    app.include_router(usage_router)
     app.include_router(integrations_router)
+    app.include_router(tutor_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

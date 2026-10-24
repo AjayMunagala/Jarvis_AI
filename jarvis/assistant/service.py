@@ -179,12 +179,14 @@ class AssistantService:
         *,
         status: ReminderStatus | None = None,
         due_before: datetime | None = None,
+        due_after: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> ReminderPage:
         limit = max(1, min(limit, 200))
         offset = max(0, offset)
-        items, total = self.store.list_reminders(owner_id, status=status, due_before=due_before, limit=limit, offset=offset)
+        items, total = self.store.list_reminders(owner_id, status=status, due_before=due_before, due_after=due_after,
+                                               limit=limit, offset=offset)
         return ReminderPage(items=items, total=total)
 
     def update_reminder(self, owner_id: UUID, reminder_id: UUID, req: ReminderUpdateRequest) -> Reminder | None:

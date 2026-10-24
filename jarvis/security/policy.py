@@ -66,6 +66,9 @@ class Capability(StrEnum):
     KNOWLEDGE_GRAPH_WRITE = "knowledge_graph.write"
     PERSONALIZATION_MANAGE = "personalization.manage"
     EXTERNAL_ACTION_EXECUTE = "external_action.execute"
+    # Tutor (v6.5): learning goals, study plans, exercises and progress.
+    TUTOR_READ = "tutor.read"
+    TUTOR_WRITE = "tutor.write"
 
 
 _OWNER_CAPABILITIES = frozenset({
@@ -111,6 +114,8 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.INTELLIGENCE_EVALUATE,
     Capability.KNOWLEDGE_GRAPH_WRITE,
     Capability.PERSONALIZATION_MANAGE,
+    Capability.TUTOR_READ,
+    Capability.TUTOR_WRITE,
 })
 
 

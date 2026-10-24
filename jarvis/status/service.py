@@ -64,6 +64,12 @@ def _storage(service: Any) -> Storage:
     return "none"
 
 
+def _pypdf_available() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("pypdf") is not None
+
+
 class StatusService:
     def __init__(self, app_state: Any, *, database_timeout_seconds: int = 2):
         self.state = app_state
@@ -135,7 +141,11 @@ class StatusService:
         database = self._database()
         reports = [
             SubsystemReport(key="provider", name="Model provider", state="mock" if demo else "operational",
-                            checks=(f"configured provider: {getattr(provider, 'name', 'none')}",),
+                            checks=(f"configured provider: {getattr(provider, 'name', 'none')}",)
+                            + ((f"fallback model configured: {provider.fallback.model}",)
+                               if hasattr(provider, "fallback") else ())
+                            + ((f"usage tracking: {getattr(getattr(state, 'usage_service', None), 'recording_failures', 0)} "
+                                "recording failure(s)",) if getattr(state, "usage_service", None) else ()),
                             limitations=("Demo replies only; no language model is used.",) if demo else
                             ("The provider is not contacted by this check.",)),
             database,
@@ -183,7 +193,9 @@ class StatusService:
                                          "reliable across restarts (v4.6).",)),
             SubsystemReport(key="research", name="Research and documents (v3.4)", state="limited",
                             storage=_storage(getattr(state, "research_service", None)),
-                            limitations=("Parses text, JSON and CSV only (no PDF/DOCX).", "Web URLs are not fetched.")),
+                            checks=(f"PDF extraction {'available' if _pypdf_available() else 'not installed'}",),
+                            limitations=("Parses text, Markdown, JSON, CSV, DOCX and PDF; scanned PDFs need OCR, "
+                                         "which is not supported.", "Web URLs are not fetched.")),
             self._scheduler(),
             self._telemetry(),
             SubsystemReport(key="finance", name="Finance (v3.7)", state="limited",
@@ -202,6 +214,16 @@ class StatusService:
                             if getattr(state, "integration_service", None) else (),
                             limitations=("Only a simulated adapter exists; no real device is controlled.",
                                          "Activation and state-changing actions need an approved request.")),
+            SubsystemReport(key="tutor", name="Tutor (v6.5)", state="limited",
+                            storage=_storage(getattr(state, "tutor_service", None)),
+                            checks=("explanations and exercise generation: "
+                                    + ("demo provider (explanations labeled demo; generation refused)" if demo
+                                       else f"provider {getattr(provider, 'name', 'none')}"),),
+                            limitations=("Study plans, grading and spaced review are deterministic; short answers "
+                                         "match by normalized text or number, not by meaning.",
+                                         "Explanations and exercise generation need a real model provider; "
+                                         "with the demo provider explanations are labeled demo and generation "
+                                         "is refused.")),
             SubsystemReport(key="autonomous", name="Autonomous coordinator (v4.0)", state="limited",
                             limitations=("Keyword intent routing.",
                                          "Commands with write steps wait for an approved request (v4.3).")),

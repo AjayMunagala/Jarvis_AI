@@ -8,7 +8,7 @@ v4.5 bounded proactive runtime:
   even with several workers; missed runs after downtime collapse into one.
 - Due assistant reminders are delivered once (pending -> triggered).
 - Notifications during quiet hours are stored but held, and delivered when
-  the quiet hours end; reminders are never dropped by the anti-fatigue throttle.
+  the quiet hours end; reminders and daily briefings (v6.3) are never dropped by the anti-fatigue throttle.
   The throttle reads the last delivery time from storage, so a restart does
   not reset it.
 - Workflow jobs run through the workflow engine. A workflow with write steps
@@ -88,6 +88,8 @@ class SchedulerService:
         # v4.5: set by the application. ``workflow_trigger(owner_id, workflow_id)`` runs a workflow through the
         # workflow engine (raising ApprovalRequired when it has write steps); ``assistant_service`` supplies reminders.
         self.workflow_trigger: Callable[[UUID, UUID], Any] | None = None
+        # v6.3: set by the application; builds the daily briefing for a "daily_briefing" job.
+        self.briefing_builder: Callable[[UUID], Any] | None = None
         self.assistant_service: Any = None
         self.quiet_hours: tuple[clock_time, clock_time] | None = None
         self.utc_offset_minutes = 0
@@ -258,6 +260,15 @@ class SchedulerService:
                 )
             elif job.action_type == "workflow":
                 output = self._run_workflow_job(owner_id, job)
+            elif job.action_type == "daily_briefing":
+                if self.briefing_builder is None:
+                    raise RuntimeError("The assistant is not connected; no briefing was created.")
+                briefing = self.briefing_builder(owner_id)
+                notification = self.dispatch_notification(owner_id, NotificationCreateRequest(
+                    category="briefing", title=f"Daily briefing for {briefing.day.isoformat()}",
+                    message=briefing.summary, priority="normal"))
+                output = {"action": "daily_briefing", "day": briefing.day.isoformat(),
+                          "notified": notification is not None, "conflicts": len(briefing.conflicts_next_7_days)}
             elif job.action_type == "health_check":
                 if self.health_probe is None:
                     raise RuntimeError("No status source is connected; the health check could not run.")
@@ -429,7 +440,7 @@ class SchedulerService:
         held = self.in_quiet_hours(now) and req.priority != "urgent"
         if held and self.store.held_notification_exists(owner_id, req.category, req.title):
             return None  # the same notification is already waiting for the end of quiet hours
-        if req.category != "reminder":  # reminders were asked for: never dropped
+        if req.category not in ("reminder", "briefing"):  # reminders and briefings were asked for: never dropped
             allowed, reason = self.throttler.should_allow(
                 owner_id=owner_id,
                 category=req.category,

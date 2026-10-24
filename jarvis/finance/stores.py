@@ -101,7 +101,7 @@ class MemoryFinanceStore(FinanceStore):
     ) -> tuple[list[FinancialAccount], int]:
         with self._lock:
             matching = [a for a in self._accounts.values() if a.owner_id == owner_id]
-            matching.sort(key=lambda a: a.created_at, reverse=True)
+            matching.sort(key=lambda a: (a.created_at, a.id), reverse=True)
             total = len(matching)
             return matching[offset : offset + limit], total
 
@@ -158,7 +158,8 @@ class MemoryFinanceStore(FinanceStore):
                 t for t in self._transactions.values()
                 if t.owner_id == owner_id and (account_id is None or t.account_id == account_id)
             ]
-            matching.sort(key=lambda t: t.transaction_date, reverse=True)
+            # Unique tiebreaker so bounded reads are deterministic (matches PostgreSQL ordering).
+            matching.sort(key=lambda t: (t.transaction_date, t.id), reverse=True)
             total = len(matching)
             return matching[offset : offset + limit], total
 
@@ -294,7 +295,7 @@ class PostgresFinanceStore(FinanceStore):
                    metadata, created_at, updated_at
             FROM jarvis_app.financial_accounts
             WHERE owner_id = %s
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT %s OFFSET %s;
         """
         with self._get_connection() as conn:
@@ -404,7 +405,7 @@ class PostgresFinanceStore(FinanceStore):
                    transaction_date, created_at
             FROM jarvis_app.financial_transactions
             WHERE owner_id = %s {filter_acc}
-            ORDER BY transaction_date DESC
+            ORDER BY transaction_date DESC, id DESC
             LIMIT %s OFFSET %s;
         """
         with self._get_connection() as conn:

@@ -46,7 +46,7 @@ def test_migrations_are_append_only_and_uniquely_numbered():
     ids = [migration_id for migration_id, *_ in runner._migration_files(runner.MIGRATIONS_DIR)]
     numbers = [int(re.match(r"^(\d{4})_", migration_id).group(1)) for migration_id in ids]
     assert len(numbers) == len(set(numbers)) and numbers == sorted(numbers)
-    assert ids[-1] == "0066_improvement_persistence"  # the newest v4.1-v5.0 migration
+    assert numbers[-1] >= 66  # 0066 was the newest v5.0 migration; later versions only add after it
     for migration in runner.MIGRATIONS_DIR.glob("006*.sql"):
         text = migration.read_text(encoding="utf-8").upper()
         assert "DROP TABLE" not in text and "TRUNCATE" not in text and "DELETE FROM" not in text, migration.name

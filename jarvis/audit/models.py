@@ -18,9 +18,10 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 
 # "intelligence" (v5.x hardening, migration 0058); "orchestration" (v4.0 capstone & v3.8 workflows, migration 0059);
 # one category per v3.x subsystem (v4.2, migration 0060).
-# "integration" (v4.8, migration 0065).
+# "integration" (v4.8, migration 0065); "tutor" (v6.5, migration 0068).
 AuditCategory = Literal["tool", "browser", "approval", "intelligence", "orchestration", "assistant", "workflow",
-                        "knowledge", "research", "scheduler", "health", "finance", "improvement", "integration"]
+                        "knowledge", "research", "scheduler", "health", "finance", "improvement", "integration",
+                        "tutor"]
 ApprovalState = Literal["pending", "approved", "rejected", "expired"]
 # v4.3 (migration 0062): enforced categories, whose approved action runs once.
 # v4.4 (migration 0063): workflow runs with write steps.

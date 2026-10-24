@@ -12,6 +12,7 @@ from starlette.concurrency import run_in_threadpool
 from jarvis.api.dependencies import authenticated_owner, enforce_capability
 from jarvis.finance.models import (
     AccountCreateRequest,
+    FinanceForecast,
     FinancialAccount,
     FinancialAccountPage,
     FinancialAnalyticsReport,
@@ -217,3 +218,20 @@ async def get_analytics_report(
     owner = _owner(owner_id)
     enforce_capability(request, owner, Capability.FINANCE_READ)
     return await run_in_threadpool(_service(request).get_analytics_report, owner)
+
+
+# ============================================================= Forecasts (v6.6, analysis only)
+
+@router.get("/forecast", response_model=FinanceForecast, responses=_ERRORS)
+async def get_forecast(
+    request: Request,
+    horizon: int = Query(default=3, ge=1, le=12),
+    min_train: int = Query(default=6, ge=3, le=24),
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> FinanceForecast:
+    """Backtested monthly cash-flow forecast with uncertainty. Analysis only; never executes anything."""
+    owner = _owner(owner_id)
+    enforce_capability(request, owner, Capability.FINANCE_READ)
+    return await run_in_threadpool(
+        _service(request).get_forecast, owner, horizon=horizon, min_train=min_train
+    )
