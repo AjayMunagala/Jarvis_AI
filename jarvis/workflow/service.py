@@ -76,10 +76,10 @@ class WorkflowService:
             try:
                 self.audit_service.record(
                     owner_id=owner_id,
-                    category="tool",
+                    category="workflow",
                     event_type=event_type,
-                    decision="allow",
-                    status="success",
+                    decision="allowed",
+                    status="succeeded",
                     subject=subject[:200],
                     details=details,
                 )

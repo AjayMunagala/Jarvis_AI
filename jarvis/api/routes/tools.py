@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from starlette.concurrency import run_in_threadpool
 
 from jarvis.api.dependencies import authenticated_owner, enforce_capability
+from jarvis.core.correlation import get_correlation_id
 from jarvis.models.schemas import ErrorResponse
 from jarvis.security.policy import Capability
 from jarvis.tools.handlers import ToolContext, build_tool_context
@@ -61,7 +62,7 @@ async def call_tool(body: ToolCallRequest, request: Request,
     runtime = _runtime(request)
     return await run_in_threadpool(
         runtime.invoke, owner, body.tool_id, body.arguments, _context(request, owner),
-        correlation_id=request.headers.get("x-request-id"), policy=request.app.state.authorization_policy,
+        correlation_id=get_correlation_id(), policy=request.app.state.authorization_policy,
     )
 
 

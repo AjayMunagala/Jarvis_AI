@@ -297,7 +297,8 @@ def test_assistant_service_audit_emission():
     entries = audit_store.recent(OWNER, limit=10)
     assert len(entries) == 1
     assert entries[0].event_type == "task.create"
-    assert entries[0].category == "tool"
+    assert entries[0].category == "assistant"  # v4.2: per-subsystem audit category (was "tool")
+    assert (entries[0].decision, entries[0].status) == ("allowed", "succeeded")
     assert f"assistant:task:{task.id}" in entries[0].subject
 
     # Update task emits audit

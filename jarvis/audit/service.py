@@ -18,6 +18,7 @@ from uuid import UUID
 
 from jarvis.audit.models import ActivityPage, ApprovalPage, ApprovalProposal, ApprovalRequest, AuditRecord
 from jarvis.audit.stores import MemoryApprovalStore, MemoryAuditStore, StorageError
+from jarvis.core.correlation import get_correlation_id
 from jarvis.repo.secret_redactor import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ class AuditService:
                correlation_id: str | None = None, details: dict | None = None,
                occurred_at: str | None = None, event_id: str | None = None) -> AuditRecord:
         clean = {str(key)[:60]: _clean(value) for key, value in list((details or {}).items())[:12]}
+        correlation_id = correlation_id or get_correlation_id()  # v4.2: the request's ID when not given
         record = AuditRecord(
             event_id=event_id or "AE-" + secrets.token_hex(8), occurred_at=occurred_at or _iso(now_utc()),
             owner_id=owner_id, category=category, event_type=event_type[:80], decision=str(decision)[:40],

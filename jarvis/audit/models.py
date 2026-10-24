@@ -11,8 +11,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 
-# "intelligence" (v5.x hardening, migration 0058); "orchestration" (v4.0 capstone & v3.8 workflows, migration 0059).
-AuditCategory = Literal["tool", "browser", "approval", "intelligence", "orchestration"]
+# "intelligence" (v5.x hardening, migration 0058); "orchestration" (v4.0 capstone & v3.8 workflows, migration 0059);
+# one category per v3.x subsystem (v4.2, migration 0060).
+AuditCategory = Literal["tool", "browser", "approval", "intelligence", "orchestration", "assistant", "workflow",
+                        "knowledge", "research", "scheduler", "health", "finance", "improvement"]
 ApprovalState = Literal["pending", "approved", "rejected", "expired"]
 ApprovalCategory = Literal["tool", "browser"]
 RiskLevel = Literal["low", "medium", "high", "critical", "consequential"]
