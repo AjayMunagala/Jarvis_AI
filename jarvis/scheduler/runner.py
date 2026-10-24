@@ -22,6 +22,7 @@ class SchedulerRunner:
         self.interval_seconds = interval_seconds
         self.ticks = 0
         self.failed_ticks = 0
+        self.consecutive_failures = 0
         self.last_summary: dict[str, int] | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -45,9 +46,11 @@ class SchedulerRunner:
     def tick(self) -> dict[str, int] | None:
         try:
             self.last_summary = self.service.run_due(self.owner_id)
+            self.consecutive_failures = 0
             return self.last_summary
         except Exception as exc:  # noqa: BLE001 - one failed tick must not stop the runner
             self.failed_ticks += 1
+            self.consecutive_failures += 1
             logger.warning("Scheduler tick failed: %s", type(exc).__name__)
             return None
         finally:

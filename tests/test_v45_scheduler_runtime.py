@@ -230,3 +230,162 @@ def test_runner_is_off_by_default_and_runs_when_enabled():
         assert running is enabled
         assert scheduler["checks"][0] == f"background runner {'running' if enabled else 'off'}"
         assert not app.state.scheduler_runner.running  # stopped on shutdown
+
+
+# ------------------------------------------------------------- review fixes
+
+from jarvis.scheduler.models import JobUpdateRequest  # noqa: E402
+
+
+def _slow_job(service, release, started):
+    original = service.health_probe
+
+    def probe():
+        started.set()
+        release.wait(5)
+        return original()
+
+    service.health_probe = probe
+
+
+@pytest.mark.parametrize("change", ["delete", "disable", "rename"])
+def test_a_job_changed_during_its_run_keeps_the_change(change):
+    service = make_service()
+    job = service.create_job(OWNER, JobCreateRequest(name="hc", schedule_type="interval", schedule_expr="3600",
+                                                     action_type="health_check"))
+    make_due(service, job, NOON - timedelta(minutes=1))
+    release, started = threading.Event(), threading.Event()
+    _slow_job(service, release, started)
+    worker = threading.Thread(target=service.run_due, args=(OWNER,), kwargs={"now": NOON})
+    worker.start()
+    assert started.wait(5)
+    if change == "delete":
+        service.delete_job(OWNER, job.id)
+    elif change == "disable":
+        service.update_job(OWNER, job.id, JobUpdateRequest(enabled=False))
+    else:
+        service.update_job(OWNER, job.id, JobUpdateRequest(name="renamed"))
+    release.set()
+    worker.join()
+    stored = service.get_job(OWNER, job.id)
+    if change == "delete":
+        assert stored is None  # never re-created
+    elif change == "disable":
+        assert stored.enabled is False and stored.next_run_at is None
+    else:
+        assert stored.name == "renamed"  # the edit made during the run is kept
+
+
+def test_a_slow_run_never_rewinds_the_schedule_for_another_worker():
+    service = make_service()
+    job = service.create_job(OWNER, JobCreateRequest(name="hc", schedule_type="interval", schedule_expr="60",
+                                                     action_type="health_check"))
+    make_due(service, job, NOON - timedelta(seconds=1))
+    release, started = threading.Event(), threading.Event()
+    _slow_job(service, release, started)
+    slow = threading.Thread(target=service.run_due, args=(OWNER,), kwargs={"now": NOON})
+    slow.start()
+    assert started.wait(5)
+    other = make_service()
+    other.store = service.store
+    later = NOON + timedelta(seconds=61)
+    assert other.run_due(OWNER, now=later)["jobs"] == 1  # the next due run, claimed by another worker
+    release.set()
+    slow.join()
+    assert service.get_job(OWNER, job.id).next_run_at == later + timedelta(seconds=60)  # not rewound
+
+
+def test_a_full_scheduler_leaves_due_jobs_due():
+    service = make_service()
+    job = service.create_job(OWNER, JobCreateRequest(name="once", schedule_type="once", schedule_expr="60",
+                                                     action_type="health_check"))
+    make_due(service, job, NOON - timedelta(seconds=1))
+    service._running_jobs.update({UUID(int=1), UUID(int=2)})  # two manual runs in flight
+    assert service.run_due(OWNER, now=NOON)["jobs"] == 0
+    stored = service.get_job(OWNER, job.id)
+    assert stored.enabled and stored.next_run_at == NOON - timedelta(seconds=1)  # still due, not lost
+    service._running_jobs.clear()
+    assert service.run_due(OWNER, now=NOON)["jobs"] == 1
+
+
+def test_jobs_left_running_by_a_crash_are_marked_failed_at_startup():
+    store = MemorySchedulerStore()
+    first = SchedulerService(store)
+    job = first.create_job(OWNER, JobCreateRequest(name="hc", schedule_type="interval", schedule_expr="60",
+                                                   action_type="health_check"))
+    store.save_job(job.model_copy(update={"last_status": "running",
+                                          "last_run_at": datetime.now(timezone.utc) - timedelta(hours=1)}))
+    assert SchedulerService(store).recover_stale_runs(OWNER) == 1
+    assert store.get_job(OWNER, job.id).last_status == "failure"
+
+
+def test_quiet_hours_still_throttle_collapse_and_hide_held_items():
+    service = make_service(quiet_hours=(clock_time(0, 0), clock_time(23, 59)))  # quiet almost all day
+    night = datetime(2026, 10, 24, 23, 0, tzinfo=timezone.utc)
+    for minute in range(20):
+        service.dispatch_notification(OWNER, NotificationCreateRequest(
+            category="approval", title="Workflow job needs your approval", message="m", priority="high"),
+            now=night + timedelta(minutes=minute))
+    held = [item for item in notifications(service) if item.category == "approval"]
+    assert len(held) == 1 and held[0].delivered_at is None
+    if service.in_quiet_hours(datetime.now(timezone.utc)):
+        assert service.list_notifications(OWNER).total == 0  # held items are not shown yet
+
+
+def test_held_notifications_are_released_on_listing_without_the_runner():
+    service = make_service(quiet_hours=(clock_time(22, 0), clock_time(7, 0)))
+    night = datetime(2026, 10, 24, 23, 0, tzinfo=timezone.utc)
+    service.dispatch_notification(OWNER, NotificationCreateRequest(category="insight", title="Tip", message="m"),
+                                  now=night)
+    service.quiet_hours = None  # quiet hours are over
+    assert service.list_notifications(OWNER).total == 1
+
+
+def test_a_reminder_is_not_lost_when_storing_its_notification_fails():
+    assistant = AssistantService(MemoryAssistantStore())
+    service = make_service(assistant_service=assistant)
+    reminder = assistant.create_reminder(OWNER, ReminderCreateRequest(title="Pay rent",
+                                                                      remind_at=NOON - timedelta(minutes=1)))
+    original = service.store.insert_notification_if_absent
+
+    def failing(notification):
+        raise RuntimeError("db down")
+
+    service.store.insert_notification_if_absent = failing
+    assert service.run_due(OWNER, now=NOON)["reminders"] == 0
+    assert assistant.get_reminder(OWNER, reminder.id).status == ReminderStatus.PENDING  # still pending
+    service.store.insert_notification_if_absent = original
+    assert service.run_due(OWNER, now=NOON)["reminders"] == 1
+
+
+def test_a_recurring_write_workflow_job_is_paused_instead_of_asking_every_tick():
+    assistant = AssistantService(MemoryAssistantStore())
+    workflows = WorkflowService(MemoryWorkflowStore(), assistant_service=assistant)
+    workflows.approval_service = memory_approvals()
+    service = make_service(workflow_trigger=lambda owner, workflow_id: workflows.trigger_run(owner, workflow_id, {}))
+    writes = workflows.create_definition(OWNER, WorkflowDefinitionCreateRequest(name="w", dag_spec=DAGSpec(
+        steps=[{"step_id": "s", "name": "s", "step_type": "assistant", "action": "tasks.create"}])))
+    job = service.create_job(OWNER, JobCreateRequest(name="w", schedule_type="interval", schedule_expr="60",
+                                                     action_type="workflow", payload={"workflow_id": str(writes.id)}))
+    make_due(service, job, NOON - timedelta(seconds=1))
+    for minute in range(5):
+        service.run_due(OWNER, now=NOON + timedelta(minutes=minute))
+    stored = service.get_job(OWNER, job.id)
+    assert stored.enabled is False and stored.last_status == "failure"
+    assert len([item for item in notifications(service) if item.category == "approval"]) == 1
+    assert assistant.list_tasks(OWNER).total == 0
+
+
+def test_cron_star_step_does_not_restrict_the_day_and_once_overflow_is_refused():
+    assert CronExpression("0 9 */1 * 1").next_after(NOON) == datetime(2026, 10, 26, 9, 0, tzinfo=timezone.utc)
+    for expr in ("inf", "nan", "1e20"):
+        with pytest.raises(ScheduleError):
+            validate_schedule("once", expr, now=NOON)
+
+
+def test_a_job_with_an_old_invalid_schedule_can_still_be_disabled():
+    service = make_service()
+    job = service.create_job(OWNER, JobCreateRequest(name="old", schedule_type="interval", schedule_expr="60",
+                                                     action_type="health_check"))
+    service.store.save_job(job.model_copy(update={"schedule_expr": "10"}))  # stored before v4.5's rules
+    assert service.update_job(OWNER, job.id, JobUpdateRequest(enabled=False)).enabled is False

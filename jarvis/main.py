@@ -1,6 +1,7 @@
 """FastAPI application factory and lifecycle."""
 
 import logging
+import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -108,12 +109,19 @@ def create_app(
             operation_timeout_seconds=resolved_settings.persistence_operation_timeout_seconds,
         )
 
+    def _recover_scheduler() -> None:
+        try:  # v4.5: jobs left "running" by a previous process are marked failed
+            app.state.scheduler_service.recover_stale_runs(resolved_settings.owner_id)
+        except Exception as exc:  # noqa: BLE001 - startup continues; the jobs stay visible as they are
+            logger.warning("Interrupted scheduler jobs could not be recovered", extra={"error_type": type(exc).__name__})
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         logger.info("JARVIS starting", extra={"environment": resolved_settings.environment})
         # v4.4: runs left "running" by a previous process are marked failed, never resumed silently. This runs in
         # the background so an unreachable database cannot delay startup.
         app.state.workflow_service.start_recovery(resolved_settings.owner_id)
+        threading.Thread(target=_recover_scheduler, name="jarvis-scheduler-recovery", daemon=True).start()
         if resolved_settings.scheduler_runner_enabled:
             app.state.scheduler_runner.start()
         yield
@@ -251,7 +259,9 @@ def create_app(
     # runner only starts when JARVIS_SCHEDULER_RUNNER_ENABLED=true.
     scheduler = app.state.scheduler_service
     scheduler.assistant_service = app.state.assistant_service
-    scheduler.workflow_trigger = lambda owner, workflow_id: app.state.workflow_service.trigger_run(owner, workflow_id, {})
+    # Scheduled workflows start in the background, so a long run never delays reminders (v4.5 review finding 10).
+    scheduler.workflow_trigger = lambda owner, workflow_id: app.state.workflow_service.trigger_run(
+        owner, workflow_id, {}, None, False)
     scheduler.quiet_hours = parse_quiet_hours(resolved_settings.scheduler_quiet_hours)
     scheduler.utc_offset_minutes = resolved_settings.scheduler_utc_offset_minutes
     app.state.scheduler_runner = SchedulerRunner(scheduler, resolved_settings.owner_id,

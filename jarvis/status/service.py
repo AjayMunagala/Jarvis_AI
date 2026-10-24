@@ -112,13 +112,15 @@ class StatusService:
         running = bool(getattr(runner, "running", False))
         checks = (f"background runner {'running' if running else 'off'}",)
         if running:
-            checks += (f"{runner.ticks} tick(s), {runner.failed_ticks} failed",)
+            checks += (f"{runner.ticks} tick(s), {runner.failed_ticks} failed, "
+                       f"{runner.consecutive_failures} failed in a row",)
         limitations = ("Notifications appear in JARVIS only; nothing is sent to other devices.",)
         if not running:
             limitations = ("The background runner is off (JARVIS_SCHEDULER_RUNNER_ENABLED=false): reminders and jobs "
                            "run only when triggered manually.",) + limitations
         return SubsystemReport(key="scheduler", name="Scheduler and notifications (v3.5/v4.5)",
-                               state="operational" if running and not getattr(runner, "failed_ticks", 0) else "limited",
+                               state="operational" if running and not getattr(runner, "consecutive_failures", 0)
+                               else "limited",
                                storage=_storage(getattr(self.state, "scheduler_service", None)), checks=checks,
                                limitations=limitations)
 

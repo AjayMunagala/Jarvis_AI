@@ -48,6 +48,7 @@ class SchedulerStore(ABC):
         unread_only: bool = False,
         limit: int = 50,
         offset: int = 0,
+        include_held: bool = True,
     ) -> tuple[list[Notification], int]:
         raise NotImplementedError
 
@@ -61,6 +62,28 @@ class SchedulerStore(ABC):
     def claim_job(self, owner_id: UUID, job_id: UUID, *, expected_next_run: datetime,
                   next_run: datetime | None, enabled: bool, now: datetime) -> bool:
         """Atomically move a due job to its next run time; only one caller can claim a given due run."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def record_run(self, owner_id: UUID, job_id: UUID, *, expected_next_run: datetime | None,
+                   next_run: datetime | None, enabled: bool, last_status: str, last_run_at: datetime,
+                   now: datetime) -> bool:
+        """Record a run's state only if the job still exists and next_run_at is unchanged (compare-and-set).
+
+        Never re-creates a deleted job and never reverts a concurrent edit (finding 1 of the v4.5 review)."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def fail_stale_running(self, owner_id: UUID, before: datetime, now: datetime) -> int:
+        """Mark jobs left 'running' by a previous process as failed."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def insert_notification_if_absent(self, notification: Notification) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def held_notification_exists(self, owner_id: UUID, category: str, title: str) -> bool:
         raise NotImplementedError
 
     @abstractmethod
@@ -130,6 +153,36 @@ class MemorySchedulerStore(SchedulerStore):
                 "updated_at": now})
             return True
 
+    def record_run(self, owner_id, job_id, *, expected_next_run, next_run, enabled, last_status, last_run_at, now):
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.owner_id != owner_id or job.next_run_at != expected_next_run:
+                return False
+            self._jobs[job_id] = job.model_copy(update={
+                "next_run_at": next_run, "enabled": enabled, "last_status": last_status, "last_run_at": last_run_at,
+                "updated_at": now})
+            return True
+
+    def fail_stale_running(self, owner_id, before, now):
+        with self._lock:
+            stale = [job for job in self._jobs.values() if job.owner_id == owner_id and job.last_status == "running"
+                     and (job.last_run_at is None or job.last_run_at < before)]
+            for job in stale:
+                self._jobs[job.id] = job.model_copy(update={"last_status": "failure", "updated_at": now})
+        return len(stale)
+
+    def insert_notification_if_absent(self, notification):
+        with self._lock:
+            if notification.id in self._notifications:
+                return False
+            self._notifications[notification.id] = notification
+            return True
+
+    def held_notification_exists(self, owner_id, category, title):
+        with self._lock:
+            return any(n.owner_id == owner_id and n.category == category and n.title == title
+                       and n.delivered_at is None for n in self._notifications.values())
+
     def latest_delivered_at(self, owner_id, category):
         with self._lock:
             times = [n.delivered_at for n in self._notifications.values()
@@ -160,11 +213,13 @@ class MemorySchedulerStore(SchedulerStore):
         unread_only: bool = False,
         limit: int = 50,
         offset: int = 0,
+        include_held: bool = True,
     ) -> tuple[list[Notification], int]:
         with self._lock:
             matching = [
                 n for n in self._notifications.values()
                 if n.owner_id == owner_id and (not unread_only or not n.read)
+                and (include_held or n.delivered_at is not None)
             ]
             matching.sort(key=lambda n: n.created_at, reverse=True)
             total = len(matching)
@@ -203,9 +258,11 @@ class PostgresSchedulerStore(SchedulerStore):
 
     def _get_connection(self) -> Any:
         import psycopg
+        # v4.5: a statement timeout, so a hung query cannot block the background runner indefinitely.
         return psycopg.connect(
             self.db_url,
             connect_timeout=int(self.connect_timeout_seconds),
+            options=f"-c statement_timeout={int(self.operation_timeout_seconds * 1000)}",
         )
 
     def save_job(self, job: ScheduledJob) -> None:
@@ -373,6 +430,56 @@ class PostgresSchedulerStore(SchedulerStore):
             conn.commit()
             return claimed
 
+    def record_run(self, owner_id, job_id, *, expected_next_run, next_run, enabled, last_status, last_run_at, now):
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE jarvis_app.scheduled_jobs
+                       SET next_run_at = %s, enabled = %s, last_status = %s, last_run_at = %s, updated_at = %s
+                       WHERE id = %s AND owner_id = %s AND next_run_at IS NOT DISTINCT FROM %s""",
+                    (next_run, enabled, last_status, last_run_at, now, job_id, owner_id, expected_next_run),
+                )
+                changed = cur.rowcount == 1
+            conn.commit()
+            return changed
+
+    def fail_stale_running(self, owner_id, before, now):
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE jarvis_app.scheduled_jobs SET last_status = 'failure', updated_at = %s
+                       WHERE owner_id = %s AND last_status = 'running' AND (last_run_at IS NULL OR last_run_at < %s)""",
+                    (now, owner_id, before),
+                )
+                count = cur.rowcount
+            conn.commit()
+            return count
+
+    def insert_notification_if_absent(self, notification):
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO jarvis_app.notifications
+                       (id, owner_id, category, title, message, priority, read, delivered_at, created_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING""",
+                    (notification.id, notification.owner_id, notification.category, notification.title,
+                     notification.message, notification.priority, notification.read, notification.delivered_at,
+                     notification.created_at),
+                )
+                inserted = cur.rowcount == 1
+            conn.commit()
+            return inserted
+
+    def held_notification_exists(self, owner_id, category, title):
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT 1 FROM jarvis_app.notifications
+                       WHERE owner_id = %s AND category = %s AND title = %s AND delivered_at IS NULL LIMIT 1""",
+                    (owner_id, category, title),
+                )
+                return cur.fetchone() is not None
+
     def latest_delivered_at(self, owner_id, category):
         with self._get_connection() as conn:
             with conn.cursor() as cur:
@@ -451,8 +558,9 @@ class PostgresSchedulerStore(SchedulerStore):
         unread_only: bool = False,
         limit: int = 50,
         offset: int = 0,
+        include_held: bool = True,
     ) -> tuple[list[Notification], int]:
-        filter_clause = "AND read = false" if unread_only else ""
+        filter_clause = ("AND read = false " if unread_only else "") + ("" if include_held else "AND delivered_at IS NOT NULL")
         count_q = f"SELECT COUNT(*) FROM jarvis_app.notifications WHERE owner_id = %s {filter_clause};"
         query = f"""
             SELECT id, owner_id, category, title, message, priority, read, delivered_at, created_at

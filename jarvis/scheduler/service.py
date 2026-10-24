@@ -20,7 +20,7 @@ from datetime import datetime, time as clock_time, timedelta, timezone
 import logging
 import threading
 from typing import Any, Callable
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from jarvis.scheduler.cron import ScheduleError, validate_schedule
 
@@ -68,6 +68,10 @@ class MaxConcurrencyError(RuntimeError):
     """Raised when the maximum number of concurrent running jobs is exceeded."""
 
 
+class _PauseJob(RuntimeError):
+    """The job cannot run unattended (for example it needs a single-use approval); it is disabled."""
+
+
 class SchedulerService:
     def __init__(
         self,
@@ -88,6 +92,7 @@ class SchedulerService:
         self.quiet_hours: tuple[clock_time, clock_time] | None = None
         self.utc_offset_minutes = 0
         self.max_jobs_per_tick = 5
+        self._booted_at = datetime.now(timezone.utc)
         self._running_jobs_lock = threading.Lock()
         self._running_jobs: set[UUID] = set()
 
@@ -162,8 +167,10 @@ class SchedulerService:
         schedule_changed = (schedule_type != existing.schedule_type) or (schedule_expr != existing.schedule_expr) or (enabled != existing.enabled)
         next_run = existing.next_run_at
         if schedule_changed:
-            first_run = validate_schedule(schedule_type, schedule_expr, now=now)  # ScheduleError -> HTTP 422
-            next_run = first_run if enabled else None
+            if enabled:  # disabling never needs a valid schedule, so older jobs can always be switched off
+                next_run = validate_schedule(schedule_type, schedule_expr, now=now)  # ScheduleError -> HTTP 422
+            else:
+                next_run = None
 
         updated = ScheduledJob(
             id=existing.id,
@@ -209,9 +216,11 @@ class SchedulerService:
 
     def _run_job(self, owner_id: UUID, job: ScheduledJob, *, trigger: str,
                  claimed: tuple[datetime | None, bool] | None = None) -> JobRunResult:
-        """Run one job. ``claimed`` is the (next_run_at, enabled) a scheduled claim already stored (v4.5)."""
+        """Run one job. ``claimed`` is the (next_run_at, enabled) a scheduled claim already stored (v4.5).
+
+        The job row is only ever changed with ``record_run`` (compare-and-set on next_run_at): a run never
+        re-creates a deleted job, re-enables a disabled one, or reverts an edit made while it ran."""
         job_id = job.id
-        claimed_next, claimed_enabled = claimed if claimed is not None else (job.next_run_at, job.enabled)
 
         # Concurrency check
         with self._running_jobs_lock:
@@ -225,25 +234,14 @@ class SchedulerService:
         status = "success"
         error_msg = None
         output: dict[str, Any] = {}
+        pause = False
+        guard = claimed[0] if claimed is not None else job.next_run_at
 
         try:
-            # Mark running
-            running_job = ScheduledJob(
-                id=job.id,
-                owner_id=job.owner_id,
-                name=job.name,
-                schedule_type=job.schedule_type,
-                schedule_expr=job.schedule_expr,
-                action_type=job.action_type,
-                payload=job.payload,
-                enabled=claimed_enabled,
-                next_run_at=claimed_next,
-                last_run_at=started_at,
-                last_status="running",
-                created_at=job.created_at,
-                updated_at=started_at,
-            )
-            self.store.save_job(running_job)
+            if claimed is None and not self.store.record_run(  # manual run: mark running (the claim already did)
+                    owner_id, job_id, expected_next_run=guard, next_run=guard, enabled=job.enabled,
+                    last_status="running", last_run_at=started_at, now=started_at):
+                raise RuntimeError("The job changed or was deleted before it could start; nothing was run.")
 
             # Execution simulation / dispatch
             if job.action_type == "reminder":
@@ -270,6 +268,8 @@ class SchedulerService:
             else:
                 output = {"action": "custom_job_completed", "payload": job.payload}
 
+        except _PauseJob as exc:
+            status, error_msg, pause = "failure", str(exc), True
         except Exception as exc:
             status = "failure"
             error_msg = str(exc)
@@ -281,7 +281,7 @@ class SchedulerService:
         completed_at = datetime.now(timezone.utc)
         if claimed is not None:
             # v4.5: the claim already advanced next_run_at; keep what it stored.
-            next_run, still_enabled = claimed_next, claimed_enabled
+            next_run, still_enabled = claimed
         else:
             # Advance next_run_at if recurring, else None
             next_run = (
@@ -290,29 +290,18 @@ class SchedulerService:
                 else None
             )
             still_enabled = job.enabled if job.schedule_type != "once" else False
-
-        final_job = ScheduledJob(
-            id=job.id,
-            owner_id=job.owner_id,
-            name=job.name,
-            schedule_type=job.schedule_type,
-            schedule_expr=job.schedule_expr,
-            action_type=job.action_type,
-            payload=job.payload,
-            enabled=still_enabled,
-            next_run_at=next_run,
-            last_run_at=started_at,
-            last_status=status,
-            created_at=job.created_at,
-            updated_at=completed_at,
-        )
-        self.store.save_job(final_job)
+        if pause:
+            next_run, still_enabled = None, False
+        recorded = self.store.record_run(owner_id, job_id, expected_next_run=guard, next_run=next_run,
+                                         enabled=still_enabled, last_status=status, last_run_at=started_at,
+                                         now=completed_at)
 
         self._audit(
             owner_id,
             "scheduler.job.execute",
             f"scheduler:job:{job.id}",
-            {"status": status, "duration_ms": (completed_at - started_at).total_seconds() * 1000, "trigger": trigger},
+            {"status": status, "duration_ms": (completed_at - started_at).total_seconds() * 1000, "trigger": trigger,
+             "paused": pause, "state_recorded": recorded},
         )
 
         return JobRunResult(
@@ -336,27 +325,36 @@ class SchedulerService:
         try:
             detail = self.workflow_trigger(owner_id, workflow_id)
         except ApprovalRequired as required:
+            # A single-use approval cannot cover a recurring unattended job, so the job is paused (disabled) and the
+            # owner is told once, instead of a new request and notification on every tick.
             approval_id = required.request.approval_id
             self.dispatch_notification(owner_id, NotificationCreateRequest(
-                category="approval", title=f"Workflow job '{job.name}' needs your approval",
-                message=f"Approve {approval_id}, then run the workflow with that approval ID. Nothing was executed.",
+                category="approval", title=f"Workflow job '{job.name}' is paused: it needs your approval",
+                message=f"The workflow writes data, so it cannot run unattended. Approve {approval_id} and run the "
+                        "workflow yourself with that approval ID. Nothing was executed.",
                 priority="normal"))
-            raise RuntimeError(f"Approval required ({approval_id}); nothing was executed.") from None
+            raise _PauseJob(f"Approval required ({approval_id}); the job was paused and nothing was executed.") from None
         status = getattr(getattr(detail, "run", None), "status", None)
         output = {"action": "workflow_run", "run_id": str(detail.run.id), "run_status": str(status)}
-        if str(status) != "completed":
+        if str(status) not in ("completed", "running"):  # "running": started in the background
             raise RuntimeError(f"Workflow run {detail.run.id} ended {status}: {detail.run.error_message}")
         return output
 
     # ========================================================= v4.5 background runtime
 
     def run_due(self, owner_id: UUID, now: datetime | None = None) -> dict[str, int]:
-        """One runner tick: deliver due reminders, run due jobs once each, release held notifications."""
+        """One runner tick: deliver due reminders, run due jobs once each, release held notifications.
+
+        Delivery is at most once: a run claimed by a process that then crashes is not retried; startup recovery
+        marks such a job as failed (``recover_stale_runs``)."""
         now = now or datetime.now(timezone.utc)
         summary = {"reminders": self.deliver_due_reminders(owner_id, now), "jobs": 0, "released": 0}
         for job in self.store.get_due_jobs(cutoff=now, limit=self.max_jobs_per_tick):
             if job.owner_id != owner_id or job.next_run_at is None:
                 continue
+            with self._running_jobs_lock:
+                if len(self._running_jobs) >= MAX_CONCURRENT_JOBS:
+                    break  # leave it due: it is claimed on a later tick instead of being lost (finding 2)
             # Missed runs collapse into one: the next run is computed from now, not from the missed time.
             next_run = (calculate_next_run(job.schedule_type, job.schedule_expr, base_time=now)
                         if job.schedule_type != "once" else None)
@@ -364,16 +362,32 @@ class SchedulerService:
             if not self.store.claim_job(owner_id, job.id, expected_next_run=job.next_run_at, next_run=next_run,
                                         enabled=enabled, now=now):
                 continue  # another worker claimed this due run
+            if job.schedule_type != "once" and next_run is None:
+                self._audit(owner_id, "scheduler.job.disabled_invalid_schedule", f"scheduler:job:{job.id}",
+                            {"schedule_type": job.schedule_type})
+            current = self.store.get_job(owner_id, job.id) or job  # the latest payload, not the pre-claim copy
             try:
-                self._run_job(owner_id, job, trigger="scheduled", claimed=(next_run, enabled))
+                self._run_job(owner_id, current, trigger="scheduled", claimed=(next_run, enabled))
             except MaxConcurrencyError:
+                self.store.record_run(owner_id, job.id, expected_next_run=next_run, next_run=next_run,
+                                      enabled=enabled, last_status="failure", last_run_at=now, now=now)
                 logger.warning("Scheduled job %s skipped: concurrency limit reached", job.id)
+                continue
             summary["jobs"] += 1
         if not self.in_quiet_hours(now):
             summary["released"] = self.store.release_held_notifications(owner_id, now)
         return summary
 
+    def recover_stale_runs(self, owner_id: UUID) -> int:
+        """Mark jobs left 'running' by a previous process as failed (v4.5 review finding 3)."""
+        count = self.store.fail_stale_running(owner_id, before=self._booted_at, now=datetime.now(timezone.utc))
+        if count:
+            self._audit(owner_id, "scheduler.job.recover", "scheduler:jobs", {"interrupted_jobs": count})
+        return count
+
     def deliver_due_reminders(self, owner_id: UUID, now: datetime) -> int:
+        """Deliver each due reminder once. The notification is stored first, under an ID derived from the
+        reminder, then the reminder is marked triggered; a failure leaves it pending for the next tick."""
         if self.assistant_service is None:
             return 0
         from jarvis.assistant.models import ReminderStatus
@@ -382,13 +396,20 @@ class SchedulerService:
         due, _ = self.assistant_service.store.list_reminders(owner_id, status=ReminderStatus.PENDING, due_before=now,
                                                              limit=50, offset=0)
         for reminder in due:
-            if self.assistant_service.store.trigger_reminder(owner_id, reminder.id, now) is None:
-                continue  # delivered by another worker
-            self.dispatch_notification(owner_id, NotificationCreateRequest(
-                category="reminder", title=reminder.title,
-                message=f"Reminder due at {reminder.remind_at.isoformat(timespec='minutes')}.", priority="normal"),
-                now=now)
-            delivered += 1
+            try:
+                held = self.in_quiet_hours(now)
+                notification = Notification(
+                    id=uuid5(NAMESPACE_URL, f"jarvis:reminder:{reminder.id}"), owner_id=owner_id, category="reminder",
+                    title=reminder.title, message=f"Reminder due at {reminder.remind_at.isoformat(timespec='minutes')}.",
+                    priority="normal", read=False, delivered_at=None if held else now, created_at=now)
+                self.store.insert_notification_if_absent(notification)
+                if self.assistant_service.store.trigger_reminder(owner_id, reminder.id, now) is None:
+                    continue  # delivered by another worker (same notification ID, so no duplicate)
+                self._audit(owner_id, "scheduler.reminder.deliver", f"assistant:reminder:{reminder.id}",
+                            {"held": held})
+                delivered += 1
+            except Exception as exc:  # noqa: BLE001 - one reminder must not stop the tick; it stays pending
+                logger.warning("Reminder %s could not be delivered: %s", reminder.id, type(exc).__name__)
         return delivered
 
     def in_quiet_hours(self, now: datetime) -> bool:
@@ -406,7 +427,9 @@ class SchedulerService:
         """Dispatches a notification, applying anti-fatigue throttling and quiet hours (v4.5)."""
         now = now or datetime.now(timezone.utc)
         held = self.in_quiet_hours(now) and req.priority != "urgent"
-        if req.category != "reminder" and not held:  # reminders were asked for: never dropped
+        if held and self.store.held_notification_exists(owner_id, req.category, req.title):
+            return None  # the same notification is already waiting for the end of quiet hours
+        if req.category != "reminder":  # reminders were asked for: never dropped
             allowed, reason = self.throttler.should_allow(
                 owner_id=owner_id,
                 category=req.category,
@@ -459,8 +482,11 @@ class SchedulerService:
     ) -> NotificationPage:
         limit = max(1, min(limit, 200))
         offset = max(0, offset)
+        now = datetime.now(timezone.utc)
+        if not self.in_quiet_hours(now):  # held notifications appear once quiet hours end, even without the runner
+            self.store.release_held_notifications(owner_id, now)
         items, total = self.store.list_notifications(
-            owner_id, unread_only=unread_only, limit=limit, offset=offset
+            owner_id, unread_only=unread_only, limit=limit, offset=offset, include_held=False
         )
         return NotificationPage(items=items, total=total)
 

@@ -60,8 +60,9 @@ class CronExpression:
         parsed = [_parse_field(part, name, low, high) for part, (name, low, high) in zip(parts, _FIELDS)]
         self.minutes, self.hours, self.days, self.months, weekdays = parsed
         self.weekdays = {0 if day == 7 else day for day in weekdays}
-        self.day_restricted = parts[2] != "*"
-        self.weekday_restricted = parts[4] != "*"
+        # As in Vixie cron, a field that starts with "*" (for example "*/2") does not restrict the day.
+        self.day_restricted = not parts[2].startswith("*")
+        self.weekday_restricted = not parts[4].startswith("*")
 
     def _day_matches(self, moment: datetime) -> bool:
         cron_weekday = (moment.weekday() + 1) % 7  # Python: Monday = 0; cron: Sunday = 0
@@ -109,8 +110,8 @@ def validate_schedule(schedule_type: str, schedule_expr: str, *, now: datetime |
             except ValueError as exc:
                 raise ScheduleError("A one-time schedule must be seconds from now or an ISO 8601 date-time.") from exc
             return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
-        if seconds < 0:
-            raise ScheduleError("A one-time delay cannot be negative.")
+        if not 0 <= seconds <= 366 * 86_400:  # also rejects nan and inf
+            raise ScheduleError("A one-time delay must be between 0 seconds and 366 days.")
         return now + timedelta(seconds=seconds)
     if schedule_type == "cron":
         return CronExpression(expr).next_after(now)
