@@ -679,3 +679,10 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - **Secrets:** they are `env:JARVIS_INTEGRATION_*` references only, and their values are never stored or shown.
 - **Migration:** 0065.
 - **Details:** `docs/V41_V50_PROGRAM.md`.
+
+## v4.9 — Controlled evolution hardening (accepted by the project lead on 2026-10-24)
+
+- **Durability:** proposals and snapshots are durable and owner-scoped, and prompt changes persist (migration 0066).
+- **Evaluation:** every proposal is evaluated against the current content with offline static checks, and a regression cannot be approved. A rule-line change needs `acknowledge_rule_changes`.
+- **Safety:** conditional writes protect against concurrent applies, and restore is refused after a later change.
+- **Details:** `docs/V41_V50_PROGRAM.md`.

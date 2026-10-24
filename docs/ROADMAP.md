@@ -322,3 +322,6 @@ The scope was derived from the repository, because no earlier document defined t
 - **v4.8 Integration and device readiness: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
   - Adapter framework with a simulated lamp only (no real device control); enrollments pending -> active -> revoked.
   - Activation and state-changing actions need approval; revocation is immediate and final; secrets are references only (migration 0065).
+- **v4.9 Controlled evolution hardening: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
+  - Durable, owner-scoped proposals and snapshots (migration 0066); every proposal is evaluated against the current content.
+  - Regressions cannot be approved; rule-line changes need an explicit acknowledgement; restores never undo later changes.

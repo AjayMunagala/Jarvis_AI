@@ -66,7 +66,8 @@ Results are always labelled as real, mock or unavailable.
 | v4.6 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review found three blocking defects in research indexing (fence lost on chunking, filename breaking the fence, a chunker that crawled), since fixed with eight other findings | Python 1182 passed; live PostgreSQL 63 passed; frontend unchanged | branch head at push |
 | v4.7 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review (no blocking issues; 7 findings, all fixed) | Python 1194 passed; live PostgreSQL 63 passed; Vitest 132; E2E 11 | branch head at push |
 | v4.8 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review (no blocking issues; 2 medium and 4 low findings, all fixed) | Python 1204 passed; live PostgreSQL 64 passed | branch head at push |
-| v4.9–v5.0 | NOT STARTED | — | — |
+| v4.9 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review (no blocking issues; 5 medium and 4 low findings, all fixed) | Python 1226 passed; live PostgreSQL 65 passed | branch head at push |
+| v5.0 | IN PROGRESS | — | — |
 
 ---
 
@@ -648,4 +649,67 @@ It also found four low issues, and every finding was fixed with tests before acc
 These were run on the v4.8 commit in a separate clean checkout.
 
 **Known limit:** the revoke/action lock is per process. A multi-process deployment would also need a database row lock.
+
+## v4.9 — Controlled evolution hardening
+
+### Why it was needed
+- **Lost on restart:** improvement proposals, restore snapshots and changes to the built-in prompts lived in memory only.
+- **Snapshots were not owner-scoped.**
+- **Nothing was evaluated before acceptance:** the "benchmarks" were trivial checks that nothing called before approval, with no regression detection.
+
+### Changes
+1. **Durable, owner-scoped state** (migration 0066).
+   - Proposals, with their evaluation, are stored durably.
+   - Restore snapshots can be read only by their owner.
+   - Changes to virtual prompt targets are stored. That table is deliberately global, like file-backed prompts.
+2. **Every proposal is evaluated against the content it would replace.** These are offline static checks: no model is run, and meaning or negation is not checked.
+   - **Override phrases:** a fixed list, matched after Unicode normalisation (NFKC, case folding, invisible characters removed, whitespace collapsed) and compared by count.
+   - **Rule lines:** every rule line of the current content must remain as a whole line.
+   - **Two trivial size checks.**
+   - A score lower than the current content's is a *regression*. A check that already failed before is only a warning, so no target is ever frozen.
+3. **Approval.**
+   - A regressing proposal is refused (422) before any approval request is created, and it is evaluated again at decision time.
+   - A change that only rewords or removes rule lines can be applied with an explicit `acknowledge_rule_changes`. The approval request then names the changed lines.
+   - Override phrases can never be acknowledged.
+4. **Consistency.**
+   - Applying and restoring use conditional writes (compare-and-set on the content and on the proposal status), so two workers can never both apply competing changes.
+   - Restore is refused once a later change exists, so it never silently undoes later approved work.
+   - The evaluation stays on the proposal.
+5. **Errors and content.** A storage outage returns 503. Prompt content keeps its exact whitespace.
+
+### Independent review and acceptance
+The reviewer confirmed:
+- no apply or restore path bypasses the approval gate;
+- approval binding to the content hashes;
+- owner-scoped SQL;
+- JSON handling;
+- timeouts.
+
+It found five medium issues and four low issues, all fixed with tests before acceptance.
+
+Medium:
+1. The phrase check was beaten by an extra space, a line break, a zero-width character or a synonym.
+2. A rule could be "kept" inside a sentence that cancelled it.
+3. False positives froze legitimate edits, with no override.
+4. Restoring an old proposal silently reverted later approved changes.
+5. With several workers, the process-local lock no longer protected anything.
+
+Low:
+- a storage outage returned 500;
+- the global target table was undocumented;
+- trailing whitespace was stripped from content;
+- tests covered too little.
+
+**Tests:**
+- `tests/test_v49_controlled_evolution.py`: 26 tests.
+- `integration_tests/test_v49_postgres.py`: durability across restart, owner-scoped snapshots, persisted prompts.
+- Python: 1226 passed, 0 failed, 17 skipped.
+- Live PostgreSQL: 65 passed.
+
+These were run on the v4.9 commit in a separate clean checkout.
+
+**Behaviour changes:**
+- Approving a proposal can now return 422 when it regresses.
+- Rewording a rule line needs `acknowledge_rule_changes`.
+- The proposal model gains an `evaluation` field.
 
