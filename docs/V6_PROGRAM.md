@@ -36,7 +36,8 @@ The v5.1 router stays available for evaluations. Routing chat across several mod
 
 | Version | Status | Evidence |
 |---|---|---|
-| v6.1 | IMPLEMENTED, TESTED; in review | Python 1237 passed; live PostgreSQL 68 passed; real NVIDIA call recorded 48/381 tokens |
+| v6.1 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (recording blocked the request), since fixed with six other findings | Python 1247 passed; live PostgreSQL 68 passed (clean e371e13); real NVIDIA call recorded 48/383 tokens |
+| v6.2 | IMPLEMENTED, TESTED; in review | Python 1252 passed (with v6.1) |
 
 ## v6.1 — Usage and cost tracking, fallback model
 
@@ -73,3 +74,22 @@ The v5.1 router stays available for evaluations. Routing chat across several mod
 - `tests/test_v61_usage_fallback.py`: 7 tests.
 - `integration_tests/test_v61_postgres.py`: durable usage across a restart.
 - Real NVIDIA check: one chat recorded 48 input and 381 output tokens. The cost showed as unknown, because no price is declared.
+
+### v6.1 independent review and acceptance
+The reviewer found one blocking defect, fixed before acceptance: usage recording was awaited inside the request. A slow or unavailable database therefore delayed every chat and could overrun its deadline. The measurement: a 0.5 s deadline returned after 2.57 s with a slow store.
+
+**The fix.** `record()` only puts the event on a bounded queue. One background writer thread stores events over one reused connection. A full queue drops events and counts them.
+
+It also found six more issues, all fixed with tests:
+1. Deadline cancellations were recorded as "failed"; they are now `cancelled`.
+2. A failing fallback let the orchestrator's retries multiply calls; that error is now final.
+3. The router and evaluation credited the wrong model; they now measure the primary model directly.
+4. A partial price or a fallback equal to the primary was silently accepted; both are now refused.
+5. The fallback model could not be priced; it now has its own price settings.
+6. The summary had loose semantics. It now:
+   - covers whole UTC days;
+   - uses typed totals;
+   - aggregates in SQL;
+   - notes that failed calls may still be billed;
+   - reports dropped and evicted events.
+
