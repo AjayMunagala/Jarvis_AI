@@ -635,3 +635,13 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - **Unchanged:** tool and browser approvals stay record-only.
 - **Next:** workflow-step gating moves to v4.4/v4.5.
 - **Details:** `docs/V41_V50_PROGRAM.md`.
+
+## v4.4 — Reliable workflow execution (accepted by the project lead on 2026-10-24)
+
+- **Execution limits:** steps have timeouts and runs have deadlines. Only read-only steps are retried. A write step that times out is reported as an unknown outcome and never retried.
+- **Cancel:** cancel works on live runs. Completed writes are kept for compensate.
+- **Approval:** a run with write steps needs approval (category `workflow`, migration 0063). Tool steps run through `ToolRuntime`.
+- **Compensation:** it is idempotent and reports `manual_required` when no undo exists.
+- **Finance:** a transaction and its balance change are atomic.
+- **Startup:** runs interrupted by a restart are marked failed.
+- **Details:** `docs/V41_V50_PROGRAM.md`.

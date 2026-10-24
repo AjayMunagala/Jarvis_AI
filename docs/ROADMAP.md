@@ -304,3 +304,7 @@ The scope was derived from the repository, because no earlier document defined t
   - Autonomous write commands, improvement apply/restore and quarantine/restore return HTTP 202 and wait for approval, then run once when repeated with the approval ID (migration 0062).
   - Approvals are bound to the exact action and target, used at most once, and expire 15 minutes after the decision.
   - Tool and browser approvals stay record-only; workflow-step gating follows in v4.4/v4.5.
+- **v4.4 Reliable workflow execution: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
+  - Step timeouts and run deadlines; writes are never retried, and a timed-out write is reported as unknown.
+  - Cancel stops live runs; compensation is idempotent and honest; finance writes are atomic.
+  - Runs with write steps need approval (migration 0063); tool steps use the ToolRuntime; restarts are recovered.

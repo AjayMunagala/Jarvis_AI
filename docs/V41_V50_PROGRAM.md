@@ -61,7 +61,8 @@ Results are always labelled as real, mock or unavailable.
 | v4.1 | ACCEPTED by the owner on 2026-10-24; pushed | Python 1071 passed; live PostgreSQL 51 passed | `64fb86d` |
 | v4.2 | ACCEPTED by Claude as project lead on 2026-10-24 (acceptance delegated by the owner), after an independent review and fixes | Python 1093 passed; live PostgreSQL 54 passed; Vitest 131; E2E 11 | branch head at push |
 | v4.3 | ACCEPTED by Claude as project lead on 2026-10-24 (owner approved the policy change the same day), after an independent review that found one blocking defect, since fixed | Python 1115 passed; live PostgreSQL 57 passed; Vitest 132; E2E 11 | branch head at push |
-| v4.4–v5.0 | NOT STARTED | — | — |
+| v4.4 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review (no bypass found; 8 status-reporting and robustness findings, all fixed) | Python 1135 passed; live PostgreSQL 59 passed; Vitest 132; E2E 11 | branch head at push |
+| v4.5–v5.0 | NOT STARTED | — | — |
 
 ---
 
@@ -283,4 +284,93 @@ It also found one blocking defect and four smaller issues, all fixed before acce
 - Live PostgreSQL: 57 passed.
 - Vitest: 132. E2E: 11. TypeScript and the build pass.
 - Live Uvicorn smoke: 202 with nothing written, 409 before approval, 200 with exactly one write after approval, 409 on reuse, and the token absent from the log.
+
+## v4.4 — Reliable workflow execution
+
+### Why it was needed
+- **No time limits:** steps ran without a timeout and runs without a deadline.
+- **Cancel did nothing:** it changed the status, and the still-running steps then overwrote it.
+- **Unsafe retries:** every failure was retried, including writes, which could duplicate a write that partly happened. Retries slept inside the request with `time.sleep`.
+- **Tool steps never ran:** they bypassed the tool runtime and always failed.
+- **Untrue compensation:**
+  - Manual compensation guessed each step's action from its name.
+  - It could run twice.
+  - It reported writes it could not undo as "compensated".
+- **Non-atomic finance:** a transaction and its balance change were two separate writes, so a failure could leave them out of step.
+
+### Changes
+1. **Bounded execution.**
+   - Each step runs in a worker pool with a timeout, counted from when the step actually starts (default 30 s, `JARVIS_WORKFLOW_STEP_TIMEOUT_SECONDS`).
+   - Each run has a deadline (default 300 s).
+   - A write step that times out is never retried. It is reported with an unknown outcome (`manual_required`), because a Python thread cannot be stopped.
+   - A step that never got a worker is reported as "did not start, wrote nothing".
+2. **Safe retries.**
+   - Only read-only steps are retried.
+   - Retry waits use the run's cancel event instead of `time.sleep`.
+3. **Working cancel.**
+   - A live run stops before its next step, or during a retry wait.
+   - Completed write steps are kept and listed, so the owner can undo them with compensate.
+   - A run is shown as cancelled only if the cancel actually skipped a step.
+   - Cancelling a run with no live runner, such as one left over from a restart, only applies while the run is still running or pending.
+4. **Approval.**
+   - A run with write steps needs an approved request (category `workflow`, migration 0063). The approval is bound to the definition, every step and the inputs.
+   - Read-only runs need no approval.
+   - The classification follows the action, not the step type. For example, a `tool` step with `finance.accounts.create` is a write.
+   - In-process tool handlers count as writes unless they are declared read-only.
+5. **Background runs.**
+   - `wait: false` starts a run and returns at once.
+   - At most `JARVIS_WORKFLOW_MAX_ACTIVE_RUNS` runs (default 4) are active. When the limit is reached, the response is 409, before any approval is used.
+6. **Tool steps** run through the read-only `ToolRuntime` and its policy.
+7. **Honest, idempotent compensation.**
+   - It uses the stored definition.
+   - It skips steps it already undid.
+   - A write with no automatic undo, or with an unknown outcome, is reported as `manual_required`.
+   - Research document parsing gained an undo (the document is deleted).
+   - Only failed or cancelled runs can be compensated; any other run gets 409.
+8. **Atomic finance.**
+   - A transaction and its balance change are written in one database transaction.
+   - Deleting a transaction twice reverses the balance only once.
+9. **Restart recovery.**
+   - At startup, a background task marks runs left `running` by the previous process as failed ("Interrupted").
+   - It only touches runs created before the process started, and only if they are still running.
+
+### API and settings
+- **New request fields:** `approval_id` and `wait` on `POST /workflows/definitions/{id}/run`.
+- **New responses:**
+  - 202 when a run needs approval;
+  - 409 when the engine is full;
+  - 409 when compensating a run that is not failed or cancelled.
+- **New settings:** `JARVIS_WORKFLOW_STEP_TIMEOUT_SECONDS`, `JARVIS_WORKFLOW_RUN_TIMEOUT_SECONDS` and `JARVIS_WORKFLOW_MAX_ACTIVE_RUNS`.
+- **Behaviour change:** synchronous runs also count toward the active-run limit.
+
+### Independent review and acceptance
+The reviewer found no way to run a write step without approval. It confirmed:
+- the read-only classification matches the dispatch;
+- approval binding;
+- no deadlock between the run and step pools;
+- correct context-variable propagation;
+- the finance SQL.
+
+It found eight issues, all fixed with tests before acceptance:
+1. A step queued behind hung steps was reported as "outcome unknown" although it never ran.
+2. A cancel that raced a finishing run could overwrite "completed" with "cancelled", making it eligible for compensation.
+3. Startup recovery could mark a run that had just finished as failed.
+4. Compensation said "compensated" while an unknown-outcome write existed.
+5. A full engine used up the approval before refusing.
+6. In-process tool handlers were treated as read-only.
+7. A cancel arriving after the last step reported the run as cancelled.
+8. A failed final status write could leave a run "running".
+
+**Tests:**
+- `tests/test_v44_workflow_reliability.py`: 20 tests.
+- `integration_tests/test_v44_postgres.py`: 2 live tests, covering atomic finance with a once-only reversal, and an approved run plus restart recovery.
+- Python: 1135 passed, 0 failed, 17 skipped.
+- Live PostgreSQL: 59 passed.
+- Vitest: 132. E2E: 11.
+
+These were run on the v4.4 commit in a separate clean checkout.
+
+**Known limits:**
+- A step thread that times out keeps running until its call returns.
+- Recovery covers the configured owner's first 200 runs per state.
 
