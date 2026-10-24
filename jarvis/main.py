@@ -46,6 +46,7 @@ from jarvis.knowledge.service import KnowledgeService
 from jarvis.knowledge.stores import MemoryKnowledgeStore, PostgresKnowledgeStore
 from jarvis.research.service import ResearchService
 from jarvis.research.stores import MemoryResearchStore, PostgresResearchStore
+from jarvis.assistant.briefing import build_briefing
 from jarvis.scheduler.cron import ScheduleError
 from jarvis.scheduler.runner import SchedulerRunner
 from jarvis.scheduler.service import SchedulerService, parse_quiet_hours
@@ -301,6 +302,9 @@ def create_app(
     # runner only starts when JARVIS_SCHEDULER_RUNNER_ENABLED=true.
     scheduler = app.state.scheduler_service
     scheduler.assistant_service = app.state.assistant_service
+    # v6.3: a "daily_briefing" job delivers today's briefing as a notification (owner's local day).
+    scheduler.briefing_builder = lambda owner: build_briefing(
+        app.state.assistant_service, owner, utc_offset_minutes=resolved_settings.scheduler_utc_offset_minutes)
     # Scheduled workflows start in the background, so a long run never delays reminders (v4.5 review finding 10).
     scheduler.workflow_trigger = lambda owner, workflow_id: app.state.workflow_service.trigger_run(
         owner, workflow_id, {}, None, False)

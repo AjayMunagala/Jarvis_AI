@@ -88,6 +88,8 @@ class SchedulerService:
         # v4.5: set by the application. ``workflow_trigger(owner_id, workflow_id)`` runs a workflow through the
         # workflow engine (raising ApprovalRequired when it has write steps); ``assistant_service`` supplies reminders.
         self.workflow_trigger: Callable[[UUID, UUID], Any] | None = None
+        # v6.3: set by the application; builds the daily briefing for a "daily_briefing" job.
+        self.briefing_builder: Callable[[UUID], Any] | None = None
         self.assistant_service: Any = None
         self.quiet_hours: tuple[clock_time, clock_time] | None = None
         self.utc_offset_minutes = 0
@@ -258,6 +260,15 @@ class SchedulerService:
                 )
             elif job.action_type == "workflow":
                 output = self._run_workflow_job(owner_id, job)
+            elif job.action_type == "daily_briefing":
+                if self.briefing_builder is None:
+                    raise RuntimeError("The assistant is not connected; no briefing was created.")
+                briefing = self.briefing_builder(owner_id)
+                notification = self.dispatch_notification(owner_id, NotificationCreateRequest(
+                    category="briefing", title=f"Daily briefing for {briefing.day.isoformat()}",
+                    message=briefing.summary, priority="normal"))
+                output = {"action": "daily_briefing", "day": briefing.day.isoformat(),
+                          "notified": notification is not None, "conflicts": len(briefing.conflicts_next_7_days)}
             elif job.action_type == "health_check":
                 if self.health_probe is None:
                     raise RuntimeError("No status source is connected; the health check could not run.")

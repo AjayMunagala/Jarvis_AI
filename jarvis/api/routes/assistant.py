@@ -17,6 +17,7 @@ from jarvis.assistant.models import (
     Reminder, ReminderCreateRequest, ReminderPage, ReminderStatus, ReminderUpdateRequest,
     Task, TaskCreateRequest, TaskPage, TaskPriority, TaskStatus, TaskUpdateRequest,
 )
+from jarvis.assistant.briefing import Conflict, DailyBriefing, build_briefing, conflicts_between
 from jarvis.assistant.service import AssistantService
 from jarvis.models.schemas import ErrorResponse
 from jarvis.security.policy import Capability
@@ -330,3 +331,34 @@ async def delete_calendar_event(
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="The requested calendar event was not found.")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ============================================================= Briefing and conflicts (v6.3)
+
+@router.get("/briefing", response_model=DailyBriefing, responses=_ERRORS)
+async def daily_briefing(
+    request: Request,
+    utc_offset_minutes: int | None = Query(default=None, ge=-720, le=840),
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> DailyBriefing:
+    """Today's overdue and due tasks, events, next-24-hour reminders and 7-day conflicts, from stored records only."""
+    owner = _owner(owner_id)
+    enforce_capability(request, owner, Capability.ASSISTANT_READ)
+    offset = utc_offset_minutes if utc_offset_minutes is not None else request.app.state.settings.scheduler_utc_offset_minutes
+    return await run_in_threadpool(build_briefing, _service(request), owner, utc_offset_minutes=offset)
+
+
+@router.get("/calendar/conflicts", response_model=tuple[Conflict, ...], responses=_ERRORS)
+async def calendar_conflicts(
+    request: Request,
+    days: int = Query(default=7, ge=1, le=90),
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> tuple[Conflict, ...]:
+    """Pairs of overlapping calendar events from now until ``days`` ahead."""
+    owner = _owner(owner_id)
+    enforce_capability(request, owner, Capability.ASSISTANT_READ)
+    from datetime import timedelta, timezone
+
+    start = datetime.now(timezone.utc)
+    return await run_in_threadpool(conflicts_between, _service(request), owner, start, start + timedelta(days=days))
+
