@@ -1,0 +1,20 @@
+.activity-panel { max-width: 1000px; margin: 0 auto; padding: 32px; line-height: 1.6; overflow-wrap: anywhere; }
+.activity-panel h1 { font-size: 28px; }
+.activity-panel h2 { font-size: 20px; margin-top: 22px; }
+.activity-kicker { margin: 0; color: #85d5e6; font-size: 11px; letter-spacing: .12em; }
+.activity-panel button { padding: 7px 14px; color: inherit; background: #23364a; border: 1px solid #526b87; border-radius: 8px; cursor: pointer; }
+.activity-panel button:disabled { opacity: .55; cursor: not-allowed; }
+.activity-panel :focus-visible { outline: 2px solid #a5d3ff; outline-offset: 3px; }
+.activity-panel [role="alert"] { color: #ffb6b6; }
+.activity-notice { color: #6ee7b7; }
+.activity-meta { color: #9fb0bf; font-size: 13px; }
+.activity-approvals { list-style: none; padding-left: 0; display: grid; gap: 10px; }
+.activity-approvals li { padding: 12px; background: #0c1219; border: 1px solid #ca8a04; border-radius: 8px; }
+.activity-approvals code { color: #8fa7b3; font-size: 12px; }
+.activity-actions { display: flex; gap: 8px; margin-top: 8px; }
+.activity-reject { border-color: #a44 !important; }
+.activity-risk { padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; background: #382d12; color: #fde047; }
+.activity-events, .activity-decided { padding-left: 20px; font-size: 13px; }
+.activity-events span { color: #8fa7b3; }
+.activity-volatile { color: #e6b86d; }
+@media (max-width: 600px) { .activity-panel { padding: 18px; } }

@@ -5,7 +5,8 @@ import re
 from pathlib import Path
 
 from jarvis.repo.models import ConfigDiscovery, DependencyDeclaration
-from jarvis.repo.path_security import safe_resolve_path, validate_repo_root
+from jarvis.repo.path_security import read_repository_text, validate_repo_root
+from jarvis.repo.secret_redactor import redact_secrets
 
 # Regex for environment variables in Python settings and .env.example
 ENV_VAR_REGEX = re.compile(r"\b(JARVIS_[A-Z0-9_]+)\b")
@@ -53,7 +54,7 @@ def parse_pyproject_toml(content: str) -> tuple[list[DependencyDeclaration], lis
                 dependencies.append(
                     DependencyDeclaration(
                         name=pkg_name,
-                        specifier=spec,
+                        specifier=redact_secrets(spec)[0] if spec else None,
                         source_manifest="pyproject.toml",
                         is_dev=in_dev,
                     )
@@ -81,14 +82,21 @@ def parse_package_json(content: str) -> tuple[list[DependencyDeclaration], list[
     except json.JSONDecodeError:
         return dependencies, frameworks, test_frameworks, build_tools
 
+    if not isinstance(data, dict):
+        return dependencies, frameworks, test_frameworks, build_tools
+
     deps = data.get("dependencies", {})
     dev_deps = data.get("devDependencies", {})
+    deps = deps if isinstance(deps, dict) else {}
+    dev_deps = dev_deps if isinstance(dev_deps, dict) else {}
 
     for name, spec in deps.items():
+        if not isinstance(spec, str):
+            continue
         dependencies.append(
             DependencyDeclaration(
                 name=name,
-                specifier=str(spec),
+                specifier=redact_secrets(spec)[0],
                 source_manifest="package.json",
                 is_dev=False,
             )
@@ -97,10 +105,12 @@ def parse_package_json(content: str) -> tuple[list[DependencyDeclaration], list[
             frameworks.append("React")
 
     for name, spec in dev_deps.items():
+        if not isinstance(spec, str):
+            continue
         dependencies.append(
             DependencyDeclaration(
                 name=name,
-                specifier=str(spec),
+                specifier=redact_secrets(spec)[0],
                 source_manifest="package.json",
                 is_dev=True,
             )
@@ -132,13 +142,12 @@ def discover_config(repo_root: Path | str) -> ConfigDiscovery:
     known_services: set[str] = set()
 
     # 1. pyproject.toml
-    pyproject_path = root / "pyproject.toml"
-    if pyproject_path.exists() and pyproject_path.is_file():
+    content = read_repository_text(root, "pyproject.toml")
+    if content is not None:
         manifests.append("pyproject.toml")
         languages.add("Python")
         build_tools.add("setuptools")
         try:
-            content = pyproject_path.read_text(encoding="utf-8", errors="replace")
             deps, fws, tfws = parse_pyproject_toml(content)
             all_dependencies.extend(deps)
             frameworks.update(fws)
@@ -148,12 +157,11 @@ def discover_config(repo_root: Path | str) -> ConfigDiscovery:
 
     # 2. package.json in root or frontend/
     for pkg_rel in ["package.json", "frontend/package.json"]:
-        pkg_path = root / pkg_rel
-        if pkg_path.exists() and pkg_path.is_file():
+        content = read_repository_text(root, pkg_rel)
+        if content is not None:
             manifests.append(pkg_rel)
             languages.add("TypeScript" if (root / "tsconfig.json").exists() or (root / "frontend/tsconfig.json").exists() else "JavaScript")
             try:
-                content = pkg_path.read_text(encoding="utf-8", errors="replace")
                 deps, fws, tfws, bts = parse_package_json(content)
                 all_dependencies.extend(deps)
                 frameworks.update(fws)
@@ -165,10 +173,9 @@ def discover_config(repo_root: Path | str) -> ConfigDiscovery:
     # 3. Environment Variable Discovery (statically from .env.example and config.py)
     # NEVER read .env or values; only collect declared variable names
     for env_source_rel in [".env.example", "jarvis/core/config.py"]:
-        env_source = root / env_source_rel
-        if env_source.exists() and env_source.is_file():
+        text = read_repository_text(root, env_source_rel)
+        if text is not None:
             try:
-                text = env_source.read_text(encoding="utf-8", errors="replace")
                 # Find all declared JARVIS_* variable names
                 matches = ENV_VAR_REGEX.findall(text)
                 env_vars.update(matches)

@@ -71,6 +71,12 @@ def redact_secrets(text: str) -> tuple[str, int]:
         matches = len(pattern.findall(current_text))
         if matches > 0:
             total_redacted += matches
-            current_text = pattern.sub(replacement, current_text)
+            if replacement == "[REDACTED_SECRET: PRIVATE_KEY]":
+                # Preserve line positions for repository search context/results.
+                current_text = pattern.sub(
+                    lambda match: replacement + "\n" * match.group(0).count("\n"), current_text,
+                )
+            else:
+                current_text = pattern.sub(replacement, current_text)
 
     return current_text, total_redacted

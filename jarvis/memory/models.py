@@ -10,6 +10,11 @@ from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator, m
 MAX_MEMORY_CONTENT_LENGTH = 4000
 MAX_MEMORY_CATEGORY_LENGTH = 80
 MAX_MEMORY_SOURCE_LENGTH = 512
+MAX_RETRIEVED_RECORDS = 10
+
+# "memory" is explicitly saved personal/project memory; "document" is ingested
+# knowledge. Both live in one owner-scoped table but are never interchangeable.
+SourceKind = Literal["memory", "document"]
 
 
 class MemoryContract(BaseModel):
@@ -70,6 +75,7 @@ class MemoryRecord(MemoryContract):
     content: StrictStr = Field(min_length=1, max_length=MAX_MEMORY_CONTENT_LENGTH)
     category: StrictStr | None = Field(default=None, max_length=MAX_MEMORY_CATEGORY_LENGTH)
     source_reference: StrictStr | None = Field(default=None, max_length=MAX_MEMORY_SOURCE_LENGTH)
+    source_kind: SourceKind = "memory"
     created_at: datetime
     updated_at: datetime
 
@@ -88,17 +94,20 @@ class MemoryPage(MemoryContract):
 
 
 class RetrievedMemory(MemoryContract):
-    """Minimal memory fields allowed into a model request."""
+    """Minimal memory or document fields allowed into a model request."""
 
     id: UUID
     category: StrictStr | None = None
     content: StrictStr = Field(min_length=1, max_length=MAX_MEMORY_CONTENT_LENGTH)
+    source_kind: SourceKind = "memory"
+    source_reference: StrictStr | None = Field(default=None, max_length=MAX_MEMORY_SOURCE_LENGTH)
+    updated_at: datetime | None = None
 
 
 class MemoryRetrievalResult(MemoryContract):
     """Bounded chat context plus whether retrieval succeeded or fell back."""
 
-    records: tuple[RetrievedMemory, ...] = Field(max_length=5)
+    records: tuple[RetrievedMemory, ...] = Field(max_length=MAX_RETRIEVED_RECORDS)
     outcome: Literal["success", "empty", "fallback"]
 
     @model_validator(mode="after")

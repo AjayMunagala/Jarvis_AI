@@ -258,5 +258,8 @@ h1 span { color: #91dff2; }
 .memory-dialog .memory-delete-button { border-color: rgba(232,123,110,.3); background: rgba(95,40,36,.25); }
 .memory-context-link { display: block; max-width: 100%; margin: 7px 0 0; padding: 0; border: 0; background: transparent; color: #85d5e6; font-size: 10px; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
 .memory-context-link:hover { text-decoration: underline; }
+.tool-activity { display: block; margin: 4px 0 0; color: #b9c98f; font-size: 10px; overflow-wrap: anywhere; }
+.context-sources { display: block; margin: 4px 0 0; color: #8fa7b3; font-size: 10px; overflow-wrap: anywhere; }
+.memory-kind-tag { margin-right: 6px; padding: 1px 5px; border: 1px solid #85d5e6; border-radius: 3px; color: #85d5e6; font-size: 9px; letter-spacing: .06em; }
 @media (max-width: 850px) { .memory-columns { grid-template-columns: minmax(0,1fr); } }
 @media (max-width: 560px) { .memory-view { width: calc(100% - 28px); padding-top: 22px; }.memory-header { align-items: flex-start; flex-direction: column; }.memory-header h1 { font-size: 29px; }.memory-tools { grid-template-columns: 1fr; }.memory-card-head { flex-wrap: wrap; }.memory-list-heading { flex-direction: column; } }

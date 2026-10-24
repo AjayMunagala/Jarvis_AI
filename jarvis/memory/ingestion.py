@@ -65,6 +65,9 @@ def validate_document(filename: str, raw: bytes) -> ValidatedDocument:
         content = raw.decode("utf-8-sig", errors="strict")
     except UnicodeDecodeError as exc:
         raise DocumentValidationError("Document must contain valid UTF-8 text.") from exc
+    # One line-ending convention, so the same text saved on Windows and Unix is
+    # counted, deduplicated, and excerpted identically.
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
     if len(content) > MAX_MEMORY_CONTENT_LENGTH:
         raise DocumentValidationError("Document exceeds the 4,000 character content limit.")
     if "\x00" in content:

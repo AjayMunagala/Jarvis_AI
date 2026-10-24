@@ -5,7 +5,7 @@ from pathlib import Path
 
 from jarvis.repo.inventory import scan_repository
 from jarvis.repo.models import TestDiscovery
-from jarvis.repo.path_security import validate_repo_root
+from jarvis.repo.path_security import read_repository_text, validate_repo_root
 
 
 def discover_tests_and_build(repo_root: Path | str) -> TestDiscovery:
@@ -36,9 +36,8 @@ def discover_tests_and_build(repo_root: Path | str) -> TestDiscovery:
             test_directories.add(Path(f.path).parent.as_posix())
 
     # 2. Check pytest configuration
-    pyproject_path = root / "pyproject.toml"
-    if pyproject_path.exists():
-        content = pyproject_path.read_text(encoding="utf-8", errors="replace")
+    content = read_repository_text(root, "pyproject.toml")
+    if content is not None:
         if "pytest" in content or any(f.endswith(".py") for f in test_files):
             test_frameworks.add("pytest")
             test_commands.append("python -m pytest -v")
@@ -46,11 +45,15 @@ def discover_tests_and_build(repo_root: Path | str) -> TestDiscovery:
 
     # 3. Check npm test scripts
     for pkg_rel in ["package.json", "frontend/package.json"]:
-        pkg_path = root / pkg_rel
-        if pkg_path.exists():
+        content = read_repository_text(root, pkg_rel)
+        if content is not None:
             try:
-                data = json.loads(pkg_path.read_text(encoding="utf-8", errors="replace"))
+                data = json.loads(content)
+                if not isinstance(data, dict):
+                    continue
                 scripts = data.get("scripts", {})
+                scripts = scripts if isinstance(scripts, dict) else {}
+                scripts = {name: value for name, value in scripts.items() if isinstance(value, str)}
                 prefix = f"npm --prefix {Path(pkg_rel).parent.as_posix()} " if Path(pkg_rel).parent.name else "npm "
                 if "test" in scripts:
                     test_commands.append(f"{prefix}run test" if prefix != "npm " else "npm test")
@@ -58,6 +61,7 @@ def discover_tests_and_build(repo_root: Path | str) -> TestDiscovery:
                     test_frameworks.add("Playwright")
                     test_commands.append(f"{prefix}run test:e2e")
                 dev_deps = data.get("devDependencies", {})
+                dev_deps = dev_deps if isinstance(dev_deps, dict) else {}
                 if "vitest" in dev_deps or "vitest" in scripts.get("test", ""):
                     test_frameworks.add("Vitest")
             except (json.JSONDecodeError, OSError):

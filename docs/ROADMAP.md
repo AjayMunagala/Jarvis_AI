@@ -179,16 +179,16 @@ Verification on Windows/Python 3.12.10: 143 default Python tests and 13 focused 
 
 Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remains single-owner and advisory-only; `tools.json` is empty and `execution_enabled=False`. No approval workflow, external-action executor, multi-user authorization, or production-readiness claim is included.
 
-## Core v2.1 — Reliability and operational readiness (in progress)
+## Core v2.1 — Reliability and operational readiness (owner accepted with documented non-blocking findings)
 
 - Improve operational diagnostics without changing the modular-monolith architecture or exposing sensitive configuration.
 - Keep `/health` as process liveness. Make `/ready` report fixed readiness states for application, provider, orchestration, authorization-policy, and persistence wiring; fail with sanitized HTTP 503 when a required component is unavailable.
 - Treat intentionally disabled persistence as a valid ready mode. Report configured persistence only as repository wiring; do not connect to PostgreSQL from readiness.
 - Preserve authentication, capability enforcement, mock mode, provider selection, owner isolation, bounded execution, and disabled tool/action execution.
 - Add focused pure unit coverage for ready, incomplete, and persistence-disabled/configured states, plus HTTP contract regression coverage.
-- v2.1 is not complete until verification is repeated in an environment that permits the Windows loopback sockets required by the current TestClient/Uvicorn setup. The current restricted execution result and the separate PostgreSQL/browser verification limits are recorded in `docs/HANDOFF.md`.
+- The project owner accepted the integrated v2.1–v2.3 working tree with documented non-blocking findings. Independently executed results and separate owner-run PostgreSQL/native Windows evidence are recorded in the authoritative `docs/HANDOFF.md`; no commit, push, merge, deployment, or next phase is authorized by acceptance.
 
-## Repository Intelligence and Coding Diagnostics (implemented)
+## Core v2.3 — Repository Intelligence and Coding Diagnostics (owner accepted with documented non-blocking findings)
 
 - Add a secure, bounded, read-only repository intelligence subsystem (`jarvis/repo/`) for Project JARVIS.
 - Implement bounded repository inventory (`jarvis/repo/inventory.py`): structure, language detection, manifest recognition, entry points, and test directories with strict ignore rules.
@@ -198,9 +198,72 @@ Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remain
 - Implement static configuration and dependency discovery (`jarvis/repo/config_discovery.py`): parses `pyproject.toml`, `package.json`, and discovers declared environment variable names without exposing `.env` secret values.
 - Implement test and build discovery (`jarvis/repo/test_discovery.py`): test frameworks (`pytest`, `vitest`, `playwright`), test files, test commands, and module-to-test mappings.
 - Implement evidence-based diagnostic report generation (`jarvis/repo/diagnostics.py`): separates confirmed facts from hypotheses with explicit confirmation needed and human-executable suggested commands.
-- Implement strict path traversal and boundary security (`jarvis/repo/path_security.py`): prevents directory traversal, absolute path escapes, Windows alternate data streams, drive-relative paths, and external symlinks.
+- Implement strict path traversal and boundary security (`jarvis/repo/path_security.py`): rejects directory traversal, absolute path escapes, Windows alternate data streams, drive-relative paths, NUL bytes, and symbolic-link components when disallowed; resolved-path containment is rechecked. A concurrent filesystem change can still race the precheck.
 - Expose authenticated, read-only API endpoints under `/repo` (`/inventory`, `/search`, `/symbols`, `/git`, `/config`, `/tests`, `/diagnostics`) requiring bearer authentication and `Capability.REPO_READ`.
 - The subsystem is strictly read-only, does not execute arbitrary code, does not modify files, does not change Git state, and keeps `execution_enabled=False`.
+
+## v2.1–v2.3 integration acceptance pass (owner accepted with documented non-blocking findings)
+
+- Integration branch: `jarvis/integration-acceptance-v24`, based on `origin/main` at `3e19fbc65a8aed8612d944c79a913596803ce1fe`. v2.1 readiness and v2.3 repository intelligence were already on that base; v2.2 memory/context work was integrated from `origin/jarvis/review-memory-v22` at `e7840b906e04442e06b25b95694526a904bf32b9`. The obsolete Codex v2.1 branch was not cherry-picked because current main already contained newer implementation.
+- The repository-path fixes now cover original-path validation in inventory, manifest discovery, search, and service/API callers, retaining resolved containment. The precheck narrows but does not eliminate filesystem races. Native cases skipped in the Codex execution environment; the separate owner-run repository/security evidence below closes that gate.
+- Historical independently executed integration snapshot: full offline Python suite **396 passed, 2 skipped**; repo-intelligence tests **33 passed, 2 skipped**; frontend unit tests **53 passed**; production build and compileall passed; Playwright **9 passed**; PostgreSQL URL/collision guards **11 passed**. After remediation, the independently executed full Python result was **431 passed, 16 skipped, 1 warning**; frontend tests **56 passed**, build/compilation passed, and Playwright **9 passed**. These runs remain separate from owner-run results. The existing Starlette/httpx warning and unresolved pytest temporary reparse-point issue remain documented in `docs/HANDOFF.md`.
+- **OWNER-RUN RESULTS REPORTED BY THE PROJECT OWNER:** live PostgreSQL integration **6 passed, 1 warning** against PostgreSQL 18.6; repository/security tests **84 passed, zero skipped, 1 warning**, including native caller tests. Codex reviewed the supplied output and did not independently execute these owner runs or rerun them during this documentation update. Browser mock/intercepted results do not establish PostgreSQL persistence.
+- The project owner accepted v2.1–v2.3 with the retained limitations: single-owner conversation boundary, filesystem races, heuristic redaction, unverified live-provider behavior and worst-case resource use, and the unresolved old pytest temporary object. No next-phase implementation, commit, push, or merge is authorized.
+
+## Core v2.2 — Memory, context continuity, and knowledge (owner accepted with documented non-blocking findings)
+
+- Separate explicit memories from ingested documents with `source_kind` (migration 0005, no backfill); owner-scoped exact-duplicate document imports return the existing record (HTTP 200).
+- Replace chat retrieval's all-words `plainto_tsquery` match with stopword-filtered, suffix-trimmed OR-prefix candidate matching in PostgreSQL plus deterministic Python ranking (coverage, phrase, density, recency, UUID), weak-match filtering, de-duplication, and per-kind limits. The explicit `/memories/search` API keeps all-words semantics.
+- Add a pure, bounded context assembler: recent same-conversation turns, memories, and document excerpts with character budgets, deterministic ordering, `H/M/D` refs, and escaped-JSON untrusted framing. Unknown conversations are rejected before any provider call; history requires `conversation.read`; storage failures degrade with an explicit status.
+- Report supplied sources (metadata only) in `ChatResponse.context`, including `cited_in_reply` and a count of invented refs; show them in the chat UI and mark documents in the memory manager.
+- Controlled synthetic evaluation (12 chat-style queries, 16 records): legacy all-words rule hit@3 0.0833; new rule hit@3 1.0, recall@3 1.0, MRR@3 1.0, precision@3 0.7917. This describes only that corpus; it is not a general quality claim.
+- Historical verification on review branch `jarvis/review-memory-v22` (baseline `3e19fbc`): 394 Python tests passed; 53 frontend tests, TypeScript, `npm run build`, and 9 Playwright E2E scenarios passed. The 5 new opt-in PostgreSQL tests were not executed in that historical run (no operator credentials available). Subsequent owner-run live evidence, including the added migration-upgrade test, is recorded separately in the integration acceptance section and `docs/HANDOFF.md`.
+
+## Core v2.4 — Coding intelligence, repository understanding and proposed patches (owner accepted with documented limitations)
+
+- Add authenticated `/coding/analyze` and a Coding workspace for bounded explain/locate/trace/diagnose/recommend/patch/review/test-discovery workflows, using existing repository safety and shared orchestration.
+- Separate static facts, user-reported observations, unverified hypotheses, missing information, reviewable diffs and verification recommendations. Static/mock mode does not claim model reasoning or test success. Non-demo context disclosure requires explicit per-request consent; live-provider behavior remains unverified.
+- Validate closed contracts, source snapshots, path/private exclusions, bounded exact replacements and new-file proposals. Diffs are generated only; no code application, test execution, shell commands, tool execution or autonomous action is introduced. No dependencies or database changes are required.
+- Preserve the accepted v2.1–v2.3 changes and their separate test provenance. The owner accepted v2.4 on 2026-10-17. **OWNER-RUN RESULTS REPORTED BY THE PROJECT OWNER:** 17 native Windows tests passed, 0 failed, 0 skipped (14 mocked variants deselected; 1 existing warning; exit 0). Live-provider behavior remains unverified, PostgreSQL has not been rerun against v2.4, and single-owner/advisory-only security limitations remain. Evidence and local integration provenance are recorded in `docs/HANDOFF.md`. Local integration and a local commit are separately authorized; pushing, publishing, merging to main and v2.5 are not authorized.
+
+## Core v2.5 — Verification, Quality Engineering and Evidence-Based Validation (implemented)
+
+- Add a bounded software verification subsystem (`jarvis/verification/`) with an explicit 9-state lifecycle model: `not_checked`, `check_requested`, `check_running`, `check_passed`, `check_failed`, `check_timed_out`, `check_blocked`, `check_result_unavailable`, `inconclusive`.
+- Implement in-memory static patch validation (`jarvis/verification/patch_verifier.py`): verifies preimage hashes against disk, checks target creation collision avoidance, and performs simulated postimage AST syntax validation (Python AST / JSON) without modifying files (`repository_modified = False`).
+- Implement targeted verification planning (`jarvis/verification/planner.py`): maps touched paths to syntax checks and affected test suites using repository intelligence.
+- Implement an isolated, sandboxed process runner (`jarvis/verification/runner.py`) with whitelisted profiles (`pytest_targeted`, `compileall`, `vitest_targeted`, `tsc_build`, `playwright_targeted`), strict environment sanitization, timeouts, process group cleanup, output truncation (32KB), and secret redaction.
+- Enforce a mandatory Dual-Gate security policy: verification execution is disabled by default (`verification_execution_enabled = False`); runner commands are strictly blocked unless both server configuration and authenticated `Capability.VERIFY_EXECUTE` are granted.
+- Expose authenticated API routes `/verification/plan`, `/verification/verify-patch`, `/verification/run`, and `/verification/profiles`.
+- Integrate one-click patch verification into the React Coding workspace (`CodingPanel.tsx`) with accessible report cards, fact lists, and distinct visual badges for all 9 states.
+- Verification evidence: full Python test suite passed (537 passed, 17 skipped, 0 failed), frontend Vitest suite passed (77 passed, 0 failed), Playwright E2E passed (10 passed, 0 failed), `compileall` passed with 0 errors, and frontend production build succeeded.
+
+## Core v2.6 — Browser Intelligence & Web Automation (implemented; owner acceptance pending)
+
+- Add `jarvis/browser/`: replaceable providers (deterministic mock, `httpx` HTTP provider without JavaScript, optional lazily imported Playwright adapter), bounded owner-scoped sessions, standard-library DOM extraction with server-assigned element ids, deterministic action classification, and an audit trail.
+- Enforce URL policy (http/https only, no credentials, public addresses only, redirect re-checks; Playwright subresource interception), element/observation staleness checks, sensitive-field protection, limits, loop detection, and redaction. Consequential actions are never executed: they are recorded as `approval_required`.
+- Add `/browser` routes with new `browser.read` / `browser.interact` capabilities, evidence-first research over supplied URLs, and browser checks using the accepted v2.5 `VerificationReport` contracts (execution gated by `JARVIS_BROWSER_CHECKS_ENABLED`, default false). Add a frontend Browser workspace.
+- Follow-up: optional `browser` extra (`playwright==1.64.0`, owner-authorized) verified against real headless Chromium; HTTP-provider DNS-rebinding protection enforces the policy at connection time. Details: `docs/BROWSER_INTELLIGENCE.md`.
+
+## Core v2.7 — Capability registry and read-only tool runtime (implemented; owner acceptance pending)
+
+- Master Phase 4. Typed capability/tool/result/audit contracts, risk classes, strict input validation, server-side permission enforcement, timeouts and output limits, and audit events for every call.
+- Registry populated with 8 read-only tools wrapping existing services (calculator, memory search, repository search and symbols, git status and diff summary, verification plan, browser observe); `JARVIS_TOOLS_ENABLED=false` by default; the orchestrator does not call tools yet (v2.8).
+- `GET /capabilities`, `POST /tools/calls`, `GET /tools/audit` (in-memory, non-durable) and a Capabilities frontend view. pgvector remains deferred (D6). Details: `docs/TOOL_RUNTIME.md`.
+
+## Core v2.8 — First complete action loop (implemented; owner acceptance pending)
+
+- Master Phase 6. Chat requests can use registered read-only tools: rule-based (offline) or model-proposed calls, validated by trusted code, executed through the v2.7 runtime within the shared deadline and round/call limits, answered with untrusted tool evidence, and independently verified (citations and computed values).
+- `ChatResponse.tool_activity` and a chat UI line show calls, statuses, and verification. Off by default (`JARVIS_CHAT_TOOLS_ENABLED=false`). Details: `docs/ACTION_LOOP.md`.
+
+## Core v2.9 — Approval gateway and durable audit (accepted)
+
+- Approval requests for refused actions (tools needing approval, consequential browser clicks) with risk, target, reason, expected side effects, scope hash and expiry; owner approve/reject exactly once; **recorded only, nothing executes**.
+- Central owner-scoped audit trail for tools, browser and approvals: PostgreSQL when persistence is enabled (migration 0006), otherwise in memory and labelled non-durable (D7). Activity frontend view. Details: `docs/APPROVALS_AUDIT.md`.
+
+## Core v3.0 — Voice and unified interface (accepted)
+
+- Browser-native voice (D5): explicit opt-in with privacy disclosure, browser-managed microphone permission, transcripts placed in the composer for review (never auto-sent), read-aloud with interrupt, unsupported-browser handling, text always available.
+- `GET /interface/config` feature flags and disabled-view badges for one consistent workspace. Details: `docs/VOICE_INTERFACE.md`. Next phases (v3.0 → v4.0) are handed over in `docs/ANTIGRAVITY_HANDOVER.md`.
 
 ## Later milestones
 
@@ -216,3 +279,52 @@ Current closure-run results are recorded in `docs/HANDOFF.md`. The policy remain
 10. Controlled improvement: model evaluation, fine-tuning experiments, versioning, and rollback with human review.
 
 The long-term vision includes natural conversation and voice; desktop and supported mobile-device integrations; coding, debugging, test execution, fixes and independent verification; document analysis, web research, personal knowledge and long-term memory; task management, reminders, scheduling and personal workflows; financial planning, expense analysis, stock-market research and experimental forecasting; proactive monitoring and notifications; smart-home integrations; defensive cybersecurity and system health monitoring; personalized learning and tutoring; travel planning and creative tools; and controlled self-improvement, model evaluation, fine-tuning experiments and rollback.
+
+## Advanced intelligence and personalization v5.1–v5.6 (implemented on `claude/jarvis-v5.1-to-v5.6`; owner review pending)
+
+- v5.1 model registry, routing policies, bounded fallback, repeatable evaluation; v5.2 knowledge graph; v5.3 memory selection and context packaging; v5.4 multimodal foundation (mock adapters only); v5.5 plan-quality evaluation (12/13 vs 5/13 baseline on an author-written dataset); v5.6 controlled personalization.
+- Built in parallel with v3.1–v4.0 and not yet integrated with it; integration contracts are listed in `docs/ADVANCED_INTELLIGENCE.md`. v6 and later are not started.
+
+## v4.1–v5.0 (Claude; branch `claude/jarvis-v4.1-to-v5.0` from `3a35dda`)
+
+The scope was derived from the repository, because no earlier document defined these versions. See `docs/V41_V50_PROGRAM.md` for the version map, dependencies, acceptance gates and status ledger.
+
+- **v4.1 Foundation and safety repair: accepted by the owner on 2026-10-24.**
+  - Migrations 0008–0013 can be installed (the reference to a non-existent users table was removed).
+  - Quarantine is confined to the repository, and self-improvement targets are allowlisted.
+  - Knowledge chunk reads are owner-scoped.
+  - Workflows report honest failures instead of placeholder successes, and the `knowledge.search` step no longer crashes.
+  - Research citations no longer claim that URLs were verified.
+- **v4.2 Correlation, audit consistency and truthful status: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
+  - `X-Request-ID` correlation flows through logs and audit.
+  - Each v3.x subsystem has its own audit category (migration 0060), and failed or denied mutations are audited.
+  - `GET /status` reports each subsystem's real state with real checks and limitations.
+  - CPU and memory are measured, or reported as null (migration 0061).
+- **v4.3 Enforced approvals: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
+  - Autonomous write commands, improvement apply/restore and quarantine/restore return HTTP 202 and wait for approval, then run once when repeated with the approval ID (migration 0062).
+  - Approvals are bound to the exact action and target, used at most once, and expire 15 minutes after the decision.
+  - Tool and browser approvals stay record-only; workflow-step gating follows in v4.4/v4.5.
+- **v4.4 Reliable workflow execution: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
+  - Step timeouts and run deadlines; writes are never retried, and a timed-out write is reported as unknown.
+  - Cancel stops live runs; compensation is idempotent and honest; finance writes are atomic.
+  - Runs with write steps need approval (migration 0063); tool steps use the ToolRuntime; restarts are recovered.
+- **v4.5 Bounded proactive runtime: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
+  - Real cron and strict schedules; an optional background runner (off by default) runs each due job at most once.
+  - Reminders are delivered once; quiet hours hold notifications; the throttle survives restarts.
+  - Workflow jobs run through the engine; write workflows pause for the owner's approval.
+- **v4.6 One knowledge and context contract: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
+  - Stable embeddings (survive restarts), one token estimator, the knowledge budget on the shared packer.
+  - Research documents can be indexed in knowledge and the graph, with every chunk marked untrusted (migration 0064).
+  - DOCX parsing; PDF is refused until the owner approves a PDF library.
+- **v4.7 Integrated assistant experience in chat: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
+  - Opt-in workspace context (`JARVIS_CHAT_WORKSPACE_CONTEXT_ENABLED`): cited, read-only knowledge excerpts and summaries of tasks, reminders and calendar.
+  - Default chat is unchanged; chat never writes.
+- **v4.8 Integration and device readiness: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
+  - Adapter framework with a simulated lamp only (no real device control); enrollments pending -> active -> revoked.
+  - Activation and state-changing actions need approval; revocation is immediate and final; secrets are references only (migration 0065).
+- **v4.9 Controlled evolution hardening: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
+  - Durable, owner-scoped proposals and snapshots (migration 0066); every proposal is evaluated against the current content.
+  - Regressions cannot be approved; rule-line changes need an explicit acknowledgement; restores never undo later changes.
+- **v5.0 Integration and release readiness: accepted by the project lead on 2026-10-24. Verdict: READY to merge into main.**
+  - Fresh-install and upgrade-from-v4.0 tests, release checks, and a combined regression on the release commit, all green.
+  - Open owner decisions: a PDF library, the real-model check, and installing the migrations on `jarvis_AI` after a backup.

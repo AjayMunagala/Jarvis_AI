@@ -29,13 +29,13 @@ Pydantic schema validation checks output structure and field constraints. The se
 
 `GET /conversations/{conversation_id}/messages` is available only when persistence is configured and authenticated. It validates UUID identifiers, returns a bounded page of at most 100 messages in ascending sequence order, and supports `before_sequence` to request older pages. Unknown IDs return 404; repository failures and disabled persistence return sanitized 503. Conversation IDs are not access-control tokens; the single configured bearer credential gates all persistent conversation operations.
 
-`GET /conversations` is also persistence-backed and requires the configured bearer identity plus `conversation.read`. It accepts `limit` (default 20, range 1–100) and `offset` (default 0, range 0–1,000,000) and returns a bounded page with `has_more`. Ordering is `last_activity_at DESC, conversation_id DESC`; offset pages may shift when conversations change. Empty conversations use `created_at` as their activity time and have a null preview. A preview uses the first user message, is capped at 120 Unicode characters, and truncates longer text to 119 characters plus an ellipsis. It is response data and must not be logged. Listing/history are navigation and display features; prior messages are not injected into chat prompts.
+`GET /conversations` is also persistence-backed and requires the configured bearer identity plus `conversation.read`. It accepts `limit` (default 20, range 1–100) and `offset` (default 0, range 0–1,000,000) and returns a bounded page with `has_more`. Ordering is `last_activity_at DESC, conversation_id DESC`; offset pages may shift when conversations change. Empty conversations use `created_at` as their activity time and have a null preview. A preview uses the first user message, is capped at 120 Unicode characters, and truncates longer text to 119 characters plus an ellipsis. It is response data and must not be logged. Listing/history are navigation and display features. Separately, the memory/context phase lets `/chat` include a bounded slice of the *same* conversation's recent turns in the provider prompt (see "Memory, context continuity, and knowledge" below); history is never copied into long-term memory.
 
 `/memories` exposes authenticated explicit create, list, get, patch, delete, and lexical search operations against `jarvis_app.memories`. Migration `0003_long_term_memories.sql` adds bounded content, optional category/source reference, timestamps, and a GIN full-text index; migration 0004 adds nullable owner ID without default/backfill. The list route supports an optional exact `category` filter applied to both count and item queries, with pagination calculated against the filtered result set. Search uses `POST /memories/search` so search text is not placed in the request URL/access log; PostgreSQL `simple` text search and `ts_rank_cd` provide lexical ranking, with stable timestamp/UUID ordering for ties. This is not semantic search. Invalid UUIDs and bodies are rejected, foreign and missing records both return 404, and disabled/unavailable persistence returns sanitized 503. Delete is a hard delete. The local React memory manager provides explicit list/filter/search/create/edit/delete controls and an in-memory-only token lifecycle. Legacy rows without owner IDs remain inaccessible.
 
-`POST /memories/ingest` adds one authenticated explicit import path for `.txt` and `.md`. It accepts a raw octet-stream body and a UTF-8 percent-encoded filename header, consumes no more than 16 KiB, then strictly decodes UTF-8 (stripping one leading BOM) and enforces the existing 4,000-character memory-content bound, nonblank text, and no NUL. Validation completes before the owner-scoped repository create call. Exactly one existing memory row is created per successful import; duplicate imports remain separate records. Only the sanitized basename is stored as `source_reference`, never a local path. Frontend confirmation displays the selected filename before sending bytes. Content is held and displayed as escaped plain text by the existing memory UI; Markdown is not interpreted, links are not followed, and embedded code/instructions are not executed. No schema or ranking change is required.
+`POST /memories/ingest` adds one authenticated explicit import path for `.txt` and `.md`. It accepts a raw octet-stream body and a UTF-8 percent-encoded filename header, consumes no more than 16 KiB, then strictly decodes UTF-8 (stripping one leading BOM) and enforces the existing 4,000-character memory-content bound, nonblank text, and no NUL. Validation completes before the owner-scoped repository call. Line endings are normalized to `\n` before the length check. Since migration 0005 an import is stored with `source_kind = 'document'`, distinct from explicitly saved memories; re-importing byte-identical (post-normalization) content for the same owner returns the existing record with HTTP 200 instead of creating a duplicate (HTTP 201 means a new record). Only the sanitized basename is stored as `source_reference`, never a local path. Frontend confirmation displays the selected filename before sending bytes. Content is held and displayed as escaped plain text by the existing memory UI; Markdown is not interpreted, links are not followed, and embedded code/instructions are not executed. No schema or ranking change is required.
 
-Memory retrieval is controlled by `JARVIS_MEMORY_RETRIEVAL_ENABLED` (default false) and requires persistence to be enabled. At most the configured 1–5 records (default 3) are selected by lexical search. Only bounded record ID/category/content fields are passed through typed `RequestContext`; the orchestrator frames their serialized content as untrusted reference data and adds a system instruction that it cannot override policy or the current user request. Retrieval failures with remaining time fall back to a request context with no memories; exhaustion of the shared request deadline returns HTTP 504 `request_timeout` and prevents provider execution. The additive `/chat` `memory_context` response is `null` when retrieval is disabled; otherwise it reports `success`, `empty`, or `fallback` and only IDs of records actually supplied to the provider. It does not expose memory content, category, or source reference. Metadata-only diagnostics report outcome, duration in milliseconds, returned record count, and execution ID; they exclude query text, memory identifiers/content, category/source, credentials, and exception details. The original chat message is still the only user content saved by conversation persistence. Memory creation is always explicit through the API; no automatic extraction or chat-history copying exists.
+Memory retrieval is controlled by `JARVIS_MEMORY_RETRIEVAL_ENABLED` (default false) and requires persistence to be enabled. At most the configured 1–5 memory records (default 3) and 0–5 document records (default 2) are selected; the matching and ranking rules are described in "Memory, context continuity, and knowledge" below. Only bounded record fields are passed through typed `RequestContext`; the orchestrator frames their serialized content as untrusted reference data and adds a system instruction that it cannot override policy or the current user request. Retrieval failures with remaining time fall back to a request context with no memories; exhaustion of the shared request deadline returns HTTP 504 `request_timeout` and prevents provider execution. The additive `/chat` `memory_context` response is `null` when retrieval is disabled; otherwise it reports `success`, `empty`, or `fallback` and only IDs of records actually supplied to the provider. It does not expose memory content, category, or source reference. Metadata-only diagnostics report outcome, duration in milliseconds, returned record count, and execution ID; they exclude query text, memory identifiers/content, category/source, credentials, and exception details. The original chat message is still the only user content saved by conversation persistence. Memory creation is always explicit through the API; no automatic extraction or chat-history copying exists.
 
 Memory lifecycle semantics allow duplicate content as independent records with distinct IDs. PATCH changes supplied fields only: `null` clears category/source reference, but content cannot be cleared; empty patches are invalid. Any successful PATCH refreshes `updated_at`, even when the supplied value equals the current value. DELETE is permanent; the first delete succeeds and subsequent deletes return not found. These operations use the existing schema and require no migration.
 
@@ -75,7 +75,7 @@ The `/chat` boundary requires the configured bearer identity whenever a non-demo
 
 ## Core v2.0 — Conversation integration and browser smoke testing
 
-The conversation-list API reuses the existing conversation repository and schema, requires bearer authentication and `conversation.read`, and introduces no migration. The React application retains the returned conversation UUID, lists saved conversations in bounded offset pages, and loads message history when a saved item is selected. History remains UI-only and does not change the provider prompt. Credentials are held in memory; Lock Workspace and HTTP 401 clear the token and sensitive conversation state. Session-version and abort handling prevent late list/history responses from restoring stale state. Ambiguous chat failures are not automatically retried; the interface gives an explicit manual retry and warns about possible duplicate persistence.
+The conversation-list API reuses the existing conversation repository and schema, requires bearer authentication and `conversation.read`, and introduces no migration. The React application retains the returned conversation UUID, lists saved conversations in bounded offset pages, and loads message history when a saved item is selected. In v2.0 history was UI-only; the later memory/context phase adds a bounded server-side history slice to the provider prompt for continued conversations. Credentials are held in memory; Lock Workspace and HTTP 401 clear the token and sensitive conversation state. Session-version and abort handling prevent late list/history responses from restoring stale state. Ambiguous chat failures are not automatically retried; the interface gives an explicit manual retry and warns about possible duplicate persistence.
 
 The development-only Playwright suite is run with `npm run test:e2e`. Its configuration starts the API and Vite on loopback, selects the deterministic mock provider, disables persistence and retrieval, disallows reuse of existing servers, and uses Chromium with a single worker and no retries. Tests include actual local mock chat plus intercepted synthetic list/history/API outcomes. Intercepted requests do not exercise backend persistence or PostgreSQL. Persisted conversation behavior requires the separate opt-in isolated PostgreSQL integration suite.
 
@@ -85,7 +85,7 @@ The v2.0 policy boundary is still the existing configured single owner. Capabili
 
 `jarvis/repo/` introduces a secure, bounded, read-only subsystem providing static code understanding, Git working-tree analysis, and evidence-based diagnostic report generation.
 
-- `jarvis/repo/path_security.py`: strict path containment validation enforcing that all examined paths resolve strictly within the approved repository root directory. It rejects directory traversal (`..`), absolute paths escaping the root, Windows alternate data streams (colon), drive-relative paths, and external symlinks.
+- `jarvis/repo/path_security.py`: strict path containment validation enforcing that all examined paths resolve strictly within the approved repository root directory. It rejects directory traversal (`..`), absolute paths escaping the root, Windows alternate data streams (colon), drive-relative paths, NUL bytes, and any symbolic-link component when symlinks are disallowed. Components are checked with `lstat` before resolution, and resolved-path containment is checked afterward. This narrows but cannot eliminate races with concurrent filesystem changes.
 - `jarvis/repo/secret_redactor.py`: multi-pattern credential redactor covering API keys (OpenAI, Anthropic), GitHub tokens, AWS keys, database URL passwords, Authorization Bearer headers, and configuration password assignments before returning diffs, search excerpts, or diagnostic evidence.
 - `jarvis/repo/inventory.py`: bounded repository traversal classifying files into source, test, config, documentation, manifest, build, and asset categories, detecting languages, entry points, and test directories while respecting strict exclusion rules (`.git`, `node_modules`, `.venv`, `dist`, caches).
 - `jarvis/repo/search.py`: bounded text and regular-expression search with context lines and secret redaction, plus Python AST static symbol extraction (classes, functions, async functions, FastAPI route handlers, constants) without code execution.
@@ -97,3 +97,143 @@ The v2.0 policy boundary is still the existing configured single owner. Capabili
 - `jarvis/api/routes/repo.py`: authenticated endpoints under `/repo` (`/inventory`, `/search`, `/symbols`, `/git`, `/config`, `/tests`, `/diagnostics`) requiring bearer authentication and `Capability.REPO_READ`.
 
 The subsystem is strictly read-only: it never modifies code, installs packages, runs tests autonomously, or executes arbitrary shell commands. `execution_enabled` remains `False`.
+
+Repository file-access enforcement validates the original lexical path before following it: inventory prunes prohibited directory components and omits unsafe files, and manifest discovery, text search, symbol extraction, and diagnostics share the same exclusions and bounded text reader (512 KiB by default). Both lexical names and resolved targets are checked; symlinks and Windows reparse points are omitted, including aliases to protected files such as `.env`. Unsafe, missing, oversized, or inaccessible files are omitted without exposing their contents or raw filesystem errors. Ordinary manifests retain their existing discovery behavior. These checks still do not eliminate concurrent filesystem races.
+
+Known-secret redaction runs before output truncation and search-context selection, including multiline private-key blocks, symbol docstrings/decorators, and dependency specifications. It remains heuristic, not a guarantee that every credential format is detected. Git inspection disables optional index writes, fsmonitor, external diff drivers, and text conversion helpers in addition to stripping ambient `GIT_*` overrides. Its returned diff is capped; subprocess capture and optional regular-expression searches have not been stress-verified for worst-case resource use. This remains a trusted local, single-owner service rather than a hardened public repository-analysis service.
+
+## Memory, context continuity, and knowledge
+
+This phase keeps the existing modular monolith, PostgreSQL schema family, owner predicates, capability policy, and shared request deadline. It adds no embeddings, vector search, GPU, paid service, or tool execution.
+
+### Information categories
+
+| Category | Where it lives | How it reaches the model | Permanence |
+|---|---|---|---|
+| Current request | `ChatRequest.message` | Always first, never truncated by context assembly | Saved as a conversation message only |
+| Recent conversation | `jarvis_app.messages` of the supplied `conversation_id` | Newest `JARVIS_CONTEXT_HISTORY_MESSAGES` turns (default 6, 0 disables), chronological, refs `H1…` | Conversation history; never promoted to memory |
+| Explicit memory | `jarvis_app.memories`, `source_kind='memory'` | Ranked retrieval, refs `M1…` | Created/edited/deleted only through `/memories` |
+| Document knowledge | `jarvis_app.memories`, `source_kind='document'` | Ranked retrieval, best-matching excerpt, refs `D1…` | Created only by `/memories/ingest` |
+| Temporary task context | `RequestContext.context` (`AssembledContext`) | The rendered context block | Exists only for the request; never stored |
+| Retrieval metadata | `ChatResponse.context` | Not sent as instructions | Response only; no content |
+
+Migration `0005_memory_source_kind.sql` adds `source_kind` (`memory`/`document`, default `memory`) and an owner-scoped `md5(content)` index for document de-duplication. Rows created before 0005, including earlier imports, remain `memory` because they cannot be reliably reclassified; re-import a file to store it as a document. `GET /memories?source_kind=memory|document` filters by kind.
+
+### Retrieval and ranking (`jarvis/memory/query.py`, `ranking.py`, `retrieval.py`)
+
+The previous chat path passed the entire message to `plainto_tsquery('simple', …)`. The `simple` configuration has no stopwords, so every word — including "which", "do", "the" — had to appear in one record; natural chat questions almost never matched (measured below). The explicit `POST /memories/search` API keeps that all-words behavior, which suits deliberate keyword search.
+
+Chat context retrieval now:
+
+1. Extracts up to 8 terms: NFKC + lowercase, letter/digit runs only, a fixed English stopword list, minimum length 2, and a light suffix trim (`memories`/`memory` → `memor`). Terms contain no tsquery operators by construction; the repository re-validates them and rejects anything else before connecting.
+2. If no terms remain, retrieval is a legitimate `empty` result and storage is not queried.
+3. `PostgresMemoryRepository.search_context` selects at most 40 owner-scoped candidates of the requested kinds using a GIN-indexable OR prefix query (`term1:* | term2:*`), all values bound as parameters.
+4. `rank_candidates` orders candidates in Python by: distinct-term coverage, adjacent-term phrase hits, match density (matching tokens / √token count), most recent `updated_at`, then UUID. Candidates covering fewer than half of the best candidate's terms are dropped as weak matches; records with identical normalized content are collapsed; per-kind limits apply.
+
+Retrieval outcomes stay distinct: `success`, `empty` (no matches or no searchable terms), `fallback` (storage failed with time remaining — the reply proceeds without retrieved context), and request-deadline expiry (HTTP 504). The application re-checks kinds and counts returned by any repository.
+
+### Bounded context assembly (`jarvis/memory/context.py`)
+
+`assemble_context` is a pure, deterministic function. Limits: history turns (`JARVIS_CONTEXT_HISTORY_MESSAGES`, 0–20), per-item excerpt characters (`JARVIS_CONTEXT_EXCERPT_MAX_CHARS`, default 1,500, 200–4,000), and total context characters (`JARVIS_CONTEXT_MAX_CHARS`, default 12,000, 2,000–40,000). Limits are characters, not tokens, because tokenization differs by provider; they are conservative, provider-neutral bounds. When the total budget is exceeded, explicit memories are kept first, then the newest conversation turns, then document excerpts; omitted items are counted. Long excerpts are cut at a word boundary with a visible ` […]` marker; document excerpts start at the paragraph with the most query-term matches.
+
+Rendering order is fixed: current request, then the context records (conversation chronologically, memories by rank, documents by rank), then a one-line reminder to answer the current request. Records are emitted as one JSON array with `ensure_ascii`, so record text cannot add lines, imitate the request header, or break out of the data block.
+
+History is loaded before retrieval and before any provider call; an unknown `conversation_id` therefore returns 404 without spending a provider request. Loading history requires `conversation.read` in addition to `conversation.write`. History storage failure degrades to `history_status = "unavailable"` and the request proceeds; malformed stored rows are skipped. The PostgreSQL history read honors the request deadline (`get_recent_messages`).
+
+### Source attribution
+
+Each supplied record carries a short ref (`H1`, `M1`, `D1`) mapped to its stored UUID. The system instruction asks the model to cite refs in square brackets and to say when the records do not contain the answer. `ChatResponse.context` (present only when persistence is enabled) lists every supplied source with `ref`, `source_type`, `source_id`, `label` (category or filename, if any), `role`, `timestamp`, `excerpt_chars`, `truncated`, and `cited_in_reply`, plus `history_status`, `retrieval_status`, `omitted_count`, `total_chars`, and `unknown_citation_count`. It never includes stored content. `cited_in_reply` only means the exact marker appears in the reply; it does not prove the fact was used correctly, and refs the model invents are counted, not listed. Missing metadata is reported as `null`, never inferred. The existing `memory_context` field is preserved and now lists the IDs of retrieved records actually included after budgeting. Stateless chat responses are unchanged (no `context` key).
+
+### Untrusted content
+
+Retrieved conversation turns, memories, and document excerpts are data. The system instruction states this, but the model is not the security boundary: authentication, the capability policy, owner predicates, the empty tool registry, and `execution_enabled = False` are enforced in code that never reads retrieved text. Tests use synthetic injection content to verify that it cannot alter those controls, break the prompt structure, or surface the auth token.
+
+### Known limitations
+
+- Lexical only: no synonyms, paraphrase, or semantic similarity. The suffix trim is English-oriented, and `lower()` differs from Unicode case folding for a few scripts.
+- Conversations still have no owner column; the single configured credential remains the boundary for conversation history (unchanged from v1.2).
+- One document is one record of at most 4,000 characters; no chunking.
+- Pre-0005 imported documents remain `memory` until re-imported.
+- Python ranking was measured only on a fixed synthetic corpus; live PostgreSQL candidate selection is covered by opt-in integration tests.
+
+## Core v2.4 — Coding advisory and patch proposals
+
+`POST /coding/analyze` composes the existing single-owner authentication with both `repo.read` and `chat.advisory`. `jarvis/coding/models.py` defines closed bounded contracts; `evidence.py` reuses repository inventory, guarded reading, Python symbol extraction and affected-test mappings. It collects static file hashes/excerpts and syntactic relationships, with explicit incomplete-discovery limits. `service.py` separates server-derived facts from unverified model reasoning and user-reported observations. Non-demo analysis requires request consent before sending bounded redacted context and uses a server-created coding specialist through `OrchestrationService.run_advisory` and the existing executor's validation, deadlines and transient retry handling. This is not a client-selectable executor or a second agent scheduler. Existing chat specialist registry behavior is unchanged.
+
+`patches.py` checks repository-relative paths, protected/private exclusions, exact unique replacements, current preimages and output limits before generating unified diffs in memory. Creation requires an explicitly requested nonexistent target. There is no apply path or test/command execution. Model output cannot change authentication, policy, tool metadata or execution state. Coding reports are ephemeral and do not write memories, conversations, repository files or audit records to PostgreSQL. Stable execution/outcome metadata is logged without source or prompt text.
+
+The React Coding workspace uses the existing API transport, escaped text, in-memory identity, session clearing and cancellation safeguards. Model advice never becomes a verified repository fact. Source inspection does not prove runtime behavior, redaction is heuristic, and filesystem races remain possible. The tools registry remains empty and `execution_enabled=False`. Full contracts, limits, browser/mock distinctions and developer commands are in [CODING_INTELLIGENCE.md](CODING_INTELLIGENCE.md). This phase implements coding proposals; it does not implement the later verification/execution engine.
+
+## Core v2.5 — Verification and quality engineering subsystem
+
+Project JARVIS v2.5 implements the complete software verification, quality engineering, and evidence-based validation subsystem (`jarvis/verification/`). It provides bounded test planning, in-memory patch verification, a strictly sandboxed process runner, and structured verification reports without modifying repository files.
+
+### Subsystem architecture (`jarvis/verification/`)
+
+- `models.py`: Defines closed Pydantic contracts for verification:
+  - 9-state lifecycle model: `not_checked`, `check_requested`, `check_running`, `check_passed`, `check_failed`, `check_timed_out`, `check_blocked`, `check_result_unavailable`, `inconclusive`.
+  - Check scopes: `syntax`, `unit`, `integration`, `typecheck`, `custom`.
+  - Structured evidence schema (`VerificationEvidence`): execution ID, check ID, duration, exit code, output excerpt (capped at 32KB), redacted error details, verified files, timestamps, provenance (`static_analysis`, `in_memory_simulation`, `direct_execution`), and explicit limitations.
+  - Verification plans and reports: `VerificationPlan`, `CheckResult`, `VerificationReport`.
+  - Execution profiles: `ProfileDefinition` with whitelisted binary, arguments, allowed target directories, working directories, and timeout ceilings.
+- `planner.py`: `VerificationPlanner` inspects repository metadata via `jarvis/repo/` to formulate targeted verification plans:
+  - Generates Python AST syntax checks for touched source modules.
+  - Discovers affected test suites via `identify_affected_tests` and `discover_tests_and_build`.
+  - Caps checks per target path (maximum 5 targets, bounded checks).
+- `patch_verifier.py`: `PatchVerifier` validates proposed patches statically in-memory:
+  - Preimage validation: verifies disk SHA-256 matches `sha256_before` (supporting exact disk and LF-normalized hashes).
+  - Target collision avoidance: ensures `create` operations do not overwrite existing files.
+  - In-memory postimage syntax verification: simulates postimage AST syntax without disk mutations (`repository_modified = False`).
+  - Represents planned test execution states truthfully as `check_blocked` when execution is disabled.
+- `runner.py`: `SafeProcessRunner` manages process execution with strict isolation:
+  - Whitelisted profiles: `pytest_targeted`, `compileall`, `vitest_targeted`, `tsc_build`, `playwright_targeted`.
+  - Target confinement: enforces targets reside strictly within approved directories (`tests`, `integration_tests`, `jarvis`, `frontend/src`). Rejects directory traversal and arbitrary shell commands.
+  - Environment sanitization: strips ambient variables, explicitly dropping `GIT_*`, `PYTHON*`, and credential variables.
+  - Bounded outputs & redaction: captures bounded output (default 32KB) with multi-pattern secret redaction (`sk-*`, AWS keys, tokens, passwords).
+  - Process cleanup: terminates spawned process groups upon timeout or cancellation.
+- `service.py`: `VerificationService` coordinates planning, patch validation, profile retrieval, and dual-gate execution runs.
+- `jarvis/api/routes/verification.py`: Authenticated endpoints:
+  - `POST /verification/plan`: Generates a targeted verification plan for specified target paths. Guarded by `Capability.VERIFY_READ`.
+  - `POST /verification/verify-patch`: Performs in-memory static patch validation without disk changes. Guarded by `Capability.VERIFY_READ`.
+  - `POST /verification/run`: Runs a planned verification check item. Guarded by `Capability.VERIFY_EXECUTE`.
+  - `GET /verification/profiles`: Lists approved execution profiles and current execution enablement. Guarded by `Capability.VERIFY_READ`.
+
+### Dual-Gate execution policy
+
+Verification execution follows a strict mandatory dual-gate policy:
+1. Server-side configuration gate: `settings.verification_execution_enabled` must be `True` (default `False`).
+2. Client-side authorization gate: Requesting owner must hold `Capability.VERIFY_EXECUTE`.
+
+If `verification_execution_enabled` is `False`, `POST /verification/run` immediately returns HTTP 403 Forbidden with a clear diagnostic message, regardless of client capabilities. `VERIFY_EXECUTE` alone can never enable execution.
+
+### Frontend integration (`CodingPanel.tsx`)
+
+The React Coding workspace integrates one-click in-memory validation for proposed patches. Clicking "Validate proposed patches" executes `verifyPatch` against the active patch set and renders an accessible verification card (`role="region"`):
+- Status badges with distinct visual treatments for all 9 verification states.
+- Preimage hash validation facts and in-memory simulated AST parsing results.
+- Honest reporting of blocked unit tests and explicit limitation disclosures.
+- Confirmation that repository files were not modified (`repository_modified = False`).
+
+## Core v2.6 — Browser intelligence
+
+`jarvis/browser/` keeps responsibilities separate: `url_policy.py` (destination checks), `providers.py` (mock, HTTP, optional Playwright behind one `BrowserProvider` interface), `extraction.py` (bounded standard-library DOM extraction; values of fields are never captured), `actions.py` (deterministic classification), `service.py` (sessions, limits, enforcement, observation, audit), `research.py` (sources vs. verbatim observations vs. labelled model interpretation), and `checks.py` (v2.5 verification contracts). `jarvis/api/routes/browser.py` exposes authenticated routes guarded by `browser.read`, `browser.interact`, and `verify.read`. Permission and safety decisions run in trusted code before any provider call; page content never influences policy. Consequential actions are never executed. The service is constructed at startup without opening a browser and all sessions are closed on shutdown. Full design, configuration, and limitations: `docs/BROWSER_INTELLIGENCE.md`.
+
+## Core v2.7 — Capability registry and read-only tool runtime
+
+`jarvis/tools/` adds typed `CapabilityDescriptor`, `ToolCall`, `ToolResult`, `RiskClass`, and metadata-only `ToolAuditEvent` contracts; a fixed allowlist of read-only handlers that wrap existing services (memory, repository intelligence, verification planning, browser observation) plus a safe calculator; and `ToolRuntime`, which enforces, in order: runtime enabled, registered-and-bound handler, LOW-risk read-only, server-side permissions (`tools.invoke` plus each tool's capability), strict input validation, dependency availability, bounded execution with timeouts and concurrency limits, validated and size-bounded output with secret redaction, sanitized errors, and an audit event for every call. `tools.json` remains data validated by the unchanged orchestration `ToolRegistry`; `executable: false` keeps the orchestrator tool-free until v2.8. Routes: `GET /capabilities`, `POST /tools/calls`, `GET /tools/audit`. Status note: pgvector and semantic retrieval are **not implemented** (deferred, D6). Details: `docs/TOOL_RUNTIME.md`.
+
+## Core v2.8 — Action loop
+
+`jarvis/agent/` connects chat to the v2.7 tool runtime: offered tools are those currently invocable; a rule-based (demo/offline) or model proposer returns a closed `ToolProposal`; trusted code rejects unoffered tools and non-object arguments, deduplicates, bounds rounds/calls/deadline, and executes through `ToolRuntime.invoke`; results reach experts as untrusted JSON (`RequestContext.tool_evidence`, refs `T1…`); `jarvis/agent/verification.py` independently checks citations and calculator values. `ChatResponse.tool_activity` reports calls, statuses, stop reason, and verification. Off by default (`JARVIS_CHAT_TOOLS_ENABLED`). Details: `docs/ACTION_LOOP.md`.
+
+## Core v2.9 — Approval gateway and audit trail
+
+`jarvis/audit/` adds strict `AuditRecord`, `ApprovalRequest` (with `execution: "not_available"`), and `ApprovalProposal` contracts; memory stores (non-durable) and PostgreSQL stores (durable, migration 0006, parameterized owner-scoped SQL, transaction-local statement timeouts); `AuditService` (redacted metadata, durable-failure fallback to memory, never mislabelled) and `ApprovalService` (scope-hash dedupe, pending limit, TTL expiry, a single conditional decision update, every step audited). `ToolRuntime` and `BrowserService` send every call/action to the central audit and create approval requests where they already refuse (`approval_required`, consequential clicks). Routes `GET /activity`, `GET /approvals[/{id}]`, `POST /approvals/{id}/approve|reject` require `audit.read`, `approvals.read`, `approvals.decide`. Approving executes nothing. Details: `docs/APPROVALS_AUDIT.md`.
+
+## Core v3.0 — Voice and unified interface
+
+Voice is a frontend capability: `frontend/src/voice/speech.ts` defines a `SpeechProvider` interface with a Web Speech API implementation (recognition and synthesis performed by the browser), and `VoiceControls` adds an opt-in disclosure, microphone and read-aloud controls to the chat composer. Final transcripts are inserted into the draft; they reach the backend only through the existing `/chat` request when the owner sends, so there is no new server input path or execution surface. `GET /interface/config` (`jarvis/api/routes/interface.py`) returns public, fixed, non-sensitive feature flags (literal `server_receives_audio=false`, `auto_send=false`, `approval_execution=false`) used to show voice and mark disabled views. Details: `docs/VOICE_INTERFACE.md`.
+
+## Advanced intelligence layer (v5.1–v5.6)
+
+New packages `jarvis/routing`, `jarvis/knowledge_graph`, `jarvis/contextual`, `jarvis/multimodal`, `jarvis/reasoning` and `jarvis/personalization` are assembled by `jarvis/advanced_intelligence.build_intelligence` and exposed through `jarvis/api/routes/intelligence.py` (capabilities `intelligence.read`, `intelligence.evaluate`, `knowledge_graph.write`, `personalization.manage`, plus existing `memory.read`/`memory.write`). The router wraps the existing `IntelligenceProvider` adapters; eligibility rules (availability, privacy/locality, modality, context, structured output) are hard filters and fallbacks stay inside the eligible set. The graph stores typed, provenance-carrying relationships whose status separates verified from inferred facts. Context selection isolates owners and projects before scoring and budgets by the selected model's declared context. Multimodal inputs keep media local unless disclosure is allowed per request. Plan evaluation and refinement never execute. Personalization holds only allowlisted presentation/routing preferences and can only tighten privacy. Details and integration contracts: `docs/ADVANCED_INTELLIGENCE.md`.

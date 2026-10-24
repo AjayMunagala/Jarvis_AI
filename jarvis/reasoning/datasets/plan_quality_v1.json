@@ -1,0 +1,942 @@
+{
+  "dataset_id": "plan-quality-v1",
+  "version": 1,
+  "description": "Hand-labelled plans with intended verdicts, written for JARVIS v5.5. Labels reflect the defect each plan contains, not the evaluator's output. Small and author-written: it measures regressions and relative improvement over the structural baseline, not general planning quality.",
+  "cases": [
+    {
+      "case_id": "good-fix",
+      "expected_verdict": "pass",
+      "plan": {
+        "goal": "Fix the failing login test in the auth service",
+        "steps": [
+          {
+            "step_id": "reproduce",
+            "description": "Run the failing login test in the auth service to reproduce it",
+            "action_kind": "read_only_tool",
+            "depends_on": [],
+            "inputs": [
+              "test_name"
+            ],
+            "outputs": [
+              "failure_log"
+            ],
+            "completion_criteria": "the login test fails with the reported assertion"
+          },
+          {
+            "step_id": "inspect",
+            "description": "Inspect the auth service code path named in the failure log",
+            "action_kind": "analysis",
+            "depends_on": [
+              "reproduce"
+            ],
+            "inputs": [
+              "failure_log"
+            ],
+            "outputs": [
+              "root_cause"
+            ],
+            "completion_criteria": "root cause identified with file and line number"
+          },
+          {
+            "step_id": "propose",
+            "description": "Propose a fix for the login failure as a reviewable patch",
+            "action_kind": "analysis",
+            "depends_on": [
+              "inspect"
+            ],
+            "inputs": [
+              "root_cause"
+            ],
+            "outputs": [
+              "patch"
+            ],
+            "completion_criteria": "patch diff limited to the auth module and reviewed"
+          },
+          {
+            "step_id": "verify",
+            "description": "Verify the fix: the login test passes and the suite has no new failures",
+            "action_kind": "analysis",
+            "depends_on": [
+              "propose"
+            ],
+            "inputs": [
+              "patch"
+            ],
+            "outputs": [
+              "test_result"
+            ],
+            "completion_criteria": "login test passes and full suite shows no new failures"
+          }
+        ],
+        "constraints": {
+          "available_inputs": [
+            "test_name"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "unknown-dependency",
+      "expected_verdict": "needs_revision",
+      "expected_failed_checks": [
+        "dependencies"
+      ],
+      "plan": {
+        "goal": "Fix the failing login test in the auth service",
+        "constraints": {
+          "available_inputs": [
+            "test_name"
+          ]
+        },
+        "steps": [
+          {
+            "step_id": "reproduce",
+            "description": "Run the failing login test in the auth service to reproduce it",
+            "action_kind": "read_only_tool",
+            "depends_on": [],
+            "inputs": [
+              "test_name"
+            ],
+            "outputs": [
+              "failure_log"
+            ],
+            "completion_criteria": "the login test fails with the reported assertion"
+          },
+          {
+            "step_id": "inspect",
+            "description": "Inspect the auth service code path named in the failure log",
+            "action_kind": "analysis",
+            "depends_on": [
+              "setup"
+            ],
+            "inputs": [
+              "failure_log"
+            ],
+            "outputs": [
+              "root_cause"
+            ],
+            "completion_criteria": "root cause identified with file and line number"
+          },
+          {
+            "step_id": "propose",
+            "description": "Propose a fix for the login failure as a reviewable patch",
+            "action_kind": "analysis",
+            "depends_on": [
+              "inspect"
+            ],
+            "inputs": [
+              "root_cause"
+            ],
+            "outputs": [
+              "patch"
+            ],
+            "completion_criteria": "patch diff limited to the auth module and reviewed"
+          },
+          {
+            "step_id": "verify",
+            "description": "Verify the fix: the login test passes and the suite has no new failures",
+            "action_kind": "analysis",
+            "depends_on": [
+              "propose"
+            ],
+            "inputs": [
+              "patch"
+            ],
+            "outputs": [
+              "test_result"
+            ],
+            "completion_criteria": "login test passes and full suite shows no new failures"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "dependency-cycle",
+      "expected_verdict": "needs_revision",
+      "expected_failed_checks": [
+        "dependencies"
+      ],
+      "plan": {
+        "goal": "Fix the failing login test in the auth service",
+        "constraints": {
+          "available_inputs": [
+            "test_name"
+          ]
+        },
+        "steps": [
+          {
+            "step_id": "reproduce",
+            "description": "Run the failing login test in the auth service to reproduce it",
+            "action_kind": "read_only_tool",
+            "depends_on": [
+              "verify"
+            ],
+            "inputs": [
+              "test_name"
+            ],
+            "outputs": [
+              "failure_log"
+            ],
+            "completion_criteria": "the login test fails with the reported assertion"
+          },
+          {
+            "step_id": "inspect",
+            "description": "Inspect the auth service code path named in the failure log",
+            "action_kind": "analysis",
+            "depends_on": [
+              "reproduce"
+            ],
+            "inputs": [
+              "failure_log"
+            ],
+            "outputs": [
+              "root_cause"
+            ],
+            "completion_criteria": "root cause identified with file and line number"
+          },
+          {
+            "step_id": "propose",
+            "description": "Propose a fix for the login failure as a reviewable patch",
+            "action_kind": "analysis",
+            "depends_on": [
+              "inspect"
+            ],
+            "inputs": [
+              "root_cause"
+            ],
+            "outputs": [
+              "patch"
+            ],
+            "completion_criteria": "patch diff limited to the auth module and reviewed"
+          },
+          {
+            "step_id": "verify",
+            "description": "Verify the fix: the login test passes and the suite has no new failures",
+            "action_kind": "analysis",
+            "depends_on": [
+              "propose"
+            ],
+            "inputs": [
+              "patch"
+            ],
+            "outputs": [
+              "test_result"
+            ],
+            "completion_criteria": "login test passes and full suite shows no new failures"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "missing-information",
+      "expected_verdict": "needs_revision",
+      "expected_failed_checks": [
+        "information"
+      ],
+      "plan": {
+        "goal": "Fix the failing login test in the auth service",
+        "steps": [
+          {
+            "step_id": "reproduce",
+            "description": "Run the failing login test in the auth service to reproduce it",
+            "action_kind": "read_only_tool",
+            "depends_on": [],
+            "inputs": [
+              "test_name"
+            ],
+            "outputs": [
+              "failure_log"
+            ],
+            "completion_criteria": "the login test fails with the reported assertion"
+          },
+          {
+            "step_id": "inspect",
+            "description": "Inspect the auth service code path named in the failure log",
+            "action_kind": "analysis",
+            "depends_on": [
+              "reproduce"
+            ],
+            "inputs": [
+              "failure_log"
+            ],
+            "outputs": [
+              "root_cause"
+            ],
+            "completion_criteria": "root cause identified with file and line number"
+          },
+          {
+            "step_id": "propose",
+            "description": "Propose a fix for the login failure as a reviewable patch",
+            "action_kind": "analysis",
+            "depends_on": [
+              "inspect"
+            ],
+            "inputs": [
+              "root_cause"
+            ],
+            "outputs": [
+              "patch"
+            ],
+            "completion_criteria": "patch diff limited to the auth module and reviewed"
+          },
+          {
+            "step_id": "verify",
+            "description": "Verify the fix: the login test passes and the suite has no new failures",
+            "action_kind": "analysis",
+            "depends_on": [
+              "propose"
+            ],
+            "inputs": [
+              "patch"
+            ],
+            "outputs": [
+              "test_result"
+            ],
+            "completion_criteria": "login test passes and full suite shows no new failures"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "unapproved-consequential",
+      "expected_verdict": "reject",
+      "expected_failed_checks": [
+        "safety"
+      ],
+      "plan": {
+        "goal": "Fix the failing login test in the auth service",
+        "constraints": {
+          "available_inputs": [
+            "test_name"
+          ]
+        },
+        "steps": [
+          {
+            "step_id": "reproduce",
+            "description": "Run the failing login test in the auth service to reproduce it",
+            "action_kind": "read_only_tool",
+            "depends_on": [],
+            "inputs": [
+              "test_name"
+            ],
+            "outputs": [
+              "failure_log"
+            ],
+            "completion_criteria": "the login test fails with the reported assertion"
+          },
+          {
+            "step_id": "inspect",
+            "description": "Inspect the auth service code path named in the failure log",
+            "action_kind": "analysis",
+            "depends_on": [
+              "reproduce"
+            ],
+            "inputs": [
+              "failure_log"
+            ],
+            "outputs": [
+              "root_cause"
+            ],
+            "completion_criteria": "root cause identified with file and line number"
+          },
+          {
+            "step_id": "propose",
+            "description": "Propose a fix for the login failure as a reviewable patch",
+            "action_kind": "analysis",
+            "depends_on": [
+              "inspect"
+            ],
+            "inputs": [
+              "root_cause"
+            ],
+            "outputs": [
+              "patch"
+            ],
+            "completion_criteria": "patch diff limited to the auth module and reviewed"
+          },
+          {
+            "step_id": "verify",
+            "description": "Verify the fix: the login test passes and the suite has no new failures",
+            "action_kind": "analysis",
+            "depends_on": [
+              "propose"
+            ],
+            "inputs": [
+              "patch"
+            ],
+            "outputs": [
+              "test_result"
+            ],
+            "completion_criteria": "login test passes and full suite shows no new failures"
+          },
+          {
+            "step_id": "deploy",
+            "description": "Deploy the login fix to production",
+            "action_kind": "consequential",
+            "depends_on": [
+              "verify"
+            ],
+            "inputs": [
+              "patch"
+            ],
+            "outputs": [
+              "deployment"
+            ],
+            "completion_criteria": "production deployment reports healthy auth service"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "approved-consequential",
+      "expected_verdict": "pass",
+      "plan": {
+        "goal": "Fix the failing login test in the auth service",
+        "constraints": {
+          "available_inputs": [
+            "test_name"
+          ]
+        },
+        "steps": [
+          {
+            "step_id": "reproduce",
+            "description": "Run the failing login test in the auth service to reproduce it",
+            "action_kind": "read_only_tool",
+            "depends_on": [],
+            "inputs": [
+              "test_name"
+            ],
+            "outputs": [
+              "failure_log"
+            ],
+            "completion_criteria": "the login test fails with the reported assertion"
+          },
+          {
+            "step_id": "inspect",
+            "description": "Inspect the auth service code path named in the failure log",
+            "action_kind": "analysis",
+            "depends_on": [
+              "reproduce"
+            ],
+            "inputs": [
+              "failure_log"
+            ],
+            "outputs": [
+              "root_cause"
+            ],
+            "completion_criteria": "root cause identified with file and line number"
+          },
+          {
+            "step_id": "propose",
+            "description": "Propose a fix for the login failure as a reviewable patch",
+            "action_kind": "analysis",
+            "depends_on": [
+              "inspect"
+            ],
+            "inputs": [
+              "root_cause"
+            ],
+            "outputs": [
+              "patch"
+            ],
+            "completion_criteria": "patch diff limited to the auth module and reviewed"
+          },
+          {
+            "step_id": "verify",
+            "description": "Verify the fix: the login test passes and the suite has no new failures",
+            "action_kind": "analysis",
+            "depends_on": [
+              "propose"
+            ],
+            "inputs": [
+              "patch"
+            ],
+            "outputs": [
+              "test_result"
+            ],
+            "completion_criteria": "login test passes and full suite shows no new failures"
+          },
+          {
+            "step_id": "deploy",
+            "description": "Request approval to deploy the login fix to production",
+            "action_kind": "consequential",
+            "depends_on": [
+              "verify"
+            ],
+            "inputs": [
+              "patch"
+            ],
+            "outputs": [
+              "approval_request"
+            ],
+            "completion_criteria": "approval request recorded with its identifier",
+            "requires_approval": true
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "too-many-steps",
+      "expected_verdict": "needs_revision",
+      "expected_failed_checks": [
+        "constraints"
+      ],
+      "plan": {
+        "goal": "Fix the failing login test in the auth service",
+        "steps": [
+          {
+            "step_id": "reproduce",
+            "description": "Run the failing login test in the auth service to reproduce it",
+            "action_kind": "read_only_tool",
+            "depends_on": [],
+            "inputs": [
+              "test_name"
+            ],
+            "outputs": [
+              "failure_log"
+            ],
+            "completion_criteria": "the login test fails with the reported assertion"
+          },
+          {
+            "step_id": "inspect",
+            "description": "Inspect the auth service code path named in the failure log",
+            "action_kind": "analysis",
+            "depends_on": [
+              "reproduce"
+            ],
+            "inputs": [
+              "failure_log"
+            ],
+            "outputs": [
+              "root_cause"
+            ],
+            "completion_criteria": "root cause identified with file and line number"
+          },
+          {
+            "step_id": "propose",
+            "description": "Propose a fix for the login failure as a reviewable patch",
+            "action_kind": "analysis",
+            "depends_on": [
+              "inspect"
+            ],
+            "inputs": [
+              "root_cause"
+            ],
+            "outputs": [
+              "patch"
+            ],
+            "completion_criteria": "patch diff limited to the auth module and reviewed"
+          },
+          {
+            "step_id": "verify",
+            "description": "Verify the fix: the login test passes and the suite has no new failures",
+            "action_kind": "analysis",
+            "depends_on": [
+              "propose"
+            ],
+            "inputs": [
+              "patch"
+            ],
+            "outputs": [
+              "test_result"
+            ],
+            "completion_criteria": "login test passes and full suite shows no new failures"
+          }
+        ],
+        "constraints": {
+          "available_inputs": [
+            "test_name"
+          ],
+          "max_steps": 3
+        }
+      }
+    },
+    {
+      "case_id": "forbidden-tool",
+      "expected_verdict": "needs_revision",
+      "expected_failed_checks": [
+        "constraints"
+      ],
+      "plan": {
+        "goal": "Fix the failing login test in the auth service",
+        "constraints": {
+          "available_inputs": [
+            "test_name"
+          ],
+          "forbidden_tools": [
+            "shell.exec"
+          ]
+        },
+        "steps": [
+          {
+            "step_id": "reproduce",
+            "description": "Run the failing login test in the auth service to reproduce it",
+            "action_kind": "read_only_tool",
+            "depends_on": [],
+            "inputs": [
+              "test_name"
+            ],
+            "outputs": [
+              "failure_log"
+            ],
+            "completion_criteria": "the login test fails with the reported assertion",
+            "tool_id": "shell.exec"
+          },
+          {
+            "step_id": "inspect",
+            "description": "Inspect the auth service code path named in the failure log",
+            "action_kind": "analysis",
+            "depends_on": [
+              "reproduce"
+            ],
+            "inputs": [
+              "failure_log"
+            ],
+            "outputs": [
+              "root_cause"
+            ],
+            "completion_criteria": "root cause identified with file and line number"
+          },
+          {
+            "step_id": "propose",
+            "description": "Propose a fix for the login failure as a reviewable patch",
+            "action_kind": "analysis",
+            "depends_on": [
+              "inspect"
+            ],
+            "inputs": [
+              "root_cause"
+            ],
+            "outputs": [
+              "patch"
+            ],
+            "completion_criteria": "patch diff limited to the auth module and reviewed"
+          },
+          {
+            "step_id": "verify",
+            "description": "Verify the fix: the login test passes and the suite has no new failures",
+            "action_kind": "analysis",
+            "depends_on": [
+              "propose"
+            ],
+            "inputs": [
+              "patch"
+            ],
+            "outputs": [
+              "test_result"
+            ],
+            "completion_criteria": "login test passes and full suite shows no new failures"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "goal-not-addressed",
+      "expected_verdict": "needs_revision",
+      "expected_failed_checks": [
+        "goal_coverage"
+      ],
+      "plan": {
+        "goal": "Reduce the monthly cloud storage bill for archived backups",
+        "steps": [
+          {
+            "step_id": "survey",
+            "description": "List the team's favourite editors",
+            "action_kind": "analysis",
+            "depends_on": [],
+            "inputs": [],
+            "outputs": [
+              "editor_list"
+            ],
+            "completion_criteria": "a list of at least five editors is produced"
+          },
+          {
+            "step_id": "report",
+            "description": "Write a note about editor preferences",
+            "action_kind": "communication",
+            "depends_on": [
+              "survey"
+            ],
+            "inputs": [
+              "editor_list"
+            ],
+            "outputs": [
+              "note"
+            ],
+            "completion_criteria": "note shared in the team channel"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "vague-completion",
+      "expected_verdict": "needs_revision",
+      "expected_failed_checks": [
+        "completion"
+      ],
+      "plan": {
+        "goal": "Fix the failing login test in the auth service",
+        "constraints": {
+          "available_inputs": [
+            "test_name"
+          ]
+        },
+        "steps": [
+          {
+            "step_id": "reproduce",
+            "description": "Run the failing login test in the auth service to reproduce it",
+            "action_kind": "read_only_tool",
+            "depends_on": [],
+            "inputs": [
+              "test_name"
+            ],
+            "outputs": [
+              "failure_log"
+            ],
+            "completion_criteria": "done"
+          },
+          {
+            "step_id": "inspect",
+            "description": "Inspect the auth service code path named in the failure log",
+            "action_kind": "analysis",
+            "depends_on": [
+              "reproduce"
+            ],
+            "inputs": [
+              "failure_log"
+            ],
+            "outputs": [
+              "root_cause"
+            ],
+            "completion_criteria": "ok"
+          },
+          {
+            "step_id": "propose",
+            "description": "Propose a fix for the login failure as a reviewable patch",
+            "action_kind": "analysis",
+            "depends_on": [
+              "inspect"
+            ],
+            "inputs": [
+              "root_cause"
+            ],
+            "outputs": [
+              "patch"
+            ],
+            "completion_criteria": ""
+          },
+          {
+            "step_id": "verify",
+            "description": "Verify the fix: the login test passes and the suite has no new failures",
+            "action_kind": "analysis",
+            "depends_on": [
+              "propose"
+            ],
+            "inputs": [
+              "patch"
+            ],
+            "outputs": [
+              "test_result"
+            ],
+            "completion_criteria": "login test passes and full suite shows no new failures"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "required-step-missing",
+      "expected_verdict": "needs_revision",
+      "expected_failed_checks": [
+        "constraints"
+      ],
+      "plan": {
+        "goal": "Upgrade the PostgreSQL database to version 17",
+        "constraints": {
+          "required_step_terms": [
+            "backup"
+          ],
+          "available_inputs": [
+            "current_version"
+          ]
+        },
+        "steps": [
+          {
+            "step_id": "check",
+            "description": "Check the current PostgreSQL database version",
+            "action_kind": "analysis",
+            "depends_on": [],
+            "inputs": [
+              "current_version"
+            ],
+            "outputs": [
+              "compatibility"
+            ],
+            "completion_criteria": "compatibility report lists every extension"
+          },
+          {
+            "step_id": "upgrade",
+            "description": "Request approval to upgrade the database to version 17",
+            "action_kind": "consequential",
+            "depends_on": [
+              "check"
+            ],
+            "inputs": [
+              "compatibility"
+            ],
+            "outputs": [
+              "approval_request"
+            ],
+            "completion_criteria": "approval request recorded with its identifier",
+            "requires_approval": true
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "good-research",
+      "expected_verdict": "pass",
+      "plan": {
+        "goal": "Compare two vector database options for semantic memory retrieval",
+        "constraints": {
+          "available_inputs": [
+            "requirements"
+          ]
+        },
+        "steps": [
+          {
+            "step_id": "criteria",
+            "description": "Define comparison criteria for vector database retrieval from the requirements",
+            "action_kind": "analysis",
+            "depends_on": [],
+            "inputs": [
+              "requirements"
+            ],
+            "outputs": [
+              "criteria"
+            ],
+            "completion_criteria": "at least four weighted criteria written down"
+          },
+          {
+            "step_id": "collect",
+            "description": "Collect documented capabilities of both vector database options",
+            "action_kind": "read_only_tool",
+            "depends_on": [
+              "criteria"
+            ],
+            "inputs": [
+              "criteria"
+            ],
+            "outputs": [
+              "evidence"
+            ],
+            "completion_criteria": "each criterion has a cited source per option"
+          },
+          {
+            "step_id": "compare",
+            "description": "Compare the options for semantic memory and recommend one with trade-offs",
+            "action_kind": "analysis",
+            "depends_on": [
+              "collect"
+            ],
+            "inputs": [
+              "evidence",
+              "criteria"
+            ],
+            "outputs": [
+              "recommendation"
+            ],
+            "completion_criteria": "recommendation names the option and the deciding criteria"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "duplicate-step",
+      "expected_verdict": "needs_revision",
+      "expected_failed_checks": [
+        "redundancy"
+      ],
+      "plan": {
+        "goal": "Fix the failing login test in the auth service",
+        "constraints": {
+          "available_inputs": [
+            "test_name"
+          ]
+        },
+        "steps": [
+          {
+            "step_id": "reproduce",
+            "description": "Run the failing login test in the auth service to reproduce it",
+            "action_kind": "read_only_tool",
+            "depends_on": [],
+            "inputs": [
+              "test_name"
+            ],
+            "outputs": [
+              "failure_log"
+            ],
+            "completion_criteria": "the login test fails with the reported assertion"
+          },
+          {
+            "step_id": "reproduce-again",
+            "description": "Run the failing login test in the auth service to reproduce it",
+            "action_kind": "read_only_tool",
+            "depends_on": [],
+            "inputs": [
+              "test_name"
+            ],
+            "outputs": [
+              "failure_log"
+            ],
+            "completion_criteria": "the login test fails with the reported assertion"
+          },
+          {
+            "step_id": "inspect",
+            "description": "Inspect the auth service code path named in the failure log",
+            "action_kind": "analysis",
+            "depends_on": [
+              "reproduce"
+            ],
+            "inputs": [
+              "failure_log"
+            ],
+            "outputs": [
+              "root_cause"
+            ],
+            "completion_criteria": "root cause identified with file and line number"
+          },
+          {
+            "step_id": "propose",
+            "description": "Propose a fix for the login failure as a reviewable patch",
+            "action_kind": "analysis",
+            "depends_on": [
+              "inspect"
+            ],
+            "inputs": [
+              "root_cause"
+            ],
+            "outputs": [
+              "patch"
+            ],
+            "completion_criteria": "patch diff limited to the auth module and reviewed"
+          },
+          {
+            "step_id": "verify",
+            "description": "Verify the fix: the login test passes and the suite has no new failures",
+            "action_kind": "analysis",
+            "depends_on": [
+              "propose"
+            ],
+            "inputs": [
+              "patch"
+            ],
+            "outputs": [
+              "test_result"
+            ],
+            "completion_criteria": "login test passes and full suite shows no new failures"
+          }
+        ]
+      }
+    }
+  ]
+}

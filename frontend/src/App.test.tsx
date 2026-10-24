@@ -3,11 +3,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import userEvent from '@testing-library/user-event'
 import App from './App'
 import './styles.css'
-import { getConversationMessages, getMemory, getReadiness, listConversations, listMemories, sendChatMessage, type ConversationPage, type ReadinessResponse } from './services/api'
+import { getConversationMessages, getInterfaceConfig, getMemory, getReadiness, listConversations, listMemories, sendChatMessage, type ConversationPage, type ReadinessResponse } from './services/api'
 
 vi.mock('./services/api', () => ({
   sendChatMessage: vi.fn(), listConversations: vi.fn(), getConversationMessages: vi.fn(), listMemories: vi.fn(), searchMemories: vi.fn(),
-  createMemory: vi.fn(), updateMemory: vi.fn(), deleteMemory: vi.fn(), getMemory: vi.fn(), getReadiness: vi.fn(),
+  createMemory: vi.fn(), updateMemory: vi.fn(), deleteMemory: vi.fn(), getMemory: vi.fn(), getReadiness: vi.fn(), analyzeCoding: vi.fn(), getInterfaceConfig: vi.fn(),
 }))
 const sendMock = vi.mocked(sendChatMessage)
 const listConversationsMock = vi.mocked(listConversations)
@@ -453,5 +453,132 @@ describe('JARVIS chat', () => {
     await userEvent.click(screen.getByLabelText(/System status: offline/i))
     expect(await screen.findByText('System ready')).toBeInTheDocument()
     unmountOffline()
+  })
+
+  it('keeps component failures authoritative after successful chat and refreshes readiness', async () => {
+    const unavailable: ReadinessResponse = {
+      status: 'not_ready', version: '2.1.0',
+      components: { application: 'ready', repository_intelligence: 'unavailable' },
+    }
+    getReadinessMock.mockResolvedValue(unavailable)
+    sendMock.mockResolvedValue({ reply: 'Chat still works.', provider: 'mock', demo: true })
+    render(<App />)
+    expect(await screen.findByText('System not ready')).toBeInTheDocument()
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'Hello{Enter}')
+    expect(await screen.findByText('Chat still works.')).toBeInTheDocument()
+    await waitFor(() => expect(getReadinessMock).toHaveBeenCalledTimes(2))
+    expect(screen.getByText('System not ready')).toBeInTheDocument()
+    expect(screen.queryByText('System ready')).not.toBeInTheDocument()
+
+    getReadinessMock.mockResolvedValue({ ...unavailable, status: 'ready', components: { application: 'ready', repository_intelligence: 'ready' } })
+    await userEvent.click(screen.getByLabelText('System status: not ready'))
+    expect(await screen.findByText('System ready')).toBeInTheDocument()
+    expect(getReadinessMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not promote readiness after successful conversation listing or a failed refresh', async () => {
+    getReadinessMock.mockResolvedValue({
+      status: 'not_ready', version: '2.1.0', components: { repository_intelligence: 'unavailable' },
+    })
+    render(<App />)
+    expect(await screen.findByText('System not ready')).toBeInTheDocument()
+    await unlockWithToken()
+    expect(await screen.findByText('No saved conversations yet.')).toBeInTheDocument()
+    await waitFor(() => expect(getReadinessMock).toHaveBeenCalledTimes(2))
+    expect(screen.getByText('System not ready')).toBeInTheDocument()
+
+    getReadinessMock.mockRejectedValue(new Error('Network unavailable'))
+    await userEvent.click(screen.getByLabelText('System status: not ready'))
+    expect(await screen.findByText('System offline')).toBeInTheDocument()
+    expect(screen.queryByText('System ready')).not.toBeInTheDocument()
+  })
+
+  it('ignores an older ready response after a newer readiness check fails', async () => {
+    let resolveInitial!: (value: ReadinessResponse) => void
+    getReadinessMock.mockReturnValueOnce(new Promise((resolve) => { resolveInitial = resolve }))
+      .mockResolvedValueOnce({ status: 'not_ready', version: '2.1.0', components: { authorization: 'unavailable' } })
+    sendMock.mockResolvedValue({ reply: 'Successful chat.', provider: 'mock', demo: true })
+    render(<App />)
+    expect(screen.getByText('Checking…')).toBeInTheDocument()
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'Hello{Enter}')
+    expect(await screen.findByText('System not ready')).toBeInTheDocument()
+    await act(async () => resolveInitial({ status: 'ready', version: '2.1.0', components: { application: 'ready' } }))
+    expect(screen.getByText('System not ready')).toBeInTheDocument()
+    expect(screen.queryByText('System ready')).not.toBeInTheDocument()
+  })
+
+  it('lists the context sources supplied to the model with cited markers', async () => {
+    sendMock.mockResolvedValue({
+      reply: 'Use backoff [M1].', provider: 'mock', demo: true,
+      context: {
+        history_status: 'unavailable', retrieval_status: 'success', omitted_count: 1, total_chars: 80, unknown_citation_count: 0,
+        sources: [
+          { ref: 'M1', source_type: 'memory', source_id: 'm-1', label: 'decisions', role: null, timestamp: null, excerpt_chars: 40, truncated: false, cited_in_reply: true },
+          { ref: 'D1', source_type: 'document', source_id: 'd-1', label: 'runbook.md', role: null, timestamp: null, excerpt_chars: 40, truncated: true, cited_in_reply: false },
+        ],
+      },
+    })
+    render(<App />)
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'How do retries work?{Enter}')
+    const sources = await screen.findByLabelText('Context supplied to the model')
+    expect(sources).toHaveTextContent('M1 memory · decisions (cited), D1 document · runbook.md')
+    expect(sources).toHaveTextContent('history unavailable')
+    expect(sources).toHaveTextContent('1 omitted for size')
+  })
+
+  it('shows tool calls with honest statuses and the independent verification result', async () => {
+    sendMock.mockResolvedValue({
+      reply: 'The result is 42 [T1].', provider: 'scripted', demo: false,
+      tool_activity: {
+        proposer: 'model', rounds_used: 1, stopped_reason: 'completed', limitations: [],
+        calls: [
+          { ref: 'T1', round: 1, proposer: 'model', tool_id: 'calculator', purpose: 'compute', status: 'succeeded', error_code: null, executed: true, evidence: ['computed:calculator'], duration_ms: 2, call_id: 'TC-0123456789abcdef', audit_event_id: 'AE-0123456789abcdef', untrusted_content: false },
+          { ref: 'T2', round: 1, proposer: 'model', tool_id: 'shell.exec', purpose: 'x', status: 'denied', error_code: 'not_offered', executed: false, evidence: [], duration_ms: 0, call_id: null, audit_event_id: null, untrusted_content: false },
+        ],
+        verification: { status: 'partially_verified', checks: [], cited_refs: ['T1'], unknown_citation_count: 0, summary: 'Some tool results are cited correctly; others are uncited or failed.' },
+      },
+    })
+    render(<App />)
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'compute 6 times 7{Enter}')
+    const tools = await screen.findByLabelText('Tools used for this answer')
+    expect(tools).toHaveTextContent('model-proposed, validated by JARVIS')
+    expect(tools).toHaveTextContent('T1 calculator · succeeded, T2 shell.exec · denied (not_offered)')
+    expect(tools).toHaveTextContent('Verification: partially verified')
+  })
+})
+
+describe('JARVIS unified interface and voice (v3.0)', () => {
+  const config = (voice: boolean, features: Partial<{ browser: boolean; tools: boolean; memory: boolean }> = {}) => ({
+    contract_version: '1' as const,
+    features: { chat: true, memory: false, coding: true, browser: false, tools: false, chat_tools: false, activity: true, approval_execution: false as const, ...features },
+    voice: { enabled: voice, mode: 'browser_native' as const, server_receives_audio: false as const, auto_send: false as const, requires_opt_in: true as const },
+  })
+
+  it('hides voice controls when the interface configuration is unavailable', async () => {
+    vi.mocked(getInterfaceConfig).mockRejectedValue(new Error('offline'))
+    render(<App />)
+    await waitFor(() => expect(getInterfaceConfig).toHaveBeenCalled())
+    expect(screen.queryByRole('button', { name: /voice input/i })).toBeNull()
+    expect(screen.getByRole('textbox', { name: /message jarvis/i })).toBeEnabled()
+  })
+
+  it('offers opt-in voice controls when enabled and keeps typing available', async () => {
+    vi.mocked(getInterfaceConfig).mockResolvedValue(config(true))
+    render(<App />)
+    const mic = await screen.findByRole('button', { name: /voice input/i })
+    // jsdom has no Web Speech API, so the control explains it is unsupported.
+    expect(mic).toHaveAccessibleName('Voice input is not supported in this browser')
+    expect(mic).toBeDisabled()
+    await userEvent.type(screen.getByRole('textbox', { name: /message jarvis/i }), 'typed still works')
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeEnabled()
+    expect(sendMock).not.toHaveBeenCalled()
+  })
+
+  it('does not offer voice when the server disables it and marks disabled views', async () => {
+    vi.mocked(getInterfaceConfig).mockResolvedValue(config(false, { browser: false, tools: true, memory: false }))
+    render(<App />)
+    await waitFor(() => expect(document.querySelectorAll('.nav-off')).toHaveLength(2))
+    expect(screen.queryByRole('button', { name: /voice input/i })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Browser' })).toBeInTheDocument()
   })
 })

@@ -2,7 +2,9 @@
 
 from datetime import datetime
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
+
+from jarvis.agent.models import ToolActivity
 from uuid import UUID
 
 
@@ -19,6 +21,33 @@ class ChatMemoryContext(BaseModel):
     memory_ids: list[UUID]
 
 
+class ChatContextSource(BaseModel):
+    """One record supplied to the model; metadata only, never content."""
+
+    ref: str
+    source_type: Literal["conversation", "memory", "document", "knowledge", "workspace"]
+    source_id: UUID
+    label: str | None = None
+    role: Literal["user", "assistant"] | None = None
+    timestamp: datetime | None = None
+    excerpt_chars: int = Field(ge=0)
+    truncated: bool
+    # True only when the reply contains this exact "[ref]" marker. It shows
+    # what the model cited, not that the cited fact was used correctly.
+    cited_in_reply: bool
+
+
+class ChatContextSummary(BaseModel):
+    history_status: Literal["included", "empty", "not_requested", "disabled", "unavailable"]
+    retrieval_status: Literal["success", "empty", "fallback", "disabled"]
+    # v4.7: workspace context (knowledge + tasks, reminders, calendar); "disabled" unless the owner enables it.
+    workspace_status: Literal["included", "empty", "disabled", "unavailable"] = "disabled"
+    sources: list[ChatContextSource]
+    omitted_count: int = Field(ge=0)
+    total_chars: int = Field(ge=0)
+    unknown_citation_count: int = Field(ge=0)
+
+
 class ChatResponse(BaseModel):
     reply: str
     provider: str
@@ -26,6 +55,19 @@ class ChatResponse(BaseModel):
     partial: bool = False
     conversation_id: UUID | None = None
     memory_context: ChatMemoryContext | None = None
+    context: ChatContextSummary | None = None
+    # v2.8: tool calls made for this request, with independent verification.
+    tool_activity: ToolActivity | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_context(self, handler):
+        # Optional sections are omitted when unused, keeping earlier response shapes unchanged.
+        data = handler(self)
+        if isinstance(data, dict):
+            for key in ("context", "tool_activity"):
+                if data.get(key) is None:
+                    data.pop(key, None)
+        return data
 
 
 class ConversationHistoryResponse(BaseModel):

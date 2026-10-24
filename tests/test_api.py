@@ -370,13 +370,12 @@ def test_document_ingestion_creates_one_owner_scoped_memory_with_sanitized_basen
         def __init__(self):
             self.calls = []
 
-        def create(self, owner_id, content, category=None, source_reference=None):
-            self.calls.append((owner_id, content, category, source_reference))
+        def create_document(self, owner_id, content, filename):
+            self.calls.append((owner_id, content, filename))
             return MemoryRecord(
-                id=uuid4(), content=content, category=category,
-                source_reference=source_reference,
+                id=uuid4(), content=content, source_reference=filename, source_kind="document",
                 created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
-            )
+            ), True
 
     repository = MemoryRepository()
     app = create_app(settings=persistent_settings())
@@ -391,7 +390,8 @@ def test_document_ingestion_creates_one_owner_scoped_memory_with_sanitized_basen
     assert response.status_code == 201
     assert response.json()["content"] == "Project notes"
     assert response.json()["source_reference"] == "notes.MD"
-    assert repository.calls == [(TEST_OWNER_ID, "Project notes", None, "notes.MD")]
+    assert response.json()["source_kind"] == "document"
+    assert repository.calls == [(TEST_OWNER_ID, "Project notes", "notes.MD")]
     assert "C:\\Users" not in response.text
 
 
@@ -490,7 +490,7 @@ def test_document_ingestion_sanitizes_persistence_failures():
     from jarvis.memory.base import MemoryPersistenceError
 
     class MemoryRepository:
-        def create(self, *args, **kwargs):
+        def create_document(self, *args, **kwargs):
             raise MemoryPersistenceError() from RuntimeError("private path and database details")
 
     app = create_app(settings=persistent_settings())

@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import {
-  Activity, ArrowDown, ArrowUp, AudioLines, Check, ChevronDown, CircleHelp,
-  Clock3, Command, Cpu, FileText, Folder, Menu, MessageSquare, Plus, Search,
+  Activity, ArrowDown, ArrowUp, AudioLines, Check, CheckSquare, ChevronDown, CircleHelp,
+  Clock3, Command, Compass, Cpu, FileText, Folder, Menu, MessageSquare, Plus, Search,
   Settings2, ShieldCheck, Sparkles, X,
 } from 'lucide-react'
-import { getConversationMessages, getReadiness, listConversations, sendChatMessage, type ApiAuth, type ChatMemoryContext } from './services/api'
+import { getConversationMessages, getInterfaceConfig, getReadiness, listConversations, sendChatMessage, type ApiAuth, type ChatContextSummary, type ChatMemoryContext, type InterfaceConfig, type ToolActivity } from './services/api'
 import MemoryManager from './components/MemoryManager'
+import CodingPanel from './components/CodingPanel'
+import BrowserPanel from './components/BrowserPanel'
+import CapabilitiesPanel from './components/CapabilitiesPanel'
+import ActivityPanel from './components/ActivityPanel'
+import AssistantPanel from './components/AssistantPanel'
+import VoiceControls from './voice/VoiceControls'
+import { createBrowserSpeechProvider, type SpeechProvider } from './voice/speech'
 
 const MAX_MESSAGE_LENGTH = 4000
 
@@ -19,6 +26,8 @@ type Message = {
   demo?: boolean
   partial?: boolean
   memoryContext?: ChatMemoryContext | null
+  context?: ChatContextSummary
+  toolActivity?: ToolActivity
 }
 
 type Conversation = {
@@ -38,8 +47,11 @@ const suggestions = [
 
 const navItems = [
   { label: 'Chat', icon: MessageSquare, active: true },
+  { label: 'Assistant', icon: CheckSquare },
   { label: 'Capabilities', icon: Sparkles },
   { label: 'Memory', icon: Folder },
+  { label: 'Coding', icon: Command },
+  { label: 'Browser', icon: Compass },
   { label: 'Activity', icon: Activity },
 ]
 
@@ -63,7 +75,7 @@ export default function App() {
   const [pending, setPending] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [notice, setNotice] = useState('')
-  const [activeView, setActiveView] = useState<'Chat' | 'Memory'>('Chat')
+  const [activeView, setActiveView] = useState<'Chat' | 'Assistant' | 'Memory' | 'Coding' | 'Browser' | 'Capabilities' | 'Activity'>('Chat')
   const [inspectMemoryIds, setInspectMemoryIds] = useState<string[]>([])
   const [providerInfo, setProviderInfo] = useState<{ provider: string; demo: boolean } | null>(null)
   const [credential, setCredential] = useState('')
@@ -78,12 +90,17 @@ export default function App() {
   const [historyHasMore, setHistoryHasMore] = useState(false)
   const [historyBeforeSequence, setHistoryBeforeSequence] = useState<number | null>(null)
   const [readiness, setReadiness] = useState<'loading' | 'ready' | 'not_ready' | 'unreachable'>('loading')
+  const [interfaceConfig, setInterfaceConfig] = useState<InterfaceConfig | null>(null)
+  const [voiceConsent, setVoiceConsent] = useState(false)
+  const [readAloud, setReadAloud] = useState(false)
+  const [speechProvider] = useState<SpeechProvider>(() => createBrowserSpeechProvider())
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const requestInFlightRef = useRef(false)
   const activeIdRef = useRef<string | null>(null)
   const sessionVersionRef = useRef(0)
   const sessionControllerRef = useRef(new AbortController())
+  const readinessRequestRef = useRef(0)
 
   const setActiveConversationId = useCallback((id: string | null) => {
     activeIdRef.current = id
@@ -91,21 +108,30 @@ export default function App() {
   }, [])
 
   const fetchReadiness = useCallback(async () => {
+    const requestId = ++readinessRequestRef.current
     try {
       const res = await getReadiness()
+      if (requestId !== readinessRequestRef.current) return
       if (res && res.status === 'ready') {
         setReadiness('ready')
       } else {
         setReadiness('not_ready')
       }
     } catch {
-      setReadiness('unreachable')
+      if (requestId === readinessRequestRef.current) setReadiness('unreachable')
     }
   }, [])
 
   useEffect(() => {
     void fetchReadiness()
   }, [fetchReadiness])
+
+  useEffect(() => {
+    // Feature flags only; if unavailable, optional voice controls stay hidden (typing always works).
+    let cancelled = false
+    Promise.resolve().then(() => getInterfaceConfig()).then((config) => { if (!cancelled && config) setInterfaceConfig(config) }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [])
 
   const handleUnauthorized = useCallback(() => {
     sessionVersionRef.current += 1
@@ -133,7 +159,8 @@ export default function App() {
     setHistoryBeforeSequence(null)
     setPending(false)
     setUnlockOpen(true)
-  }, [])
+    speechProvider.cancelSpeech() // locking stops any reply being read aloud
+  }, [speechProvider])
 
   const currentAuth = useCallback((): ApiAuth => ({
     token: credential || undefined,
@@ -151,6 +178,8 @@ export default function App() {
 
   const activeConversation = conversations.find((conversation) => conversation.id === activeId) ?? null
   const messages = activeConversation?.messages ?? []
+  const lastMessage = messages.length ? messages[messages.length - 1] : null
+  const latestReply = lastMessage && lastMessage.role === 'assistant' && !lastMessage.error ? { id: lastMessage.id, text: lastMessage.content } : null
 
   useEffect(() => {
     if (messages.length) bottomRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'end' })
@@ -196,13 +225,13 @@ export default function App() {
       })
       setConversationListOffset(page.offset + page.limit)
       setConversationListHasMore(page.has_more)
-      setReadiness((current) => current !== 'ready' ? 'ready' : current)
+      void fetchReadiness()
     } catch (cause) {
       if (version === sessionVersionRef.current) setConversationListError(cause instanceof Error ? cause.message : 'Could not load saved conversations.')
     } finally {
       if (version === sessionVersionRef.current) setConversationListLoading(false)
     }
-  }, [credential, currentAuth])
+  }, [credential, currentAuth, fetchReadiness])
 
   useEffect(() => {
     if (!credential) {
@@ -304,10 +333,10 @@ export default function App() {
         : await sendChatMessage(text, auth)
       if (version !== sessionVersionRef.current) return
       setProviderInfo({ provider: result.provider, demo: result.demo })
-      setReadiness((current) => current !== 'ready' ? 'ready' : current)
+      void fetchReadiness()
       const persistedId = result.conversation_id || conversationId
       setConversations((current) => current.map((conversation) => conversation.id === conversationId
-        ? { ...conversation, id: persistedId, persisted: Boolean(result.conversation_id) || conversation.persisted, updatedAt: Date.now(), messages: [...conversation.messages.filter((message) => !(retryMessageId && message.id === retryMessageId)), { id: createId(), role: 'assistant', content: result.reply, provider: result.provider, demo: result.demo, partial: result.partial, memoryContext: result.memory_context }] }
+        ? { ...conversation, id: persistedId, persisted: Boolean(result.conversation_id) || conversation.persisted, updatedAt: Date.now(), messages: [...conversation.messages.filter((message) => !(retryMessageId && message.id === retryMessageId)), { id: createId(), role: 'assistant', content: result.reply, provider: result.provider, demo: result.demo, partial: result.partial, memoryContext: result.memory_context, context: result.context, toolActivity: result.tool_activity }] }
         : conversation))
       if (activeIdRef.current === conversationId) setActiveConversationId(persistedId)
       if (result.conversation_id && credential) void loadConversationPage(0)
@@ -342,7 +371,7 @@ export default function App() {
   }
 
   function selectNav(label: string) {
-    if (label === 'Chat' || label === 'Memory') {
+    if (label === 'Chat' || label === 'Memory' || label === 'Coding' || label === 'Browser' || label === 'Capabilities' || label === 'Activity') {
       setActiveView(label)
       setNotice('')
       setMobileMenuOpen(false)
@@ -350,6 +379,17 @@ export default function App() {
     }
     setNotice(`${label} is coming soon. This section is not available in this version.`)
     setMobileMenuOpen(false)
+  }
+
+  function featureOff(label: string) {
+    const features = interfaceConfig?.features
+    if (!features) return false
+    return (label === 'Browser' && !features.browser) || (label === 'Capabilities' && !features.tools) || (label === 'Memory' && !features.memory)
+  }
+
+  function addTranscript(text: string) {
+    setDraft((current) => `${current.trim() ? `${current.trimEnd()} ` : ''}${text}`.slice(0, MAX_MESSAGE_LENGTH))
+    inputRef.current?.focus()
   }
 
   const sortedConversations = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt || b.id.localeCompare(a.id))
@@ -372,9 +412,9 @@ export default function App() {
         <nav className="primary-nav">
           {navItems.map(({ label, icon: Icon }) => {
             const active = label === activeView
-            const available = label === 'Chat' || label === 'Memory'
+            const available = label === 'Chat' || label === 'Memory' || label === 'Coding' || label === 'Browser' || label === 'Capabilities' || label === 'Activity'
             return <button key={label} className={`nav-item ${active ? 'nav-active' : ''}`} onClick={() => selectNav(label)} aria-current={active ? 'page' : undefined}>
-              <Icon size={17} strokeWidth={1.8} /><span>{label}</span>{!available && <span className="nav-soon">SOON</span>}
+              <Icon size={17} strokeWidth={1.8} /><span>{label}</span>{!available && <span className="nav-soon">SOON</span>}{available && featureOff(label) && <span className="nav-soon nav-off" aria-hidden="true" title="Disabled by the server configuration">OFF</span>}
             </button>
           })}
         </nav>
@@ -406,7 +446,7 @@ export default function App() {
           <div className="topbar-right"><div className="provider-pill"><span className="provider-dot" /><span>{providerInfo ? `${providerInfo.demo ? 'DEMO' : 'MODEL'} · ${providerInfo.provider.toUpperCase()}` : 'PROVIDER MODE'}</span></div>{credential && <button type="button" className="workspace-lock" onClick={lockWorkspace}>Lock workspace</button>}<span className="topbar-divider" /><div className={`system-status ${readiness !== 'ready' && readiness !== 'loading' ? 'system-status-clickable' : ''}`} aria-label={`System status: ${readiness === 'ready' ? 'ready' : readiness === 'not_ready' ? 'not ready' : readiness === 'unreachable' ? 'offline' : 'checking'}`} onClick={readiness !== 'ready' && readiness !== 'loading' ? () => void fetchReadiness() : undefined} title={readiness === 'ready' ? 'System ready' : readiness === 'not_ready' ? 'System not ready — click to refresh' : readiness === 'unreachable' ? 'System offline — click to retry' : 'Checking system readiness…'}><span className={`status-ring status-${readiness}`}>{readiness === 'ready' ? <Check size={11} /> : readiness === 'loading' ? <Clock3 size={11} /> : readiness === 'not_ready' ? <CircleHelp size={11} /> : <X size={11} />}</span><span>{readiness === 'ready' ? 'System ready' : readiness === 'loading' ? 'Checking…' : readiness === 'not_ready' ? 'System not ready' : 'System offline'}</span></div></div>
         </header>
 
-        {activeView === 'Memory' ? <div className="content-area"><MemoryManager inspectIds={inspectMemoryIds} auth={{ token: credential || undefined, onUnauthorized: handleUnauthorized }} /></div> : <><div className={`content-area ${messages.length ? 'has-messages' : ''}`}>
+        {activeView === 'Assistant' ? <div className="content-area"><AssistantPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Activity' ? <div className="content-area"><ActivityPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Capabilities' ? <div className="content-area"><CapabilitiesPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Browser' ? <div className="content-area"><BrowserPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Coding' ? <div className="content-area"><CodingPanel key={sessionVersionRef.current} auth={currentAuth()} onUnlock={() => setUnlockOpen(true)} /></div> : activeView === 'Memory' ? <div className="content-area"><MemoryManager inspectIds={inspectMemoryIds} auth={{ token: credential || undefined, onUnauthorized: handleUnauthorized }} /></div> : <><div className={`content-area ${messages.length ? 'has-messages' : ''}`}>
           {notice && <div className="notice-banner" role="status"><CircleHelp size={16} /><span>{notice}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => setNotice('')}><X size={15} /></button></div>}
           {historyError && <div className="notice-banner conversation-error" role="alert"><CircleHelp size={16} /><span>{historyError}</span><button className="icon-button" aria-label="Dismiss conversation error" onClick={() => setHistoryError('')}><X size={15} /></button></div>}
           {historyLoading && <div className="notice-banner" role="status">Loading conversation history…</div>}
@@ -428,7 +468,7 @@ export default function App() {
                 {historyHasMore && activeConversation?.persisted && <button className="history-load-older" type="button" disabled={historyLoading} onClick={() => activeConversation && historyBeforeSequence !== null && void loadConversationHistory(activeConversation.id, historyBeforeSequence)}>Load older messages</button>}
                 {messages.map((message) => <article key={message.id} className={`message-row ${message.role === 'user' ? 'message-user' : 'message-assistant'}`}>
                   {message.role === 'assistant' && <div className="message-avatar"><span>J</span></div>}
-                  <div className="message-content-wrap"><div className="message-label">{message.role === 'user' ? 'YOU' : 'JARVIS'}{message.role === 'assistant' && message.provider && <span className="message-demo-tag">{message.demo ? 'DEMO' : 'MODEL'} · {message.provider.toUpperCase()}</span>}{message.partial && <span className="message-partial-tag">PARTIAL RESULT</span>}</div><div className={`message-bubble ${message.error ? 'message-error' : ''}`}>{message.content}</div>{message.error && <small className="retry-warning">A manual retry may duplicate this exchange if the server saved it but the response was lost.</small>}{message.memoryContext && <button className="memory-context-link" type="button" onClick={() => { setInspectMemoryIds(message.memoryContext?.memory_ids ?? []); setActiveView('Memory') }}>Memory context · {message.memoryContext.outcome} · {message.memoryContext.memory_ids.length} record(s){message.memoryContext.memory_ids.length > 0 ? ` · ${message.memoryContext.memory_ids.join(', ')}` : ''}</button>}{message.error && <button className="retry-button" onClick={() => void submitMessage(message.retryText ?? '', message.id)}><Activity size={13} /> Try again</button>}</div>
+                  <div className="message-content-wrap"><div className="message-label">{message.role === 'user' ? 'YOU' : 'JARVIS'}{message.role === 'assistant' && message.provider && <span className="message-demo-tag">{message.demo ? 'DEMO' : 'MODEL'} · {message.provider.toUpperCase()}</span>}{message.partial && <span className="message-partial-tag">PARTIAL RESULT</span>}</div><div className={`message-bubble ${message.error ? 'message-error' : ''}`}>{message.content}</div>{message.error && <small className="retry-warning">A manual retry may duplicate this exchange if the server saved it but the response was lost.</small>}{message.memoryContext && <button className="memory-context-link" type="button" onClick={() => { setInspectMemoryIds(message.memoryContext?.memory_ids ?? []); setActiveView('Memory') }}>Memory context · {message.memoryContext.outcome} · {message.memoryContext.memory_ids.length} record(s){message.memoryContext.memory_ids.length > 0 ? ` · ${message.memoryContext.memory_ids.join(', ')}` : ''}</button>}{message.context && message.context.sources.length > 0 && <small className="context-sources" aria-label="Context supplied to the model">Context supplied: {message.context.sources.map((source) => `${source.ref} ${source.source_type}${source.label ? ` · ${source.label}` : ''}${source.cited_in_reply ? ' (cited)' : ''}`).join(', ')}{message.context.history_status === 'unavailable' ? ' · history unavailable' : ''}{message.context.workspace_status === 'unavailable' ? ' · workspace context unavailable' : ''}{message.context.omitted_count > 0 ? ` · ${message.context.omitted_count} omitted for size` : ''}</small>}{message.toolActivity && message.toolActivity.calls.length > 0 && <small className="tool-activity" aria-label="Tools used for this answer">Tools ({message.toolActivity.proposer === 'model' ? 'model-proposed' : 'rule-based'}, validated by JARVIS): {message.toolActivity.calls.map((call) => `${call.ref} ${call.tool_id} · ${call.status.replace('_', ' ')}${call.error_code ? ` (${call.error_code})` : ''}`).join(', ')}{message.toolActivity.verification ? ` · Verification: ${({ verified: 'verified', partially_verified: 'partially verified', unverified: 'unverified', not_applicable: 'not applicable' })[message.toolActivity.verification.status]} — ${message.toolActivity.verification.summary}` : ''}{message.toolActivity.limitations.length ? ` · ${message.toolActivity.limitations.join(' ')}` : ''}</small>}{message.error && <button className="retry-button" onClick={() => void submitMessage(message.retryText ?? '', message.id)}><Activity size={13} /> Try again</button>}</div>
                   {message.role === 'user' && <div className="user-avatar">A</div>}
                 </article>)}
                 {pending && <div className="message-row message-assistant" role="status" aria-label="JARVIS is responding"><div className="message-avatar"><span>J</span></div><div className="message-content-wrap"><div className="message-label">JARVIS</div><div className="typing-bubble"><span /><span /><span /><small>Thinking</small></div></div></div>}
@@ -441,7 +481,7 @@ export default function App() {
         <div className="composer-dock">
           <form className="composer" onSubmit={handleSubmit}>
             <textarea ref={inputRef} aria-label="Message JARVIS" placeholder="Message JARVIS…" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} maxLength={MAX_MESSAGE_LENGTH} rows={1} disabled={pending} />
-            <div className="composer-bottom"><div className="composer-hint"><span className="hint-key">↵</span> to send <span className="hint-separator">·</span> <span className="hint-key">⇧ ↵</span> for new line <span className="hint-separator">·</span> Provider mode is shown on each reply</div><div className="composer-actions"><span className="char-count">{draft.length > 0 ? `${draft.length}/${MAX_MESSAGE_LENGTH}` : ''}</span><button type="submit" className="send-button" aria-label="Send message" disabled={!draft.trim() || pending || draft.trim().length > MAX_MESSAGE_LENGTH}><ArrowUp size={18} strokeWidth={2.3} /></button></div></div>
+            <div className="composer-bottom"><div className="composer-hint"><span className="hint-key">↵</span> to send <span className="hint-separator">·</span> <span className="hint-key">⇧ ↵</span> for new line <span className="hint-separator">·</span> Provider mode is shown on each reply</div><div className="composer-actions">{interfaceConfig?.voice.enabled && <VoiceControls provider={speechProvider} consented={voiceConsent} onConsent={() => setVoiceConsent(true)} readAloud={readAloud} onReadAloudChange={setReadAloud} onTranscript={addTranscript} latestReply={latestReply} busy={pending} />}<span className="char-count">{draft.length > 0 ? `${draft.length}/${MAX_MESSAGE_LENGTH}` : ''}</span><button type="submit" className="send-button" aria-label="Send message" disabled={!draft.trim() || pending || draft.trim().length > MAX_MESSAGE_LENGTH}><ArrowUp size={18} strokeWidth={2.3} /></button></div></div>
           </form>
           <div className="composer-footer"><span><ShieldCheck size={12} /> Memory saving is explicit</span><span><Clock3 size={12} /> Chat history depends on backend persistence</span></div>
         </div></>}

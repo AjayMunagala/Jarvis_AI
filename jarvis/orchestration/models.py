@@ -5,7 +5,9 @@ from typing import Literal, TypeAlias
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator, model_validator
-from jarvis.memory.models import RetrievedMemory
+from jarvis.agent.models import ToolEvidenceRecord
+from jarvis.memory.context import AssembledContext
+from jarvis.memory.models import MAX_RETRIEVED_RECORDS, RetrievedMemory
 
 
 IntentName = Literal[
@@ -25,7 +27,12 @@ class Contract(BaseModel):
 class RequestContext(Contract):
     execution_id: str = Field(default_factory=lambda: uuid4().hex, min_length=1, max_length=64)
     message: StrictStr = Field(min_length=1, max_length=20000)
-    retrieved_memories: tuple[RetrievedMemory, ...] = Field(default=(), max_length=5)
+    retrieved_memories: tuple[RetrievedMemory, ...] = Field(default=(), max_length=MAX_RETRIEVED_RECORDS)
+    # Bounded, attributed context built by jarvis.memory.context. When absent,
+    # experts assemble one from retrieved_memories with default limits.
+    context: AssembledContext | None = None
+    # v2.8: results of trusted-code-validated read-only tool calls for this request.
+    tool_evidence: tuple[ToolEvidenceRecord, ...] = Field(default=(), max_length=20)
     received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

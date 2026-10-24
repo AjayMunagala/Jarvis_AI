@@ -1,8 +1,10 @@
 """Comprehensive test suite for repository intelligence and coding diagnostics."""
 
 import os
+import stat
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -48,6 +50,57 @@ def test_safe_resolve_path_within_root(tmp_path):
     resolved = safe_resolve_path(tmp_path, "app/main.py", must_exist=True)
     assert resolved == f.resolve()
     assert to_relative_posix(tmp_path, resolved) == "app/main.py"
+
+
+def test_safe_resolve_path_rejects_internal_symlink_before_resolution(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("inside", encoding="utf-8")
+    link = tmp_path / "alias.txt"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"Symbolic links are unavailable in this environment: {type(exc).__name__}")
+
+    with pytest.raises(PathSecurityError, match="Symbolic links are disallowed"):
+        safe_resolve_path(tmp_path, "alias.txt", must_exist=True)
+
+
+def test_safe_resolve_path_rejects_lstat_symlink_without_os_symlink_support(tmp_path, monkeypatch):
+    link = tmp_path / "alias.txt"
+    original_lstat = Path.lstat
+
+    def lstat_with_link(path):
+        if path == link:
+            return SimpleNamespace(st_mode=stat.S_IFLNK)
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", lstat_with_link)
+
+    with pytest.raises(PathSecurityError, match="Symbolic links are disallowed"):
+        safe_resolve_path(tmp_path, "alias.txt", must_exist=False)
+
+
+def test_safe_resolve_path_rejects_external_symlink_before_resolution(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    link = root / "alias.txt"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"Symbolic links are unavailable in this environment: {type(exc).__name__}")
+
+    with pytest.raises(PathSecurityError, match="Symbolic links are disallowed"):
+        safe_resolve_path(root, "alias.txt", must_exist=True)
+
+
+def test_safe_resolve_path_nonexistent_target_modes(tmp_path):
+    expected = tmp_path / "not-created" / "module.py"
+    assert safe_resolve_path(tmp_path, "not-created/module.py") == expected
+
+    with pytest.raises(PathSecurityError, match="Path does not exist"):
+        safe_resolve_path(tmp_path, "not-created/module.py", must_exist=True)
 
 
 def test_safe_resolve_path_traversal_rejected(tmp_path):

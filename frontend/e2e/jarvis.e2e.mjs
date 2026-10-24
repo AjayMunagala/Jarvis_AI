@@ -68,6 +68,34 @@ test('starts both local services and renders the application without page errors
   await expect(page.getByRole('textbox', { name: 'Message JARVIS' })).toBeVisible()
 })
 
+test('inspects real local repository evidence in mock mode and previews an unapplied patch', async ({ page }) => {
+  await page.getByRole('button', { name: 'Coding', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Analyze coding request' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Unlock coding workspace' }).click()
+  await page.getByLabel('Local access token').fill(syntheticToken)
+  await page.getByRole('button', { name: 'Unlock', exact: true }).click()
+  await page.getByLabel('Engineering request').fill('Explain the README module overview')
+  await page.getByLabel(/Repository-relative paths/).fill('README.md')
+  const responsePromise = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/coding/analyze')
+  await page.getByRole('button', { name: 'Analyze coding request' }).click()
+  const response = await responsePromise
+  expect(response.status()).toBe(200)
+  const body = await response.json()
+  expect(body).toMatchObject({ analysis_origin: 'static', verification_status: 'not_run', repository_modified: false, execution_enabled: false })
+  expect(body.evidence[0].path).toBe('README.md')
+  await expect(page.getByRole('article', { name: 'Coding report' })).toBeVisible()
+  await page.getByLabel('Workflow', { exact: true }).selectOption('patch')
+  await page.getByLabel(/Repository-relative paths/).fill('coding-smoke-proposed.py')
+  await page.getByText('Optional exact changes for offline patch generation').click()
+  await page.getByLabel('Proposed changes JSON').fill(JSON.stringify([{ path: 'coding-smoke-proposed.py', operation: 'create', content: 'example = 1\n', reason: 'Synthetic unapplied proposal' }]))
+  await page.getByRole('button', { name: 'Analyze coding request' }).click()
+  await expect(page.getByLabel('Proposed diff for coding-smoke-proposed.py')).toContainText('+example = 1')
+  await expect(page.getByRole('heading', { name: 'Review only — nothing applied' })).toBeVisible()
+  await page.getByRole('button', { name: 'Lock workspace' }).click()
+  await expect(page.getByRole('article', { name: 'Coding report' })).toHaveCount(0)
+  await expect(page.getByLabel('Local access token')).toHaveValue('')
+})
+
 test('supports anonymous deterministic mock chat without presenting it as persisted', async ({ page }) => {
   const chatResponse = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/chat')
   await page.getByRole('textbox', { name: 'Message JARVIS' }).fill('E2E offline check')
@@ -274,4 +302,49 @@ test('keeps memory management and document-ingestion confirmation accessible', a
   await expect(confirmation).toContainText('e2e-reference.md')
   await page.getByRole('button', { name: 'Cancel' }).click()
   await expect(confirmation).toHaveCount(0)
+})
+
+test('offers opt-in browser voice that fills the composer without sending and reads new replies aloud', async ({ page }) => {
+  // A deterministic stand-in for the browser Web Speech API: no microphone and no speech service are used.
+  await page.addInitScript(() => {
+    window.__voice = { recognitions: [], spoken: [] }
+    class FakeRecognition {
+      constructor() { window.__voice.recognitions.push(this) }
+      start() { this.started = true }
+      stop() { this.onend?.() }
+      abort() { this.onend?.() }
+    }
+    Object.defineProperty(window, 'SpeechRecognition', { value: FakeRecognition, configurable: true })
+    Object.defineProperty(window, 'SpeechSynthesisUtterance', { value: class { constructor(text) { this.text = text } }, configurable: true })
+    Object.defineProperty(window, 'speechSynthesis', {
+      value: { speak(utterance) { window.__voice.spoken.push(utterance.text); setTimeout(() => utterance.onend?.(), 0) }, cancel() {}, getVoices() { return [] } },
+      configurable: true,
+    })
+  })
+  await page.reload()
+  let chatRequests = 0
+  page.on('request', (request) => { if (new URL(request.url()).pathname === '/api/chat') chatRequests += 1 })
+
+  await page.getByRole('button', { name: 'Start voice input' }).click()
+  const disclosure = page.getByRole('dialog', { name: 'Use voice with JARVIS?' })
+  await expect(disclosure).toContainText('JARVIS never receives or stores audio')
+  await page.getByRole('button', { name: 'Enable voice' }).click()
+  await expect(page.getByRole('button', { name: 'Stop voice input' })).toBeVisible()
+  await page.evaluate(() => {
+    const recognition = window.__voice.recognitions.at(-1)
+    recognition.onresult({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: 'E2E voice check' } }] })
+    recognition.onend()
+  })
+  const composer = page.getByRole('textbox', { name: 'Message JARVIS' })
+  await expect(composer).toHaveValue('E2E voice check')
+  expect(chatRequests).toBe(0)
+
+  await page.getByRole('button', { name: 'Read replies aloud' }).click()
+  const chatResponse = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/chat')
+  await composer.press('Enter')
+  expect((await chatResponse).status()).toBe(200)
+  const reply = 'This is a JARVIS demo response, not an AI-generated answer. I received: E2E voice check'
+  await expect(page.getByText(reply)).toBeVisible()
+  await expect.poll(() => page.evaluate(() => window.__voice.spoken)).toEqual([reply])
+  expect(chatRequests).toBe(1)
 })

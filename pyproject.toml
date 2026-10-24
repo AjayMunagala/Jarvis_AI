@@ -17,6 +17,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0,<9.0"]
 persistence = ["psycopg[binary]>=3.1,<4.0"]
+# Optional real-browser provider (v2.6). Exact pin: each release expects one Chromium build.
+browser = ["playwright==1.64.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -27,3 +29,5 @@ include = ["jarvis*"]
 
 [tool.setuptools.package-data]
 "jarvis.orchestration" = ["config/*.json"]
+"jarvis.routing" = ["config/*.json", "datasets/*.json"]
+"jarvis.reasoning" = ["datasets/*.json"]

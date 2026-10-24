@@ -1,15 +1,22 @@
 """Database-independent long-term memory repository contract."""
 
-from typing import Protocol
+from typing import Protocol, Sequence
 from uuid import UUID
 
-from jarvis.memory.models import MemoryPage, MemoryRecord, MemoryUpdate
+from jarvis.memory.models import MemoryPage, MemoryRecord, MemoryUpdate, SourceKind
 
 
 class MemoryRepository(Protocol):
     def create(self, owner_id: UUID, content: str, category: str | None = None, source_reference: str | None = None) -> MemoryRecord: ...
 
-    def list(self, owner_id: UUID, *, limit: int = 50, offset: int = 0, category: str | None = None) -> MemoryPage: ...
+    def create_document(self, owner_id: UUID, content: str, filename: str) -> tuple[MemoryRecord, bool]:
+        """Store one document record; return (record, created). Exact duplicates return the existing record."""
+        ...
+
+    def list(
+        self, owner_id: UUID, *, limit: int = 50, offset: int = 0, category: str | None = None,
+        source_kind: SourceKind | None = None,
+    ) -> MemoryPage: ...
 
     def get(self, owner_id: UUID, memory_id: UUID) -> MemoryRecord | None: ...
 
@@ -26,6 +33,19 @@ class DeadlineAwareMemorySearch(Protocol):
     def search_with_deadline(
         self, owner_id: UUID, query: str, *, deadline: float, limit: int = 10, offset: int = 0
     ) -> MemoryPage: ...
+
+
+class ContextCandidateSearch(Protocol):
+    """Optional chat-context capability: owner-scoped OR-prefix candidate matching.
+
+    ``terms`` are letter/digit stems from ``jarvis.memory.query``. Results are
+    unranked candidates; ``jarvis.memory.ranking`` decides the final order.
+    """
+
+    def search_context(
+        self, owner_id: UUID, terms: Sequence[str], *, deadline: float | None,
+        candidate_limit: int, source_kinds: Sequence[SourceKind],
+    ) -> tuple[MemoryRecord, ...]: ...
 
 
 class MemoryPersistenceError(Exception):

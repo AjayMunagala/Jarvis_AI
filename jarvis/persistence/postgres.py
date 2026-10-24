@@ -116,10 +116,23 @@ class PostgresConversationRepository:
         except Exception as exc:
             raise PersistenceError() from exc
 
-    def get_messages(
-        self, conversation_id: UUID, *, before_sequence: int | None = None, limit: int = 51
+    def get_recent_messages(
+        self, conversation_id: UUID, *, limit: int, deadline: float | None = None
     ) -> tuple[ConversationMessage, ...]:
-        deadline = operation_deadline(self._operation_timeout_seconds, clock=monotonic)
+        """Return the newest ``limit`` messages in chronological order for chat context.
+
+        ``deadline`` is the caller's monotonic request deadline; the repository
+        budget never extends it.
+        """
+        return self.get_messages(conversation_id, limit=limit, _outer_deadline=deadline)
+
+    def get_messages(
+        self, conversation_id: UUID, *, before_sequence: int | None = None, limit: int = 51,
+        _outer_deadline: float | None = None,
+    ) -> tuple[ConversationMessage, ...]:
+        deadline = operation_deadline(
+            self._operation_timeout_seconds, outer_deadline=_outer_deadline, clock=monotonic
+        )
         try:
             with self._open_connection(deadline) as connection:
                 exists = execute_with_deadline(

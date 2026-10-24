@@ -1,24 +1,15 @@
 """Bounded repository inventory and file discovery."""
 
-import fnmatch
 import os
+import stat
 import time
 from pathlib import Path
 
 from jarvis.repo.models import FileCategory, FileInfo, RepositoryInventory
-from jarvis.repo.path_security import to_relative_posix, validate_repo_root
-
-DEFAULT_IGNORED_DIRS = frozenset({
-    ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "env",
-    ".venv-dev", "dist", "build", "out", "target", "__pycache__",
-    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", ".vite",
-    ".next", "coverage", ".idea", ".vscode", "tmp", "temp",
-})
-
-DEFAULT_IGNORED_PATTERNS = frozenset({
-    "*.pyc", "*.pyo", "*.pyd", "*.so", "*.dll", "*.exe", ".DS_Store",
-    "Thumbs.db", ".env", ".env.local", "*.log", "*.swp", "*~",
-})
+from jarvis.repo.path_security import (
+    DEFAULT_IGNORED_DIRS, DEFAULT_IGNORED_PATTERNS, PathSecurityError,
+    is_ignored_repository_path, safe_resolve_path, validate_repo_root,
+)
 
 EXTENSION_LANGUAGE_MAP = {
     ".py": "Python",
@@ -98,7 +89,7 @@ def scan_repository(
     start_time = time.monotonic()
     root = validate_repo_root(repo_root)
 
-    ignored_dirs = DEFAULT_IGNORED_DIRS | (extra_ignored_dirs or set())
+    ignored_dirs = {name.casefold() for name in DEFAULT_IGNORED_DIRS | (extra_ignored_dirs or set())}
     files_collected: list[FileInfo] = []
     category_counts: dict[str, int] = {}
     language_counts: dict[str, int] = {}
@@ -123,7 +114,17 @@ def scan_repository(
             continue
 
         # Prune ignored directories in-place
-        dir_names[:] = [d for d in dir_names if d not in ignored_dirs and not d.startswith(".")]
+        permitted_dirs = []
+        for directory in dir_names:
+            if directory.casefold() in ignored_dirs or directory.startswith("."):
+                continue
+            try:
+                relative_dir = (Path(current_root) / directory).relative_to(root).as_posix()
+                safe_resolve_path(root, relative_dir, must_exist=True)
+            except (OSError, PathSecurityError):
+                continue
+            permitted_dirs.append(directory)
+        dir_names[:] = permitted_dirs
 
         for filename in filenames:
             if time.monotonic() - start_time > timeout_seconds:
@@ -134,18 +135,23 @@ def scan_repository(
                 break
 
             # Ignore pattern check
-            if any(fnmatch.fnmatch(filename, pat) for pat in DEFAULT_IGNORED_PATTERNS):
+            file_path = Path(current_root) / filename
+            rel_posix = file_path.relative_to(root).as_posix()
+            if is_ignored_repository_path(rel_posix):
                 continue
 
-            file_path = Path(current_root) / filename
             try:
-                # Do not follow symlinks pointing outside
-                stat = file_path.stat()
-                file_size = stat.st_size
+                # Keep the lexical name until link rejection and containment pass.
+                resolved = safe_resolve_path(root, rel_posix, must_exist=True)
+                if is_ignored_repository_path(resolved.relative_to(root).as_posix()):
+                    continue
+                metadata = resolved.stat()
+                if not stat.S_ISREG(metadata.st_mode):
+                    continue
+                file_size = metadata.st_size
             except (OSError, ValueError):
                 continue
 
-            rel_posix = to_relative_posix(root, file_path)
             ext = file_path.suffix.lower()
             lang = EXTENSION_LANGUAGE_MAP.get(ext)
             category = categorize_file(rel_posix, ext)

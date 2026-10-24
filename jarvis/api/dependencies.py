@@ -42,6 +42,7 @@ def authenticated_owner(request: Request) -> UUID | None:
             detail="A valid bearer credential is required.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    request.state.audit_owner = configured_owner  # v4.2: lets the failure-audit middleware attribute refusals
     return configured_owner
 
 

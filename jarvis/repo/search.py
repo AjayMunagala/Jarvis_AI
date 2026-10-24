@@ -6,7 +6,7 @@ from pathlib import Path
 
 from jarvis.repo.inventory import scan_repository
 from jarvis.repo.models import SearchMatch, SearchSummary, SymbolInfo, SymbolType
-from jarvis.repo.path_security import safe_resolve_path, validate_repo_root
+from jarvis.repo.path_security import read_repository_text, validate_repo_root
 from jarvis.repo.secret_redactor import redact_secrets
 
 MAX_LINE_LENGTH = 500
@@ -72,7 +72,7 @@ def search_text(
         try:
             compiled_pattern = re.compile(query, flags)
         except re.error as exc:
-            raise ValueError(f"Invalid regular expression: {exc}") from exc
+            raise ValueError("Invalid regular expression.") from exc
     else:
         needle = query if case_sensitive else query.casefold()
 
@@ -88,12 +88,14 @@ def search_text(
         if path_filter and path_filter.casefold() not in file_info.path.casefold():
             continue
 
-        resolved = safe_resolve_path(root, file_info.path, must_exist=True)
-        try:
-            with open(resolved, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
-        except OSError:
+        content = read_repository_text(root, file_info.path, max_bytes=max_file_size_bytes)
+        if content is None:
             continue
+        lines = content.splitlines(keepends=True)
+        # Redact whole blocks before selecting or truncating output lines.
+        safe_content, _ = redact_secrets(content)
+        safe_lines = safe_content.splitlines(keepends=True)
+        safe_lines.extend([""] * max(0, len(lines) - len(safe_lines)))
 
         for idx, line in enumerate(lines, start=1):
             line_str = line.rstrip("\r\n")
@@ -115,14 +117,17 @@ def search_text(
                 start_ctx = max(0, idx - 1 - context_lines)
                 end_ctx = min(len(lines), idx + context_lines)
 
-                before = [lines[i].rstrip("\r\n")[:MAX_LINE_LENGTH] for i in range(start_ctx, idx - 1)]
-                after = [lines[i].rstrip("\r\n")[:MAX_LINE_LENGTH] for i in range(idx, end_ctx)]
+                before = [safe_lines[i].rstrip("\r\n")[:MAX_LINE_LENGTH] for i in range(start_ctx, idx - 1)]
+                after = [safe_lines[i].rstrip("\r\n")[:MAX_LINE_LENGTH] for i in range(idx, end_ctx)]
 
                 # Redact secrets from matched lines and context
-                safe_line, _ = redact_secrets(line_str[:MAX_LINE_LENGTH])
+                safe_line = safe_lines[idx - 1].rstrip("\r\n")[:MAX_LINE_LENGTH]
                 safe_before = [redact_secrets(b)[0] for b in before]
                 safe_after = [redact_secrets(a)[0] for a in after]
-                safe_matched_substr, _ = redact_secrets(matched_substr)
+                safe_matched_substr = (
+                    "[REDACTED_MATCH]" if safe_lines[idx - 1].rstrip("\r\n") != line_str
+                    else redact_secrets(matched_substr)[0]
+                )
 
                 match_entry = SearchMatch(
                     path=file_info.path,
@@ -154,11 +159,17 @@ def search_text(
     )
 
 
-def extract_python_symbols(file_path: Path, rel_path: str) -> list[SymbolInfo]:
+def extract_python_symbols(
+    file_path: Path, rel_path: str, *, repo_root: Path | None = None,
+) -> list[SymbolInfo]:
     """Statically parse a Python file using ast to extract symbols and route declarations."""
     try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            source = f.read()
+        source = read_repository_text(
+            repo_root if repo_root is not None else file_path.parent,
+            rel_path if repo_root is not None else file_path.name,
+        )
+        if source is None:
+            return []
         tree = ast.parse(source, filename=str(file_path))
     except (SyntaxError, ValueError, OSError):
         return []
@@ -175,7 +186,7 @@ def extract_python_symbols(file_path: Path, rel_path: str) -> list[SymbolInfo]:
                     path=rel_path,
                     line_number=node.lineno,
                     end_line_number=getattr(node, "end_lineno", node.lineno),
-                    docstring=doc[:200] if doc else None,
+                    docstring=redact_secrets(doc)[0][:200] if doc else None,
                     decorators=[ast.unparse(d) for d in node.decorator_list if hasattr(ast, "unparse")],
                 )
             )
@@ -191,7 +202,7 @@ def extract_python_symbols(file_path: Path, rel_path: str) -> list[SymbolInfo]:
                             path=rel_path,
                             line_number=item.lineno,
                             end_line_number=getattr(item, "end_lineno", item.lineno),
-                            docstring=m_doc[:200] if m_doc else None,
+                            docstring=redact_secrets(m_doc)[0][:200] if m_doc else None,
                         )
                     )
 
@@ -221,7 +232,7 @@ def extract_python_symbols(file_path: Path, rel_path: str) -> list[SymbolInfo]:
                     path=rel_path,
                     line_number=node.lineno,
                     end_line_number=getattr(node, "end_lineno", node.lineno),
-                    docstring=doc[:200] if doc else None,
+                    docstring=redact_secrets(doc)[0][:200] if doc else None,
                     decorators=decorators,
                     route_method=route_method,
                     route_path=route_path,
@@ -240,7 +251,12 @@ def extract_python_symbols(file_path: Path, rel_path: str) -> list[SymbolInfo]:
                         )
                     )
 
-    return symbols
+    # Docstrings and decorators are repository content, not trusted metadata.
+    return [symbol.model_copy(update={
+        "docstring": redact_secrets(symbol.docstring)[0] if symbol.docstring else None,
+        "decorators": [redact_secrets(value)[0] for value in symbol.decorators],
+        "route_path": redact_secrets(symbol.route_path)[0] if symbol.route_path else None,
+    }) for symbol in symbols]
 
 
 def search_symbols(
@@ -265,11 +281,10 @@ def search_symbols(
         if path_filter and path_filter.casefold() not in file_info.path.casefold():
             continue
 
-        resolved = safe_resolve_path(root, file_info.path, must_exist=True)
         symbols: list[SymbolInfo] = []
 
         if file_info.language == "Python":
-            symbols = extract_python_symbols(resolved, file_info.path)
+            symbols = extract_python_symbols(root / file_info.path, file_info.path, repo_root=root)
 
         for sym in symbols:
             if symbol_type and sym.symbol_type != symbol_type:

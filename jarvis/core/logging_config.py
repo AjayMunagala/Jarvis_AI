@@ -4,6 +4,8 @@ import json
 import logging
 from datetime import UTC, datetime
 
+from jarvis.core.correlation import get_correlation_id
+
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -13,6 +15,9 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
+        correlation_id = getattr(record, "correlation_id", None) or get_correlation_id()
+        if isinstance(correlation_id, str):
+            payload["correlation_id"] = correlation_id  # v4.2: links log lines to the request and audit
         # Only copy explicit metadata; arbitrary `extra` values may contain secrets.
         scalar_fields = (
             "environment", "error_type", "execution_id", "intent", "confidence",

@@ -128,134 +128,6 @@ class IsolatedPostgres:
         return TestClient(create_app(settings=settings), headers={"Authorization": f"Bearer {TEST_AUTH_TOKEN}"})
 
 
-@pytest.fixture(scope="session")
-def isolated_postgres():
-    if os.environ.get(RUN_INTEGRATION) != "1":
-        pytest.skip(f"Opt-in only; set {RUN_INTEGRATION}=1 to run live PostgreSQL tests.")
-    admin_url = os.environ.get(ADMIN_URL, "").strip()
-    if not admin_url:
-        pytest.skip(f"Live PostgreSQL tests not run: {ADMIN_URL} is not configured.")
-    try:
-        parsed, port = parse_safe_admin_url(admin_url)
-    except ValueError as exc:
-        pytest.fail(str(exc), pytrace=False)
-
-    try:
-        import psycopg
-        from psycopg import sql
-    except ImportError:
-        pytest.skip("Live PostgreSQL tests not run: install the declared 'persistence' extra first.")
-
-    env = dict(os.environ)
-    passfile_value = env.get("PGPASSFILE", "").strip()
-    if not passfile_value or not Path(passfile_value).is_file():
-        pytest.skip("Live PostgreSQL tests not run: PGPASSFILE must point to an existing protected password file.")
-
-    pg_bin_value = env.get("JARVIS_PG_BIN_DIR", "").strip()
-    integration_db = f"jarvis_it_{uuid4().hex}"
-    if not GENERATED_DATABASE_RE.fullmatch(integration_db):
-        pytest.fail("Internal isolated database name validation failed.", pytrace=False)
-    migration_config = runner.DatabaseConfig(
-        host=parsed.hostname or "",
-        port=port,
-        database=integration_db,
-        username=unquote(parsed.username or ""),
-        maintenance_database="postgres",
-        pg_bin_dir=Path(pg_bin_value) if pg_bin_value else None,
-        pgpass_file=Path(passfile_value),
-        backup_dir=Path(env.get("TEMP", str(Path.home()))) / "jarvis-integration-backups",
-    )
-    try:
-        runner._require_tools(("psql", "createdb"), migration_config, env)
-        runner._validate_credentials_file(migration_config)
-    except runner.SetupError as exc:
-        pytest.skip(f"Live PostgreSQL tests not run: migration prerequisites unavailable ({exc}).")
-
-    database_url = urlunsplit(
-        (parsed.scheme, parsed.netloc, f"/{integration_db}", "", "")
-    )
-    created = False
-    try:
-        with psycopg.connect(admin_url, connect_timeout=3, autocommit=True) as admin:
-            collision = admin.execute(
-                "SELECT 1 FROM pg_database WHERE datname = %s", (integration_db,)
-            ).fetchone()
-            if collision is not None:
-                pytest.fail("Generated isolated database name unexpectedly exists.", pytrace=False)
-            # A process interruption can leave a generated database behind.
-            # Catalog presence and connection counts cannot prove staleness, so
-            # only report such databases; never clean them up automatically.
-            existing_generated = admin.execute(
-                "SELECT d.datname, COUNT(a.pid)::integer "
-                "FROM pg_database AS d "
-                "LEFT JOIN pg_stat_activity AS a "
-                "ON a.datid = d.oid AND a.pid <> pg_backend_pid() "
-                "WHERE d.datname ~ %s AND d.datname <> %s "
-                "GROUP BY d.datname",
-                (GENERATED_DATABASE_RE.pattern, integration_db),
-            ).fetchall()
-            classifications = [
-                _classify_preexisting_generated_database(name, count)
-                for name, count in existing_generated
-            ]
-            active_count = classifications.count("active")
-            uncertain_count = classifications.count("uncertain")
-            observed_count = active_count + uncertain_count
-            if observed_count:
-                warnings.warn(
-                    "Found pre-existing generated PostgreSQL integration database(s) "
-                    f"requiring manual review (active connections: {active_count}; "
-                    f"inactive or uncertain: {uncertain_count}). The fixture will not "
-                    "modify or remove them; no active connections does not establish staleness.",
-                    pytest.PytestWarning,
-                    stacklevel=2,
-                )
-            # This name is generated in-process and validated against the test-only prefix above.
-            admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(integration_db)))
-            created = True
-
-        if runner.install(migration_config, environ=env) != 0:
-            pytest.fail(
-                "The existing migration runner could not initialize the isolated integration database; "
-                "review its sanitized diagnostic above.",
-                pytrace=False,
-            )
-        yield IsolatedPostgres(admin_url, database_url, integration_db, migration_config)
-    except pytest.skip.Exception:
-        raise
-    except pytest.fail.Exception:
-        raise
-    except Exception as exc:
-        # Do not include driver messages or connection details; they may contain sensitive context.
-        pytest.fail(
-            f"PostgreSQL integration setup failed ({type(exc).__name__}); connection details were suppressed.",
-            pytrace=False,
-        )
-    finally:
-        if created:
-            if not GENERATED_DATABASE_RE.fullmatch(integration_db):
-                raise RuntimeError("Refusing to drop a database without the generated integration-test name.")
-            try:
-                with psycopg.connect(admin_url, connect_timeout=3, autocommit=True) as admin:
-                    admin.execute(
-                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                        "WHERE datname = %s AND pid <> pg_backend_pid()",
-                        (integration_db,),
-                    )
-                    admin.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(integration_db)))
-                    remaining = admin.execute(
-                        "SELECT 1 FROM pg_database WHERE datname = %s", (integration_db,)
-                    ).fetchone()
-                    if remaining is not None:
-                        raise RuntimeError("generated database remains after drop")
-            except Exception as exc:
-                pytest.fail(
-                    f"Could not complete or verify cleanup of generated isolated integration database "
-                    f"{integration_db} ({type(exc).__name__}); credentials and connection details were suppressed.",
-                    pytrace=False,
-                )
-
-
 def test_clean_migrations_checksums_and_rerun(isolated_postgres):
     expected = {
         migration_id: checksum
@@ -463,6 +335,7 @@ def test_memory_crud_search_ranking_and_delete(isolated_postgres):
 def test_authenticated_document_imports_create_owner_scoped_memory_records(isolated_postgres):
     repository = isolated_postgres.memory_repository()
     imported_ids = []
+    statuses = []
     for _ in range(2):
         with isolated_postgres.client() as client:
             response = client.post(
@@ -473,20 +346,22 @@ def test_authenticated_document_imports_create_owner_scoped_memory_records(isola
                     "X-Document-Filename": r"C:\private\integration-note.MD",
                 },
             )
-        assert response.status_code == 201, response.text
+        statuses.append(response.status_code)
         record = response.json()
         assert record["content"] == "v1 document import integration marker"
         assert record["source_reference"] == "integration-note.MD"
         assert "private" not in record["source_reference"]
         imported_ids.append(UUID(record["id"]))
 
-    assert imported_ids[0] != imported_ids[1]
-    assert all(repository.get(TEST_OWNER_ID, memory_id) is not None for memory_id in imported_ids)
+    # Since v2.2, re-importing identical content returns the existing record (HTTP 200).
+    assert statuses == [201, 200], statuses
+    assert imported_ids[0] == imported_ids[1]
+    assert repository.get(TEST_OWNER_ID, imported_ids[0]) is not None
     other_owner_id = UUID("b5bff5ad-042a-4132-913a-4da0cfe24710")
-    assert all(repository.get(other_owner_id, memory_id) is None for memory_id in imported_ids)
+    assert repository.get(other_owner_id, imported_ids[0]) is None
     matching = repository.search(TEST_OWNER_ID, "v1 document import integration marker", limit=5)
-    assert {item.id for item in matching.items} == set(imported_ids)
-    assert matching.total == 2
+    assert {item.id for item in matching.items} == {imported_ids[0]}
+    assert matching.total == 1
 
 
 def test_memory_lexical_retrieval_evaluation(isolated_postgres):
@@ -1404,3 +1279,211 @@ def test_unreachable_postgres_connection_is_sanitized(isolated_postgres):
         repository.save_exchange("question", "answer")
     assert str(error.value) == "Conversation persistence is unavailable."
     assert "127.0.0.1" not in str(error.value)
+
+
+# --- Memory/context phase: source kinds, document de-duplication, context search ---
+
+
+def test_memory_source_kind_upgrade_preserves_pre_0005_rows(isolated_postgres):
+    """Exercise 0005 against rows stored before the source-kind column exists."""
+    import psycopg
+    from psycopg import sql
+
+    generated_name = f"jarvis_it_{uuid4().hex}"
+    assert GENERATED_DATABASE_RE.fullmatch(generated_name)
+    config = runner.DatabaseConfig(
+        host=isolated_postgres.migration_config.host,
+        port=isolated_postgres.migration_config.port,
+        database=generated_name,
+        username=isolated_postgres.migration_config.username,
+        maintenance_database="postgres",
+        pg_bin_dir=isolated_postgres.migration_config.pg_bin_dir,
+        pgpass_file=isolated_postgres.migration_config.pgpass_file,
+        backup_dir=isolated_postgres.migration_config.backup_dir,
+    )
+    database_url = isolated_postgres.database_url.rsplit("/", 1)[0] + "/" + generated_name
+    rows = [
+        (UUID(int=7101), TEST_OWNER_ID, "Previously saved memory", "notes", None),
+        (UUID(int=7102), UUID(int=7100), "Previously imported document", None, "legacy.md"),
+        (UUID(int=7103), None, "Previously unowned memory", "legacy", None),
+    ]
+    created = False
+    try:
+        with psycopg.connect(isolated_postgres.admin_url, connect_timeout=3, autocommit=True) as admin:
+            if admin.execute("SELECT 1 FROM pg_database WHERE datname = %s", (generated_name,)).fetchone():
+                pytest.fail("Generated source-kind upgrade database name unexpectedly exists.", pytrace=False)
+            admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(generated_name)))
+            created = True
+
+        with tempfile.TemporaryDirectory(prefix="jarvis-pre-0005-") as temporary:
+            database_dir = Path(temporary)
+            scripts = database_dir / "scripts"
+            scripts.mkdir()
+            for migration in sorted(runner.MIGRATIONS_DIR.glob("000[1234]_*.sql")):
+                shutil.copy2(migration, scripts / migration.name)
+            assert len(list(scripts.glob("*.sql"))) == 4
+            if runner.install(config, database_dir=database_dir) != 0:
+                pytest.fail("Could not initialize the disposable pre-0005 database.", pytrace=False)
+            with psycopg.connect(database_url, connect_timeout=3) as connection:
+                assert connection.execute(
+                    "SELECT 1 FROM information_schema.columns WHERE table_schema = 'jarvis_app' "
+                    "AND table_name = 'memories' AND column_name = 'source_kind'"
+                ).fetchone() is None
+                for row in rows:
+                    connection.execute(
+                        "INSERT INTO jarvis_app.memories (id, owner_id, content, category, source_reference) "
+                        "VALUES (%s, %s, %s, %s, %s)", row,
+                    )
+            shutil.copy2(runner.MIGRATIONS_DIR / "0005_memory_source_kind.sql", scripts)
+            if runner.install(config, database_dir=database_dir) != 0:
+                pytest.fail("Could not apply 0005 to the disposable upgrade database.", pytrace=False)
+            assert runner.verify(config, database_dir=database_dir) == 0
+
+        with psycopg.connect(database_url, connect_timeout=3) as connection:
+            upgraded = connection.execute(
+                "SELECT id, owner_id, content, category, source_reference, source_kind "
+                "FROM jarvis_app.memories ORDER BY id"
+            ).fetchall()
+            assert upgraded == [(*row, "memory") for row in rows]
+            assert connection.execute(
+                "SELECT is_nullable, column_default FROM information_schema.columns "
+                "WHERE table_schema = 'jarvis_app' AND table_name = 'memories' AND column_name = 'source_kind'"
+            ).fetchone() == ("NO", "'memory'::text")
+            index = connection.execute(
+                "SELECT indexdef FROM pg_indexes WHERE schemaname = 'jarvis_app' "
+                "AND indexname = 'memories_owner_document_digest_idx'"
+            ).fetchone()
+            assert index is not None
+            assert all(fragment in index[0] for fragment in ("owner_id", "md5(content)", "source_kind", "document", "IS NOT NULL"))
+            with pytest.raises(psycopg.errors.CheckViolation):
+                with connection.transaction():
+                    connection.execute(
+                        "INSERT INTO jarvis_app.memories (id, content, source_kind) VALUES (%s, %s, %s)",
+                        (UUID(int=7104), "Invalid source kind", "unsupported"),
+                    )
+    except psycopg.Error as exc:
+        pytest.fail(f"Disposable source-kind upgrade failed ({type(exc).__name__}); details suppressed.", pytrace=False)
+    finally:
+        if created:
+            if not GENERATED_DATABASE_RE.fullmatch(generated_name):
+                raise RuntimeError("Refusing cleanup without a generated integration-test name.")
+            try:
+                with psycopg.connect(isolated_postgres.admin_url, connect_timeout=3, autocommit=True) as admin:
+                    admin.execute(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = %s AND pid <> pg_backend_pid()", (generated_name,),
+                    )
+                    admin.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(generated_name)))
+                    if admin.execute("SELECT 1 FROM pg_database WHERE datname = %s", (generated_name,)).fetchone():
+                        raise RuntimeError("generated database remains after drop")
+            except Exception as exc:
+                pytest.fail(
+                    f"Could not complete or verify cleanup of generated upgrade database {generated_name} "
+                    f"({type(exc).__name__}); details suppressed.", pytrace=False,
+                )
+
+
+def test_memory_source_kind_migration_defaults_existing_rows_to_memory(isolated_postgres):
+    import psycopg
+
+    legacy_owner = UUID("5f1e8c1e-6f43-4ab9-9a59-0d7a0f3f2c01")
+    legacy_id = UUID("5f1e8c1e-6f43-4ab9-9a59-0d7a0f3f2c02")
+    with psycopg.connect(isolated_postgres.database_url) as connection:
+        connection.execute(
+            "INSERT INTO jarvis_app.memories (id, owner_id, content) VALUES (%s, %s, %s)",
+            (legacy_id, legacy_owner, "legacy import without a kind"),
+        )
+        kind = connection.execute(
+            "SELECT source_kind FROM jarvis_app.memories WHERE id = %s", (legacy_id,)
+        ).fetchone()[0]
+        with pytest.raises(psycopg.errors.CheckViolation):
+            connection.execute(
+                "INSERT INTO jarvis_app.memories (id, owner_id, content, source_kind) VALUES (%s, %s, %s, %s)",
+                (UUID("5f1e8c1e-6f43-4ab9-9a59-0d7a0f3f2c03"), legacy_owner, "bad kind", "secret"),
+            )
+    assert kind == "memory"
+
+
+def test_document_import_deduplicates_per_owner_and_stays_distinct_from_memories(isolated_postgres):
+    owner = UUID("2b9f4d1e-1111-4c4c-9a9a-000000000001")
+    other_owner = UUID("2b9f4d1e-1111-4c4c-9a9a-000000000002")
+    repository = isolated_postgres.memory_repository()
+
+    first, created_first = repository.create_document(owner, "Backup runbook: run nightly.", "backup.md")
+    again, created_again = repository.create_document(owner, "Backup runbook: run nightly.", "renamed.md")
+    foreign, created_foreign = repository.create_document(other_owner, "Backup runbook: run nightly.", "backup.md")
+    memory = repository.create(owner, "Backup runbook: run nightly.", category="ops")
+
+    assert created_first is True and created_again is False and created_foreign is True
+    assert again.id == first.id and again.source_reference == "backup.md"
+    assert foreign.id != first.id
+    assert first.source_kind == "document" and memory.source_kind == "memory"
+    documents = repository.list(owner, limit=20, source_kind="document")
+    memories = repository.list(owner, limit=20, source_kind="memory")
+    assert [item.id for item in documents.items] == [first.id]
+    assert [item.id for item in memories.items] == [memory.id]
+
+
+def test_concurrent_identical_document_imports_store_one_record(isolated_postgres):
+    owner = UUID("2b9f4d1e-1111-4c4c-9a9a-000000000003")
+    repository = isolated_postgres.memory_repository()
+
+    def import_once(_):
+        return repository.create_document(owner, "Concurrent identical import.", "same.md")
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(import_once, range(6)))
+
+    assert sum(created for _, created in results) == 1
+    assert len({record.id for record, _ in results}) == 1
+    assert repository.list(owner, limit=20, source_kind="document").total == 1
+
+
+def test_context_search_is_owner_scoped_prefix_matching_and_kind_filtered(isolated_postgres):
+    from jarvis.memory.query import extract_query_terms
+    from jarvis.memory.retrieval import retrieve_context
+
+    owner = UUID("2b9f4d1e-1111-4c4c-9a9a-000000000004")
+    foreign_owner = UUID("2b9f4d1e-1111-4c4c-9a9a-000000000005")
+    repository = isolated_postgres.memory_repository()
+    decision = repository.create(owner, "We chose PostgreSQL as the persistence database.", category="decisions")
+    runbook, _ = repository.create_document(owner, "Database backups run nightly via backup_db.bat.", "runbook.md")
+    repository.create(owner, "Coffee preferences.")
+    repository.create(foreign_owner, "We chose PostgreSQL as the persistence database. FOREIGN_MARKER")
+
+    terms = extract_query_terms("Which database did we choose for persistence?")
+    candidates = repository.search_context(
+        owner, terms, deadline=None, candidate_limit=40, source_kinds=("memory", "document"),
+    )
+    assert {item.id for item in candidates} == {decision.id, runbook.id}
+    assert all("FOREIGN_MARKER" not in item.content for item in candidates)
+    memories_only = repository.search_context(
+        owner, terms, deadline=None, candidate_limit=40, source_kinds=("memory",),
+    )
+    assert [item.id for item in memories_only] == [decision.id]
+
+    result = retrieve_context(
+        repository, "Which database did we choose for persistence?", owner_id=owner,
+        limit=3, document_limit=2, execution_id="integration",
+    )
+    assert result.outcome == "success"
+    assert result.records[0].id == decision.id
+    # The legacy all-words search still finds nothing for this chat-style query.
+    assert repository.search(owner, "Which database did we choose for persistence?").total == 0
+
+
+def test_chat_uses_live_history_and_reports_context_sources(isolated_postgres):
+    with isolated_postgres.client() as client:
+        first = client.post("/chat", json={"message": "Remember that the deploy window is Tuesday."})
+        assert first.status_code == 200
+        conversation_id = first.json()["conversation_id"]
+        second = client.post("/chat", json={"message": "When is the window?", "conversation_id": conversation_id})
+        missing = client.post(
+            "/chat", json={"message": "hello", "conversation_id": "00000000-0000-4000-8000-00000000abcd"}
+        )
+    assert second.status_code == 200
+    context = second.json()["context"]
+    assert context["history_status"] == "included"
+    assert [source["source_type"] for source in context["sources"]] == ["conversation", "conversation"]
+    assert "deploy window is Tuesday" in second.json()["reply"]  # mock echoes the rendered context
+    assert missing.status_code == 404

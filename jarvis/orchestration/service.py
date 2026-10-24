@@ -6,7 +6,7 @@ from time import monotonic
 from jarvis.core.config import Settings
 from jarvis.intelligence.base import IntelligenceProvider
 from jarvis.orchestration.classification import IntentClassifier, RuleBasedIntentClassifier, classify_safely
-from jarvis.orchestration.experts import ExpertExecutor
+from jarvis.orchestration.experts import Expert, ExpertExecutor
 from jarvis.orchestration.models import (
     MAX_SYNTHESIZED_REPLY_LENGTH,
     AuditEvent,
@@ -92,6 +92,10 @@ class OrchestrationService:
             max_retries=settings.max_expert_retries,
             max_concurrency=settings.max_parallel_experts,
         )
+
+    async def run_advisory(self, context: RequestContext, *, expert: Expert, deadline: float) -> str:
+        """Trusted specialist entry point; shares executor validation and deadline handling."""
+        return await self._executor.execute_advisory(expert, context, deadline=deadline)
 
     async def run(
         self, context: RequestContext, *, deadline: float | None = None
