@@ -82,7 +82,9 @@ _SERVICE_PREFIXES = ("assistant.", "tasks.", "notes.", "finance.", "accounts.", 
                      "health.", "knowledge.", "research.")
 
 
-def is_read_only_step(step: WorkflowStepDefinition) -> bool:
+def is_read_only_step(step: WorkflowStepDefinition, *, tool_read_only: bool = True) -> bool:
+    """``tool_read_only`` says whether a tool step runs through a read-only path (the ToolRuntime, or an
+    in-process handler declared read-only); otherwise a tool step counts as a write."""
     if step.step_type in (StepType.NOOP, StepType.TRANSFORM):
         return True
     act = step.action.strip().lower()
@@ -90,7 +92,7 @@ def is_read_only_step(step: WorkflowStepDefinition) -> bool:
         return True
     if step.step_type == StepType.ASSISTANT or act.startswith(_SERVICE_PREFIXES):
         return False
-    return step.step_type == StepType.TOOL
+    return step.step_type == StepType.TOOL and tool_read_only
 
 
 class _ActiveRun:
@@ -118,6 +120,7 @@ class WorkflowService:
         step_timeout_seconds: float = 30.0,
         run_timeout_seconds: float = 300.0,
         max_active_runs: int = 4,
+        read_only_tool_handlers: frozenset[str] = frozenset(),
     ) -> None:
         self.store = store
         self.audit_service = audit_service
@@ -135,12 +138,16 @@ class WorkflowService:
         self.step_timeout_seconds = step_timeout_seconds
         self.run_timeout_seconds = run_timeout_seconds
         self.max_active_runs = max_active_runs
+        self.read_only_tool_handlers = frozenset(read_only_tool_handlers)
+        self._booted_at = datetime.now(timezone.utc)
         self.approval_service: Any = None  # v4.4: runs with write steps need an approved request
         self._active: dict[UUID, _ActiveRun] = {}
         self._active_lock = threading.Lock()
         self._compensation_lock = threading.Lock()
         self.recovery_done = threading.Event()
-        self._step_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="jarvis-workflow-step")
+        # Room for one hung step per active run plus headroom; a step's timeout starts when it starts (finding 1).
+        self._step_pool = ThreadPoolExecutor(max_workers=max(8, 2 * max_active_runs),
+                                             thread_name_prefix="jarvis-workflow-step")
         self._run_pool = ThreadPoolExecutor(max_workers=max(1, max_active_runs), thread_name_prefix="jarvis-workflow-run")
 
     def close(self) -> None:
@@ -220,9 +227,10 @@ class WorkflowService:
         if not definition:
             raise WorkflowExecutionError(f"Workflow definition {workflow_id} not found.")
         initial_inputs = dict(inputs or {})
-        writes = [step for step in definition.dag_spec.steps if not is_read_only_step(step)]
+        writes = [step for step in definition.dag_spec.steps if not self.is_read_only(step)]
         if not writes:
             return self._start_run(owner_id, definition, initial_inputs, wait=wait)
+        self._check_capacity()  # before the approval is used, so a full engine does not waste it (finding 5)
         material = json.dumps({"workflow_id": str(definition.id), "dag": definition.dag_spec.model_dump(mode="json"),
                                "inputs": initial_inputs}, sort_keys=True, default=str)
         names = ", ".join(f"{step.step_id}:{step.action or step.step_type.value}" for step in writes)
@@ -239,6 +247,18 @@ class WorkflowService:
             # A background run is audited as started; its own finish event records the outcome.
             succeeded=lambda detail: detail.run.status in (WorkflowStatus.COMPLETED, WorkflowStatus.RUNNING),
         )
+
+    def is_read_only(self, step: WorkflowStepDefinition) -> bool:
+        if self.tool_runtime is not None:
+            tool_read_only = True  # tool steps go to the read-only ToolRuntime
+        else:
+            tool_read_only = step.action in self.read_only_tool_handlers  # in-process handlers must be declared
+        return is_read_only_step(step, tool_read_only=tool_read_only)
+
+    def _check_capacity(self) -> None:
+        with self._active_lock:
+            if len(self._active) >= self.max_active_runs:
+                raise WorkflowStateError(f"{len(self._active)} workflow runs are already active; try again later.")
 
     def _start_run(self, owner_id: UUID, definition: WorkflowDefinition, initial_inputs: dict[str, Any], *,
                    wait: bool) -> WorkflowRunDetail:
@@ -297,10 +317,15 @@ class WorkflowService:
                 logger.error("Workflow run %s failed internally: %s", run_id, type(exc).__name__)
                 run_outputs, run_status = {}, WorkflowStatus.FAILED
                 error_msg = f"Internal error ({type(exc).__name__}); completed steps were kept."
-            self.store.update_run(owner_id, run_id, {
-                "status": run_status, "outputs": run_outputs, "error_message": error_msg,
-                "completed_at": datetime.now(timezone.utc),
-            })
+            final = {"status": run_status, "outputs": run_outputs, "error_message": error_msg,
+                     "completed_at": datetime.now(timezone.utc)}
+            for attempt in (1, 2):
+                try:
+                    self.store.update_run(owner_id, run_id, final)
+                    break
+                except Exception as exc:  # noqa: BLE001 - the run would otherwise stay "running" until recovery
+                    logger.error("Workflow run %s final status could not be stored (attempt %d): %s",
+                                 run_id, attempt, type(exc).__name__)
             self._audit(
                 owner_id,
                 "workflow.run.finish",
@@ -331,13 +356,16 @@ class WorkflowService:
         for state in (WorkflowStatus.RUNNING, WorkflowStatus.PENDING):
             items, _ = self.store.list_runs(owner_id, workflow_id=None, status=state, limit=200, offset=0)
             for run in items:
-                if run.id in self._active:
+                # Only runs created before this process started can be orphans; newer ones belong to this process.
+                if run.id in self._active or run.created_at > self._booted_at:
                     continue
-                self.store.update_run(owner_id, run.id, {
+                marked = self.store.update_run(owner_id, run.id, {
                     "status": WorkflowStatus.FAILED, "completed_at": now,
                     "error_message": "Interrupted: the server stopped while this run was in progress. Completed "
                                      "steps were kept; use compensate to undo them.",
-                })
+                }, only_if_status=("running", "pending"))
+                if marked is None:
+                    continue  # it finished in the meantime
                 for step in self.store.get_run_steps(run.id):
                     if step.status in (StepStatus.PENDING, StepStatus.RUNNING):
                         self.store.update_step_run(run.id, step.step_id, {
@@ -394,7 +422,7 @@ class WorkflowService:
                     )
                     continue
 
-                if cancel.is_set() or cancelled:
+                if (cancel.is_set() or cancelled) and not has_failure:
                     cancelled = True
                     step_statuses[step_def.step_id] = StepStatus.SKIPPED
                     self.store.update_step_run(run_id, step_def.step_id, {
@@ -424,7 +452,7 @@ class WorkflowService:
 
                 # Execute step with a timeout; only read-only steps are retried (v4.4)
                 tier = classify_action_tier(step_def.step_type.value, step_def.action)
-                read_only = is_read_only_step(step_def)
+                read_only = self.is_read_only(step_def)
                 max_attempts = MAX_STEP_RETRIES + 1 if read_only else 1
                 attempt = 0
                 attempt_timestamps: list[str] = []
@@ -444,19 +472,31 @@ class WorkflowService:
                         {"status": StepStatus.RUNNING, "started_at": ts},
                     )
 
+                    started = threading.Event()
+
+                    def call(step_def=step_def, started=started):
+                        started.set()
+                        return self._execute_step(owner_id=owner_id, step=step_def, run_inputs=run_inputs,
+                                                  prior_outputs=step_outputs)
+
+                    future = self._step_pool.submit(contextvars.copy_context().run, call)
+                    if not started.wait(max(0.01, min(self.step_timeout_seconds, deadline - monotonic()))) \
+                            and future.cancel():
+                        # Every step worker was busy: the step never started, so nothing was written.
+                        err_text = "No step worker became free in time; the step did not start and wrote nothing."
+                        if monotonic() >= deadline:
+                            break
+                        if cancel.wait(0):
+                            break
+                        continue
                     remaining = deadline - monotonic()
                     limited_by_deadline = remaining < self.step_timeout_seconds
-                    timeout = max(0.01, min(self.step_timeout_seconds, remaining))
-                    future = self._step_pool.submit(
-                        contextvars.copy_context().run, self._execute_step,
-                        owner_id=owner_id, step=step_def, run_inputs=run_inputs, prior_outputs=step_outputs,
-                    )
+                    timeout = max(0.01, min(self.step_timeout_seconds, remaining))  # counted from the step's start
                     try:
                         outputs = future.result(timeout=timeout)
                         step_success = True
                         break
                     except FutureTimeout:
-                        future.cancel()
                         err_text = (f"The run exceeded its {self.run_timeout_seconds:g} s deadline during this step."
                                     if limited_by_deadline else f"The step timed out after {timeout:.3g} s.")
                         if not read_only:
@@ -481,6 +521,7 @@ class WorkflowService:
                         delay = self.backoff_schedule[min(attempt - 1, len(self.backoff_schedule) - 1)]
                         if cancel.wait(min(delay, max(0.0, deadline - monotonic()))):
                             err_text = "Run cancelled by the owner during a retry wait."
+                            cancelled = True
                             break
 
                 if step_success:
@@ -529,8 +570,8 @@ class WorkflowService:
                         },
                     )
 
-        if cancelled or cancel.is_set():
-            kept = [step.step_id for step in completed_step_defs if not is_read_only_step(step)]
+        if cancelled:  # at least one step was skipped because of the cancel
+            kept = [step.step_id for step in completed_step_defs if not self.is_read_only(step)]
             outputs = {"steps": step_outputs,
                        "recovery": {"verdict": "cancelled_not_compensated", "completed_write_steps": kept}}
             message = "Run cancelled by the owner."
@@ -769,7 +810,7 @@ class WorkflowService:
         log: list[dict[str, Any]] = []
 
         # Tier 1: Idempotent - no compensation needed (v4.4: also every read-only step, such as read-only tools)
-        if tier == RollbackTier.TIER_1_IDEMPOTENT or is_read_only_step(step_def):
+        if tier == RollbackTier.TIER_1_IDEMPOTENT or self.is_read_only(step_def):
             log.append({
                 "action": "skip",
                 "timestamp": now.isoformat(),
@@ -900,6 +941,12 @@ class WorkflowService:
         overall = "compensated"
         with self._compensation_lock:
             detail = self.get_run(owner_id, run_id)  # re-read under the lock
+            unknown = [s for s in detail.steps if s.status == StepStatus.FAILED
+                       and (s.recovery_metadata or {}).get("compensation_status") == "manual_required"]
+            for s in unknown:
+                overall = "manual_required"
+                summary.append({"step_id": s.step_id, "status": "manual_required", "log": [],
+                                "note": "this write may or may not have happened; check and undo it manually"})
             completed_steps = [s for s in detail.steps if s.status == StepStatus.COMPLETED]
             for s in reversed(completed_steps):
                 meta = dict(s.recovery_metadata or {})
@@ -949,6 +996,8 @@ class WorkflowService:
         return WorkflowRunPage(items=items, total=total)
 
     def cancel_run(self, owner_id: UUID, run_id: UUID) -> WorkflowRunDetail | None:
+        with self._active_lock:  # decide "live" before reading the store, so a finishing run is never overwritten
+            active = self._active.get(run_id)
         run = self.store.get_run(owner_id, run_id)
         if not run:
             return None
@@ -956,7 +1005,6 @@ class WorkflowService:
             steps = self.store.get_run_steps(run_id)
             return WorkflowRunDetail(run=run, steps=steps)
 
-        active = self._active.get(run_id)
         if active is not None:
             # v4.4: a live run stops itself before its next step (or during a retry wait); the runner records it.
             active.cancel.set()
@@ -964,14 +1012,17 @@ class WorkflowService:
             active.done.wait(timeout=2.0)
             return self.get_run(owner_id, run_id)
 
-        # No runner owns this run (for example after a restart): record the cancellation directly.
+        # No runner owns this run (for example after a restart): record the cancellation, but only if it is still
+        # running or pending, so a run that finished concurrently keeps its real status.
         now = datetime.now(timezone.utc)
         updated_run = self.store.update_run(
             owner_id,
             run_id,
             {"status": WorkflowStatus.CANCELLED, "completed_at": now, "error_message": "Run cancelled by the owner."},
+            only_if_status=("running", "pending"),
         )
-        assert updated_run is not None
+        if updated_run is None:
+            return self.get_run(owner_id, run_id)
 
         # Mark non-terminal steps as skipped
         steps = self.store.get_run_steps(run_id)

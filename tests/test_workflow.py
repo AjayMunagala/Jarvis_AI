@@ -233,7 +233,8 @@ def test_workflow_service_failure_and_skipping():
     def failing_tool(params):
         raise ValueError("Simulated tool crash")
 
-    service = WorkflowService(store, tool_handlers={"crash_tool": failing_tool})
+    service = WorkflowService(store, tool_handlers={"crash_tool": failing_tool},
+                              read_only_tool_handlers=frozenset({"crash_tool"}))  # v4.4: declared read-only
 
     dag = DAGSpec(
         steps=[

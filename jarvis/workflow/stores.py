@@ -46,7 +46,9 @@ class WorkflowStore(Protocol):
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[WorkflowRun], int]: ...
-    def update_run(self, owner_id: UUID, run_id: UUID, updates: dict[str, Any]) -> WorkflowRun | None: ...
+    # v4.4: ``only_if_status`` makes the update conditional on the current status (None: unconditional).
+    def update_run(self, owner_id: UUID, run_id: UUID, updates: dict[str, Any],
+                   only_if_status: tuple[str, ...] | None = None) -> WorkflowRun | None: ...
     def update_step_run(self, run_id: UUID, step_id: str, updates: dict[str, Any]) -> WorkflowStepRun | None: ...
 
 
@@ -122,10 +124,13 @@ class MemoryWorkflowStore:
             matched.sort(key=lambda x: x.created_at, reverse=True)
             return matched[offset : offset + limit], len(matched)
 
-    def update_run(self, owner_id: UUID, run_id: UUID, updates: dict[str, Any]) -> WorkflowRun | None:
+    def update_run(self, owner_id: UUID, run_id: UUID, updates: dict[str, Any],
+                   only_if_status: tuple[str, ...] | None = None) -> WorkflowRun | None:
         with self._lock:
             existing = self._runs.get(run_id)
             if not existing or existing.owner_id != owner_id:
+                return None
+            if only_if_status is not None and existing.status.value not in only_if_status:
                 return None
             data = existing.model_dump()
             data.update({k: v for k, v in updates.items() if v is not None})
@@ -398,7 +403,8 @@ class PostgresWorkflowStore:
         except Exception as exc:
             raise WorkflowStorageError("Failed to list workflow runs from PostgreSQL.") from exc
 
-    def update_run(self, owner_id: UUID, run_id: UUID, updates: dict[str, Any]) -> WorkflowRun | None:
+    def update_run(self, owner_id: UUID, run_id: UUID, updates: dict[str, Any],
+                   only_if_status: tuple[str, ...] | None = None) -> WorkflowRun | None:
         deadline = operation_deadline(self._operation_timeout, clock=monotonic)
         existing = self.get_run(owner_id, run_id)
         if not existing:
@@ -409,17 +415,19 @@ class PostgresWorkflowStore:
         sql = """
             UPDATE jarvis_app.workflow_runs
             SET status = %s, outputs = %s, error_message = %s, started_at = %s, completed_at = %s
-            WHERE id = %s AND owner_id = %s
+            WHERE id = %s AND owner_id = %s AND (%s::text[] IS NULL OR status = ANY(%s::text[]))
+            RETURNING id
         """
+        statuses = list(only_if_status) if only_if_status is not None else None
         try:
             with self._open(deadline) as conn:
-                execute_with_deadline(
+                row = execute_with_deadline(
                     conn, deadline, sql,
                     (updated.status.value, json.dumps(updated.outputs), updated.error_message,
-                     updated.started_at, updated.completed_at, run_id, owner_id),
+                     updated.started_at, updated.completed_at, run_id, owner_id, statuses, statuses),
                     clock=monotonic,
-                )
-                return updated
+                ).fetchone()
+                return updated if row else None
         except Exception as exc:
             raise WorkflowStorageError("Failed to update workflow run in PostgreSQL.") from exc
 

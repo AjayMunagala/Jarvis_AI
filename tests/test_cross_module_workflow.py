@@ -62,6 +62,7 @@ def workflow_env():
         finance_service=finance,
         scheduler_service=scheduler,
         tool_handlers=handlers,
+        read_only_tool_handlers=frozenset(handlers),  # v4.4: in-process handlers must be declared read-only
         backoff_enabled=False,  # Fast tests
     )
     service.approval_service = approvals = memory_approvals()  # v4.4: write steps need an approved request

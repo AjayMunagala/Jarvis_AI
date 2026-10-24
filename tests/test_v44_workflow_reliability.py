@@ -12,6 +12,7 @@ from pydantic import SecretStr
 
 from approval_flow import approve_if_required, approve_over_http, memory_approvals
 from jarvis.assistant.service import AssistantService
+from jarvis.audit.models import ApprovalProposal
 from jarvis.assistant.stores import MemoryAssistantStore
 from jarvis.core.config import Settings
 from jarvis.finance.models import AccountCreateRequest, TransactionCreateRequest
@@ -57,6 +58,8 @@ class SlowAssistant:
 def make_service(**overrides):
     values = dict(backoff_enabled=False, step_timeout_seconds=5.0, run_timeout_seconds=30.0)
     values.update(overrides)
+    # Test tool handlers are declared read-only, as the ToolRuntime path is (v4.4 finding 6).
+    values.setdefault("read_only_tool_handlers", frozenset(values.get("tool_handlers", {})))
     service = WorkflowService(MemoryWorkflowStore(), **values)
     service.approval_service = memory_approvals()
     return service
@@ -283,3 +286,104 @@ def test_api_tool_steps_go_through_the_tool_runtime():
     failed = result["steps"][0]
     assert result["run"]["status"] == "failed" and "disabled" in failed["error_message"]
     assert failed["recovery_metadata"]["attempt_count"] == 1
+
+
+# ------------------------------------------------------------- review fixes
+
+def test_a_write_step_that_never_started_is_not_reported_as_unknown():
+    from concurrent.futures import ThreadPoolExecutor
+
+    class CountingAssistant:
+        calls = 0
+
+        def create_task(self, owner_id, request):
+            CountingAssistant.calls += 1
+            return type("T", (), {"id": uuid4(), "title": "t"})()
+
+    service = make_service(assistant_service=CountingAssistant(), step_timeout_seconds=0.2)
+    release = threading.Event()
+    service._step_pool = ThreadPoolExecutor(max_workers=1)
+    service._step_pool.submit(release.wait, 5)  # the only worker is busy with a hung step
+    try:
+        detail = run(service, define(service, step("w", "assistant", "tasks.create")))
+    finally:
+        release.set()
+    failed = detail.steps[0]
+    assert CountingAssistant.calls == 0 and failed.status == StepStatus.FAILED
+    assert failed.recovery_metadata["outcome_unknown"] is False and "did not start" in failed.error_message
+    assert failed.recovery_metadata["compensation_status"] == "none"
+
+
+def test_cancel_never_overwrites_a_run_that_finished_concurrently():
+    service = make_service()
+    detail = run(service, define(service, step("a")))
+    assert detail.run.status == WorkflowStatus.COMPLETED
+    real_get_run = service.store.get_run
+    stale = detail.run.model_copy(update={"status": WorkflowStatus.RUNNING})
+    service.store.get_run = lambda owner_id, run_id: stale  # the status was read just before the run finished
+    try:
+        service.cancel_run(OWNER, detail.run.id)
+    finally:
+        service.store.get_run = real_get_run
+    assert service.get_run(OWNER, detail.run.id).run.status == WorkflowStatus.COMPLETED
+
+
+def test_recovery_ignores_runs_started_by_this_process():
+    store = MemoryWorkflowStore()
+    service = WorkflowService(store)
+    definition = define(service, step("a"))
+    now = datetime.now(timezone.utc)
+    run_id = uuid4()
+    time.sleep(0.02)
+    store.create_run(WorkflowRun(id=run_id, workflow_id=definition.id, owner_id=OWNER, status=WorkflowStatus.RUNNING,
+                                 inputs={}, outputs={}, error_message=None, created_at=datetime.now(timezone.utc),
+                                 started_at=now, completed_at=None), [])
+    assert service.recover_interrupted_runs(OWNER) == 0
+    assert service.get_run(OWNER, run_id).run.status == WorkflowStatus.RUNNING
+
+
+def test_compensation_reports_unknown_outcome_writes():
+    slow = SlowAssistant()
+    service = make_service(assistant_service=slow, step_timeout_seconds=0.2)
+    try:
+        detail = run(service, define(service, step("w", "assistant", "tasks.create")))
+    finally:
+        slow.release.set()
+    result = service.compensate_run(OWNER, detail.run.id)
+    assert result["status"] == "manual_required" and result["summary"][0]["step_id"] == "w"
+
+
+def test_a_full_engine_refuses_before_the_approval_is_used():
+    release = threading.Event()
+    service = make_service(tool_handlers={"tool.block": lambda params: release.wait(5) or {"ok": True}},
+                           assistant_service=AssistantService(MemoryAssistantStore()), max_active_runs=1)
+    busy = define(service, step("b", "tool", "tool.block"))
+    writes = define(service, step("w", "assistant", "tasks.create"))
+    try:
+        run(service, busy, wait=False)
+        approvals = service.approval_service
+        request = approvals.request(OWNER, ApprovalProposal(
+            category="workflow", action="workflow.run", target="x", reason="r", risk="medium",
+            expected_side_effects="e", scope_material="unused"))
+        approvals.decide(OWNER, request.approval_id, approve=True, note=None)
+        with pytest.raises(WorkflowStateError):
+            service.trigger_run(OWNER, writes.id, {}, request.approval_id)
+        assert approvals.get(OWNER, request.approval_id).consumed_at is None
+    finally:
+        release.set()
+
+
+def test_a_cancel_after_the_last_step_keeps_the_real_status():
+    service = make_service()
+    holder = {}
+
+    def last_step(params):
+        holder["cancel"].set()  # the cancel arrives while the final step is running
+        return {"ok": True}
+
+    service.tool_handlers = {"tool.last": last_step}
+    service.read_only_tool_handlers = frozenset({"tool.last"})
+    holder["cancel"] = threading.Event()
+    dag = DAGSpec(steps=[step("only", "tool", "tool.last")])
+    outputs, status, error = service._execute_dag(OWNER, uuid4(), dag, {}, cancel=holder["cancel"])
+    assert status == WorkflowStatus.COMPLETED and error is None
