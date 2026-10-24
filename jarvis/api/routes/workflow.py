@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from starlette.concurrency import run_in_threadpool
 
 from jarvis.api.dependencies import authenticated_owner, enforce_capability
+from jarvis.audit.models import ApprovalRequiredResponse
 from jarvis.models.schemas import ErrorResponse
 from jarvis.security.policy import Capability
 from jarvis.workflow.models import (
@@ -22,10 +23,11 @@ from jarvis.workflow.models import (
     WorkflowRunTriggerRequest,
     WorkflowStatus,
 )
-from jarvis.workflow.service import WorkflowExecutionError, WorkflowService
+from jarvis.workflow.service import WorkflowExecutionError, WorkflowService, WorkflowStateError
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
-_ERRORS = {code: {"model": ErrorResponse} for code in (401, 403, 404, 422, 503)}
+_ERRORS = {code: {"model": ErrorResponse} for code in (401, 403, 404, 409, 422, 503)}
+_GATED = {**_ERRORS, 202: {"model": ApprovalRequiredResponse, "description": "Approval required; nothing was executed."}}
 
 
 def _owner(owner_id: UUID | None) -> UUID:
@@ -132,7 +134,7 @@ async def delete_workflow_definition(
     "/definitions/{workflow_id}/run",
     response_model=WorkflowRunDetail,
     status_code=status.HTTP_201_CREATED,
-    responses=_ERRORS,
+    responses=_GATED,
 )
 async def trigger_workflow_run(
     request: Request,
@@ -144,8 +146,10 @@ async def trigger_workflow_run(
     enforce_capability(request, owner, Capability.WORKFLOW_WRITE)
     try:
         return await run_in_threadpool(
-            _service(request).trigger_run, owner, workflow_id, body.inputs
+            _service(request).trigger_run, owner, workflow_id, body.inputs, body.approval_id, body.wait
         )
+    except WorkflowStateError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except WorkflowExecutionError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -226,6 +230,8 @@ async def compensate_workflow_run(
     enforce_capability(request, owner, Capability.WORKFLOW_WRITE)
     try:
         return await run_in_threadpool(_service(request).compensate_run, owner, run_id)
+    except WorkflowStateError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except WorkflowExecutionError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

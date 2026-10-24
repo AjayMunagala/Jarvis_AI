@@ -166,6 +166,10 @@ class WorkflowDefinitionCreateRequest(StrictSchema):
 
 class WorkflowRunTriggerRequest(StrictSchema):
     inputs: dict[str, Any] = Field(default_factory=dict)
+    # v4.4: a run with write steps needs the ID of an approved request for exactly this run.
+    approval_id: str | None = Field(default=None, pattern=r"^AR-[a-f0-9]{16}$")
+    # v4.4: false starts the run in the background and returns at once (status "running").
+    wait: bool = True
 
 
 # ------------------------------------------------------------- Responses & Pages

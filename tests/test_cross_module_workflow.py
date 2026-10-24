@@ -3,6 +3,7 @@
 from uuid import UUID, uuid4
 import pytest
 
+from approval_flow import approve_if_required, memory_approvals
 from jarvis.assistant.models import TaskCreateRequest
 from jarvis.assistant.service import AssistantService
 from jarvis.assistant.stores import MemoryAssistantStore
@@ -63,6 +64,7 @@ def workflow_env():
         tool_handlers=handlers,
         backoff_enabled=False,  # Fast tests
     )
+    service.approval_service = approvals = memory_approvals()  # v4.4: write steps need an approved request
 
     return {
         "service": service,
@@ -70,6 +72,7 @@ def workflow_env():
         "finance": finance,
         "scheduler": scheduler,
         "flaky_counts": flaky_counts,
+        "approvals": approvals,
     }
 
 
@@ -116,7 +119,8 @@ def test_cross_module_workflow_success(workflow_env):
         WorkflowDefinitionCreateRequest(name="Cross-Module Allocation", dag_spec=dag),
     )
 
-    run_detail = service.trigger_run(TEST_OWNER, definition.id)
+    run_detail = approve_if_required(workflow_env["approvals"], TEST_OWNER,
+                                     lambda approval_id: service.trigger_run(TEST_OWNER, definition.id, None, approval_id))
     assert run_detail.run.status == WorkflowStatus.COMPLETED
     assert len(run_detail.steps) == 3
     for s in run_detail.steps:
@@ -142,7 +146,8 @@ def test_bounded_retry_recovery(workflow_env):
         WorkflowDefinitionCreateRequest(name="Retry Workflow", dag_spec=dag),
     )
 
-    run_detail = service.trigger_run(TEST_OWNER, definition.id)
+    run_detail = approve_if_required(workflow_env["approvals"], TEST_OWNER,
+                                     lambda approval_id: service.trigger_run(TEST_OWNER, definition.id, None, approval_id))
     assert run_detail.run.status == WorkflowStatus.COMPLETED
     step_flaky = run_detail.steps[0]
     assert step_flaky.status == StepStatus.COMPLETED
@@ -187,7 +192,8 @@ def test_failure_exhaustion_triggers_backward_compensation(workflow_env):
         WorkflowDefinitionCreateRequest(name="Compensating Workflow", dag_spec=dag),
     )
 
-    run_detail = service.trigger_run(TEST_OWNER, definition.id)
+    run_detail = approve_if_required(workflow_env["approvals"], TEST_OWNER,
+                                     lambda approval_id: service.trigger_run(TEST_OWNER, definition.id, None, approval_id))
     assert run_detail.run.status == WorkflowStatus.FAILED
     assert "Recovery: failed_compensated" in run_detail.run.error_message
     assert run_detail.run.outputs["recovery"]["verdict"] == "failed_compensated"
@@ -233,7 +239,8 @@ def test_tier_4_manual_intervention_dead_letter(workflow_env):
         WorkflowDefinitionCreateRequest(name="Tier 4 Dead Letter WF", dag_spec=dag),
     )
 
-    run_detail = service.trigger_run(TEST_OWNER, definition.id)
+    run_detail = approve_if_required(workflow_env["approvals"], TEST_OWNER,
+                                     lambda approval_id: service.trigger_run(TEST_OWNER, definition.id, None, approval_id))
     assert run_detail.run.status == WorkflowStatus.FAILED
     assert run_detail.run.outputs["recovery"]["verdict"] == "failed_uncompensated_manual_required"
 

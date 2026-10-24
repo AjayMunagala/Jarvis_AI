@@ -1,10 +1,36 @@
-"""Workflow orchestration service: DAG compilation, cross-module execution, and recovery (v3.2 & v3.8)."""
+"""Workflow orchestration service: DAG compilation, cross-module execution, and recovery (v3.2 & v3.8).
 
+v4.4 reliable execution:
+- Each step runs with a timeout and each run with an overall deadline. A
+  read-only step that fails or times out may be retried; a write step runs
+  once, because retrying a write that partly happened could duplicate it. A
+  write step that times out is reported with an unknown outcome
+  (``manual_required``), because the worker thread cannot be stopped.
+- Cancel stops a live run before its next step or during a retry wait. Steps
+  that already completed are kept and listed, and can be undone with
+  compensate. A run left ``running`` by a restart is marked failed at startup.
+- Retry waits never sleep a request thread blindly: they wait on the run's
+  cancel event.
+- Runs whose steps write data need an approved request (v4.3 gateway,
+  category ``workflow``), bound to the definition, its steps and the inputs.
+- Tool steps run through the read-only ``ToolRuntime`` and its policy.
+- Compensation never reports an undo it did not do: a write without an undo
+  is ``manual_required``. Compensating a run twice does nothing the second time.
+"""
+
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+import contextvars
 from datetime import datetime, timezone
+import hashlib
+import json
 import logging
-import time
-from typing import Any
+import threading
+from time import monotonic
+from typing import Any, Callable
 from uuid import UUID, uuid4
+
+from jarvis.audit.models import ApprovalProposal
+from jarvis.audit.service import run_approved
 
 from jarvis.workflow.models import (
     DAGSpec,
@@ -44,6 +70,35 @@ class StepUnavailableError(WorkflowExecutionError):
     """
 
 
+class WorkflowStateError(WorkflowExecutionError):
+    """v4.4: the request conflicts with the run's state (HTTP 409)."""
+
+
+# v4.4: service actions that only read. Any other service action writes; tool steps run through the read-only
+# ToolRuntime. The prefixes mirror the dispatch order in ``_execute_step``.
+READ_ONLY_ACTIONS = frozenset({"tasks.list", "assistant.tasks.list", "notes.search", "assistant.notes.search",
+                               "knowledge.search"})
+_SERVICE_PREFIXES = ("assistant.", "tasks.", "notes.", "finance.", "accounts.", "scheduler.", "notifications.",
+                     "health.", "knowledge.", "research.")
+
+
+def is_read_only_step(step: WorkflowStepDefinition) -> bool:
+    if step.step_type in (StepType.NOOP, StepType.TRANSFORM):
+        return True
+    act = step.action.strip().lower()
+    if act in READ_ONLY_ACTIONS:
+        return True
+    if step.step_type == StepType.ASSISTANT or act.startswith(_SERVICE_PREFIXES):
+        return False
+    return step.step_type == StepType.TOOL
+
+
+class _ActiveRun:
+    def __init__(self) -> None:
+        self.cancel = threading.Event()
+        self.done = threading.Event()
+
+
 class WorkflowService:
     def __init__(
         self,
@@ -58,6 +113,11 @@ class WorkflowService:
         finance_service: Any = None,
         backoff_enabled: bool = True,
         backoff_schedule: list[float] | None = None,
+        tool_runtime: Any = None,
+        tool_context_factory: Callable[[UUID], Any] | None = None,
+        step_timeout_seconds: float = 30.0,
+        run_timeout_seconds: float = 300.0,
+        max_active_runs: int = 4,
     ) -> None:
         self.store = store
         self.audit_service = audit_service
@@ -70,6 +130,24 @@ class WorkflowService:
         self.finance_service = finance_service
         self.backoff_enabled = backoff_enabled
         self.backoff_schedule = backoff_schedule or (BACKOFF_SCHEDULE if backoff_enabled else [0.001, 0.002])
+        self.tool_runtime = tool_runtime
+        self.tool_context_factory = tool_context_factory
+        self.step_timeout_seconds = step_timeout_seconds
+        self.run_timeout_seconds = run_timeout_seconds
+        self.max_active_runs = max_active_runs
+        self.approval_service: Any = None  # v4.4: runs with write steps need an approved request
+        self._active: dict[UUID, _ActiveRun] = {}
+        self._active_lock = threading.Lock()
+        self._compensation_lock = threading.Lock()
+        self.recovery_done = threading.Event()
+        self._step_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="jarvis-workflow-step")
+        self._run_pool = ThreadPoolExecutor(max_workers=max(1, max_active_runs), thread_name_prefix="jarvis-workflow-run")
+
+    def close(self) -> None:
+        for active in list(self._active.values()):
+            active.cancel.set()
+        self._run_pool.shutdown(wait=False, cancel_futures=True)
+        self._step_pool.shutdown(wait=False, cancel_futures=True)
 
     def _audit(self, owner_id: UUID, event_type: str, subject: str, details: dict[str, Any]) -> None:
         if self.audit_service is not None:
@@ -135,86 +213,143 @@ class WorkflowService:
     # --------------------------------------------------------- Execution
 
     def trigger_run(
-        self, owner_id: UUID, workflow_id: UUID, inputs: dict[str, Any] | None = None
+        self, owner_id: UUID, workflow_id: UUID, inputs: dict[str, Any] | None = None,
+        approval_id: str | None = None, wait: bool = True,
     ) -> WorkflowRunDetail:
         definition = self.get_definition(owner_id, workflow_id)
         if not definition:
             raise WorkflowExecutionError(f"Workflow definition {workflow_id} not found.")
-
-        now = datetime.now(timezone.utc)
-        run_id = uuid4()
         initial_inputs = dict(inputs or {})
-
-        # Prepare step runs
-        step_runs: list[WorkflowStepRun] = []
-        for step in definition.dag_spec.steps:
-            step_runs.append(
-                WorkflowStepRun(
-                    id=uuid4(),
-                    run_id=run_id,
-                    step_id=step.step_id,
-                    step_name=step.name,
-                    status=StepStatus.PENDING,
-                    inputs=dict(step.parameters),
-                    outputs={},
-                    error_message=None,
-                    recovery_metadata={},
-                    started_at=None,
-                    completed_at=None,
-                )
-            )
-
-        run = WorkflowRun(
-            id=run_id,
-            workflow_id=workflow_id,
-            owner_id=owner_id,
-            status=WorkflowStatus.RUNNING,
-            inputs=initial_inputs,
-            outputs={},
-            error_message=None,
-            created_at=now,
-            started_at=now,
-            completed_at=None,
+        writes = [step for step in definition.dag_spec.steps if not is_read_only_step(step)]
+        if not writes:
+            return self._start_run(owner_id, definition, initial_inputs, wait=wait)
+        material = json.dumps({"workflow_id": str(definition.id), "dag": definition.dag_spec.model_dump(mode="json"),
+                               "inputs": initial_inputs}, sort_keys=True, default=str)
+        names = ", ".join(f"{step.step_id}:{step.action or step.step_type.value}" for step in writes)
+        proposal = ApprovalProposal(
+            category="workflow", action="workflow.run", target=f"{definition.name}: {names}"[:300],
+            reason=f"Run workflow '{definition.name}'"[:500], risk="medium",
+            expected_side_effects=f"Runs {len(definition.dag_spec.steps)} step(s), {len(writes)} of which write data: "
+                                  f"{names}."[:300],
+            scope_material=hashlib.sha256(material.encode("utf-8")).hexdigest(),
+        )
+        return run_approved(
+            self.approval_service, owner_id, proposal, approval_id,
+            lambda: self._start_run(owner_id, definition, initial_inputs, wait=wait),
+            # A background run is audited as started; its own finish event records the outcome.
+            succeeded=lambda detail: detail.run.status in (WorkflowStatus.COMPLETED, WorkflowStatus.RUNNING),
         )
 
-        self.store.create_run(run, step_runs)
+    def _start_run(self, owner_id: UUID, definition: WorkflowDefinition, initial_inputs: dict[str, Any], *,
+                   wait: bool) -> WorkflowRunDetail:
+        with self._active_lock:
+            if len(self._active) >= self.max_active_runs:
+                raise WorkflowStateError(f"{len(self._active)} workflow runs are already active; try again later.")
+            run_id = uuid4()
+            active = self._active[run_id] = _ActiveRun()
+        try:
+            now = datetime.now(timezone.utc)
+            step_runs = [
+                WorkflowStepRun(
+                    id=uuid4(), run_id=run_id, step_id=step.step_id, step_name=step.name, status=StepStatus.PENDING,
+                    inputs=dict(step.parameters), outputs={}, error_message=None, recovery_metadata={},
+                    started_at=None, completed_at=None,
+                )
+                for step in definition.dag_spec.steps
+            ]
+            run = WorkflowRun(
+                id=run_id, workflow_id=definition.id, owner_id=owner_id, status=WorkflowStatus.RUNNING,
+                inputs=initial_inputs, outputs={}, error_message=None, created_at=now, started_at=now,
+                completed_at=None,
+            )
+            self.store.create_run(run, step_runs)
+        except Exception:
+            self._finish_active(run_id)
+            raise
         self._audit(
             owner_id,
             "workflow.run.start",
             f"workflow:run:{run.id}",
-            {"workflow_id": str(workflow_id), "steps": len(step_runs)},
+            {"workflow_id": str(definition.id), "steps": len(step_runs), "background": not wait},
         )
+        if wait:
+            self._run(owner_id, run_id, definition, initial_inputs, active)
+        else:
+            context = contextvars.copy_context()
+            self._run_pool.submit(context.run, self._run, owner_id, run_id, definition, initial_inputs, active)
+        return self.get_run(owner_id, run_id)
 
-        # Execute DAG levels with bounded retries and compensation
-        run_outputs, run_status, error_msg = self._execute_dag(
-            owner_id=owner_id,
-            run_id=run_id,
-            dag_spec=definition.dag_spec,
-            run_inputs=initial_inputs,
-        )
+    def _finish_active(self, run_id: UUID) -> None:
+        with self._active_lock:
+            active = self._active.pop(run_id, None)
+        if active is not None:
+            active.done.set()
 
-        end_time = datetime.now(timezone.utc)
-        updated_run = self.store.update_run(
-            owner_id,
-            run_id,
-            {
-                "status": run_status,
-                "outputs": run_outputs,
-                "error_message": error_msg,
-                "completed_at": end_time,
-            },
-        )
-        assert updated_run is not None
+    def _run(self, owner_id: UUID, run_id: UUID, definition: WorkflowDefinition, inputs: dict[str, Any],
+             active: _ActiveRun) -> None:
+        try:
+            try:
+                run_outputs, run_status, error_msg = self._execute_dag(
+                    owner_id=owner_id, run_id=run_id, dag_spec=definition.dag_spec, run_inputs=inputs,
+                    cancel=active.cancel, deadline=monotonic() + self.run_timeout_seconds,
+                )
+            except Exception as exc:  # noqa: BLE001 - a run must never stay "running" after an internal error
+                logger.error("Workflow run %s failed internally: %s", run_id, type(exc).__name__)
+                run_outputs, run_status = {}, WorkflowStatus.FAILED
+                error_msg = f"Internal error ({type(exc).__name__}); completed steps were kept."
+            self.store.update_run(owner_id, run_id, {
+                "status": run_status, "outputs": run_outputs, "error_message": error_msg,
+                "completed_at": datetime.now(timezone.utc),
+            })
+            self._audit(
+                owner_id,
+                "workflow.run.finish",
+                f"workflow:run:{run_id}",
+                {"status": run_status.value, "has_error": bool(error_msg)},
+            )
+        finally:
+            self._finish_active(run_id)
 
-        self._audit(
-            owner_id,
-            "workflow.run.finish",
-            f"workflow:run:{run.id}",
-            {"status": run_status.value, "has_error": bool(error_msg)},
-        )
+    def start_recovery(self, owner_id: UUID) -> threading.Thread:
+        """Run ``recover_interrupted_runs`` in a background thread; ``recovery_done`` is set when it ends."""
+        def work() -> None:
+            try:
+                self.recover_interrupted_runs(owner_id)
+            except Exception as exc:  # noqa: BLE001 - the runs stay visible as they are
+                logger.warning("Interrupted workflow runs could not be recovered: %s", type(exc).__name__)
+            finally:
+                self.recovery_done.set()
 
-        final_steps = self.store.get_run_steps(run_id)
-        return WorkflowRunDetail(run=updated_run, steps=final_steps)
+        thread = threading.Thread(target=work, name="jarvis-workflow-recovery", daemon=True)
+        thread.start()
+        return thread
+
+    def recover_interrupted_runs(self, owner_id: UUID) -> int:
+        """Mark runs left running or pending by a previous process as failed (v4.4)."""
+        recovered = 0
+        now = datetime.now(timezone.utc)
+        for state in (WorkflowStatus.RUNNING, WorkflowStatus.PENDING):
+            items, _ = self.store.list_runs(owner_id, workflow_id=None, status=state, limit=200, offset=0)
+            for run in items:
+                if run.id in self._active:
+                    continue
+                self.store.update_run(owner_id, run.id, {
+                    "status": WorkflowStatus.FAILED, "completed_at": now,
+                    "error_message": "Interrupted: the server stopped while this run was in progress. Completed "
+                                     "steps were kept; use compensate to undo them.",
+                })
+                for step in self.store.get_run_steps(run.id):
+                    if step.status in (StepStatus.PENDING, StepStatus.RUNNING):
+                        self.store.update_step_run(run.id, step.step_id, {
+                            "status": StepStatus.SKIPPED if step.status == StepStatus.PENDING else StepStatus.FAILED,
+                            "error_message": "Interrupted by a server restart; the outcome is unknown."
+                            if step.status == StepStatus.RUNNING else "Interrupted by a server restart.",
+                            "completed_at": now,
+                        })
+                recovered += 1
+        if recovered:
+            self._audit(owner_id, "workflow.run.recover", "workflow:runs", {"interrupted_runs": recovered})
+        return recovered
 
     def _execute_dag(
         self,
@@ -222,7 +357,12 @@ class WorkflowService:
         run_id: UUID,
         dag_spec: DAGSpec,
         run_inputs: dict[str, Any],
+        cancel: threading.Event | None = None,
+        deadline: float | None = None,
     ) -> tuple[dict[str, Any], WorkflowStatus, str | None]:
+        cancel = cancel or threading.Event()
+        deadline = deadline if deadline is not None else monotonic() + self.run_timeout_seconds
+        cancelled = False
         levels = dag_spec.topological_levels()
         step_outputs: dict[str, dict[str, Any]] = {}
         step_statuses: dict[str, StepStatus] = {}
@@ -254,6 +394,20 @@ class WorkflowService:
                     )
                     continue
 
+                if cancel.is_set() or cancelled:
+                    cancelled = True
+                    step_statuses[step_def.step_id] = StepStatus.SKIPPED
+                    self.store.update_step_run(run_id, step_def.step_id, {
+                        "status": StepStatus.SKIPPED, "error_message": "Run cancelled by the owner.",
+                        "recovery_metadata": {"compensation_status": "none", "skipped_reason": "cancelled"},
+                        "completed_at": datetime.now(timezone.utc),
+                    })
+                    continue
+
+                if not has_failure and monotonic() >= deadline:
+                    has_failure = True
+                    first_error = first_error or f"The run exceeded its {self.run_timeout_seconds:g} s deadline."
+
                 if has_failure:
                     step_statuses[step_def.step_id] = StepStatus.SKIPPED
                     self.store.update_step_run(
@@ -268,15 +422,18 @@ class WorkflowService:
                     )
                     continue
 
-                # Execute step with bounded retry
+                # Execute step with a timeout; only read-only steps are retried (v4.4)
                 tier = classify_action_tier(step_def.step_type.value, step_def.action)
+                read_only = is_read_only_step(step_def)
+                max_attempts = MAX_STEP_RETRIES + 1 if read_only else 1
                 attempt = 0
                 attempt_timestamps: list[str] = []
                 step_success = False
+                outcome_unknown = False
                 outputs: dict[str, Any] = {}
                 err_text: str | None = None
 
-                while attempt <= MAX_STEP_RETRIES:
+                while attempt < max_attempts:
                     attempt += 1
                     ts = datetime.now(timezone.utc)
                     attempt_timestamps.append(ts.isoformat())
@@ -287,15 +444,27 @@ class WorkflowService:
                         {"status": StepStatus.RUNNING, "started_at": ts},
                     )
 
+                    remaining = deadline - monotonic()
+                    limited_by_deadline = remaining < self.step_timeout_seconds
+                    timeout = max(0.01, min(self.step_timeout_seconds, remaining))
+                    future = self._step_pool.submit(
+                        contextvars.copy_context().run, self._execute_step,
+                        owner_id=owner_id, step=step_def, run_inputs=run_inputs, prior_outputs=step_outputs,
+                    )
                     try:
-                        outputs = self._execute_step(
-                            owner_id=owner_id,
-                            step=step_def,
-                            run_inputs=run_inputs,
-                            prior_outputs=step_outputs,
-                        )
+                        outputs = future.result(timeout=timeout)
                         step_success = True
                         break
+                    except FutureTimeout:
+                        future.cancel()
+                        err_text = (f"The run exceeded its {self.run_timeout_seconds:g} s deadline during this step."
+                                    if limited_by_deadline else f"The step timed out after {timeout:.3g} s.")
+                        if not read_only:
+                            outcome_unknown = True
+                            err_text += " It writes data and may still complete, so its outcome is unknown."
+                            break
+                        if limited_by_deadline:
+                            break  # no time is left for a retry
                     except StepUnavailableError as exc:
                         err_text = str(exc)
                         break  # permanent: retrying cannot make a missing capability appear
@@ -305,12 +474,14 @@ class WorkflowService:
                             "Step '%s' attempt %d/%d failed: %s",
                             step_def.step_id,
                             attempt,
-                            MAX_STEP_RETRIES + 1,
+                            max_attempts,
                             err_text,
                         )
-                        if attempt <= MAX_STEP_RETRIES and self.backoff_enabled:
-                            delay = self.backoff_schedule[min(attempt - 1, len(self.backoff_schedule) - 1)]
-                            time.sleep(delay)
+                    if attempt < max_attempts and self.backoff_enabled:
+                        delay = self.backoff_schedule[min(attempt - 1, len(self.backoff_schedule) - 1)]
+                        if cancel.wait(min(delay, max(0.0, deadline - monotonic()))):
+                            err_text = "Run cancelled by the owner during a retry wait."
+                            break
 
                 if step_success:
                     step_outputs[step_def.step_id] = outputs
@@ -346,16 +517,26 @@ class WorkflowService:
                             "status": StepStatus.FAILED,
                             "error_message": err_text,
                             "recovery_metadata": {
-                                "compensation_status": "none",
+                                "compensation_status": "manual_required" if outcome_unknown else "none",
                                 "attempt_count": attempt,
                                 "attempt_timestamps": attempt_timestamps,
                                 "rollback_tier": tier.value,
                                 "failure_reason": err_text,
+                                "outcome_unknown": outcome_unknown,
                                 "compensation_log": [],
                             },
                             "completed_at": datetime.now(timezone.utc),
                         },
                     )
+
+        if cancelled or cancel.is_set():
+            kept = [step.step_id for step in completed_step_defs if not is_read_only_step(step)]
+            outputs = {"steps": step_outputs,
+                       "recovery": {"verdict": "cancelled_not_compensated", "completed_write_steps": kept}}
+            message = "Run cancelled by the owner."
+            if kept:
+                message += f" Completed write steps were kept ({', '.join(kept)}); use compensate to undo them."
+            return outputs, WorkflowStatus.CANCELLED, message
 
         # If failed, execute reverse (LIFO) compensation chain
         compensation_summary: list[dict[str, Any]] = []
@@ -545,7 +726,9 @@ class WorkflowService:
                 )
                 return {"document_id": str(doc.id), "filename": doc.filename}
 
-        # ------------------- TOOLS
+        # ------------------- TOOLS (v4.4: through the read-only ToolRuntime and its policy)
+        if step.step_type == StepType.TOOL and self.tool_runtime is not None:
+            return self._invoke_tool(owner_id, step, merged_params)
         if step.step_type == StepType.TOOL:
             handler = self.tool_handlers.get(step.action)
             if not handler:
@@ -557,6 +740,21 @@ class WorkflowService:
                 raise WorkflowExecutionError(f"Tool '{step.action}' execution error: {exc}") from exc
 
         raise StepUnavailableError(f"Unsupported action '{step.action}' for step type '{step.step_type.value}'; nothing was executed.")
+
+    def _invoke_tool(self, owner_id: UUID, step: WorkflowStepDefinition, params: dict[str, Any]) -> dict[str, Any]:
+        from jarvis.tools.models import ToolStatus
+
+        if self.tool_context_factory is None:
+            raise StepUnavailableError("The tool context is not configured; nothing was executed.")
+        result = self.tool_runtime.invoke(owner_id, step.action, params, self.tool_context_factory(owner_id))
+        if result.status == ToolStatus.SUCCEEDED:
+            output = result.output.model_dump(mode="json") if hasattr(result.output, "model_dump") else result.output
+            return {"result": output, "tool_id": result.tool_id, "evidence_count": len(result.evidence),
+                    "untrusted_content": result.untrusted_content}
+        reason = result.error.message if result.error else result.status.value
+        if result.retryable:
+            raise WorkflowExecutionError(f"Tool '{step.action}' {result.status.value}: {reason}")
+        raise StepUnavailableError(f"Tool '{step.action}' {result.status.value}: {reason}; nothing was executed.")
 
     def _compensate_step(
         self,
@@ -570,13 +768,13 @@ class WorkflowService:
         now = datetime.now(timezone.utc)
         log: list[dict[str, Any]] = []
 
-        # Tier 1: Idempotent - no compensation needed
-        if tier == RollbackTier.TIER_1_IDEMPOTENT:
+        # Tier 1: Idempotent - no compensation needed (v4.4: also every read-only step, such as read-only tools)
+        if tier == RollbackTier.TIER_1_IDEMPOTENT or is_read_only_step(step_def):
             log.append({
                 "action": "skip",
                 "timestamp": now.isoformat(),
                 "status": "success",
-                "details": {"reason": "Idempotent read/query requires no rollback."},
+                "details": {"reason": "Read-only or telemetry step; there is nothing to undo."},
             })
             return "compensated", log
 
@@ -640,14 +838,25 @@ class WorkflowService:
                     })
                     return "compensated", log
 
-            # Fallback for unrecognized Tier 2 actions
+            if act == "research.documents.parse" and "document_id" in step_output:
+                if self.research_service:
+                    removed = self.research_service.delete_document(owner_id, UUID(step_output["document_id"]))
+                    log.append({
+                        "action": "delete_document",
+                        "timestamp": now.isoformat(),
+                        "status": "success",
+                        "details": {"deleted_document_id": step_output["document_id"], "already_removed": not removed},
+                    })
+                    return "compensated", log
+
+            # v4.4: a write with no automatic undo is reported honestly instead of as "compensated".
             log.append({
-                "action": "noop_compensate",
+                "action": "manual_undo_required",
                 "timestamp": now.isoformat(),
-                "status": "success",
-                "details": {"reason": f"No custom compensator required for {act}."},
+                "status": "manual_required",
+                "details": {"reason": f"No automatic undo exists for '{step_def.action}'; check and undo it manually."},
             })
-            return "compensated", log
+            return "manual_required", log
 
         except Exception as exc:
             log.append({
@@ -678,37 +887,42 @@ class WorkflowService:
         return dead_letters
 
     def compensate_run(self, owner_id: UUID, run_id: UUID) -> dict[str, Any]:
-        """Manually triggers compensation for a failed workflow run."""
+        """Undo the completed steps of a failed or cancelled run; a second call changes nothing (v4.4)."""
         detail = self.get_run(owner_id, run_id)
         if not detail:
             raise WorkflowExecutionError(f"Run {run_id} not found.")
-
-        completed_steps = [s for s in detail.steps if s.status == StepStatus.COMPLETED]
+        if detail.run.status not in (WorkflowStatus.FAILED, WorkflowStatus.CANCELLED):
+            raise WorkflowStateError(f"Only failed or cancelled runs can be compensated; this run is "
+                                     f"{detail.run.status.value}.")
+        definition = self.get_definition(owner_id, detail.run.workflow_id)
+        step_defs = {step.step_id: step for step in definition.dag_spec.steps} if definition else {}
         summary: list[dict[str, Any]] = []
         overall = "compensated"
-
-        for s in reversed(completed_steps):
-            step_def = WorkflowStepDefinition(
-                step_id=s.step_id,
-                name=s.step_name,
-                step_type=StepType.TOOL,
-                action=s.inputs.get("action", s.step_name),
-                parameters=s.inputs,
-            )
-            c_status, c_log = self._compensate_step(owner_id, step_def, s.outputs)
-            if c_status != "compensated":
-                overall = c_status
-
-            meta = dict(s.recovery_metadata or {})
-            meta["compensation_status"] = c_status
-            meta["compensation_log"] = c_log
-            self.store.update_step_run(
-                run_id,
-                s.step_id,
-                {"recovery_metadata": meta},
-            )
-            summary.append({"step_id": s.step_id, "status": c_status, "log": c_log})
-
+        with self._compensation_lock:
+            detail = self.get_run(owner_id, run_id)  # re-read under the lock
+            completed_steps = [s for s in detail.steps if s.status == StepStatus.COMPLETED]
+            for s in reversed(completed_steps):
+                meta = dict(s.recovery_metadata or {})
+                if meta.get("compensation_status") == "compensated":
+                    summary.append({"step_id": s.step_id, "status": "compensated", "log": [],
+                                    "note": "already compensated; nothing was done again"})
+                    continue
+                step_def = step_defs.get(s.step_id)
+                if step_def is None:
+                    c_status, c_log = "manual_required", [{
+                        "action": "manual_undo_required", "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "status": "manual_required",
+                        "details": {"reason": "The workflow definition no longer exists, so the step's action is unknown."},
+                    }]
+                else:
+                    c_status, c_log = self._compensate_step(owner_id, step_def, s.outputs)
+                if c_status != "compensated" and overall != "manual_required":
+                    overall = c_status
+                meta["compensation_status"] = c_status
+                meta["compensation_log"] = c_log
+                self.store.update_step_run(run_id, s.step_id, {"recovery_metadata": meta})
+                summary.append({"step_id": s.step_id, "status": c_status, "log": c_log})
+        self._audit(owner_id, "workflow.run.compensate", f"workflow:run:{run_id}", {"status": overall})
         return {"run_id": str(run_id), "status": overall, "summary": summary}
 
     def get_run(self, owner_id: UUID, run_id: UUID) -> WorkflowRunDetail | None:
@@ -742,11 +956,20 @@ class WorkflowService:
             steps = self.store.get_run_steps(run_id)
             return WorkflowRunDetail(run=run, steps=steps)
 
+        active = self._active.get(run_id)
+        if active is not None:
+            # v4.4: a live run stops itself before its next step (or during a retry wait); the runner records it.
+            active.cancel.set()
+            self._audit(owner_id, "workflow.run.cancel", f"workflow:run:{run_id}", {"cancelled": True, "live": True})
+            active.done.wait(timeout=2.0)
+            return self.get_run(owner_id, run_id)
+
+        # No runner owns this run (for example after a restart): record the cancellation directly.
         now = datetime.now(timezone.utc)
         updated_run = self.store.update_run(
             owner_id,
             run_id,
-            {"status": WorkflowStatus.CANCELLED, "completed_at": now},
+            {"status": WorkflowStatus.CANCELLED, "completed_at": now, "error_message": "Run cancelled by the owner."},
         )
         assert updated_run is not None
 
@@ -759,7 +982,7 @@ class WorkflowService:
                     s.step_id,
                     {
                         "status": StepStatus.SKIPPED,
-                        "error_message": "Run cancelled by user.",
+                        "error_message": "Run cancelled by the owner.",
                         "completed_at": now,
                     },
                 )
@@ -768,7 +991,7 @@ class WorkflowService:
             owner_id,
             "workflow.run.cancel",
             f"workflow:run:{run_id}",
-            {"cancelled": True},
+            {"cancelled": True, "live": False},
         )
         final_steps = self.store.get_run_steps(run_id)
         return WorkflowRunDetail(run=updated_run, steps=final_steps)

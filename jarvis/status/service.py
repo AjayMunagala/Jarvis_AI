@@ -133,8 +133,9 @@ class StatusService:
             SubsystemReport(key="approvals", name="Approval gateway", state="operational",
                             storage=_storage(getattr(state, "approval_service", None)),
                             limitations=("Tool and browser approvals record the decision only; nothing is executed.",
-                                         "Autonomous writes, improvement apply/restore and quarantine/restore run "
-                                         "once after approval, when resubmitted with the approval ID (v4.3).")),
+                                         "Autonomous writes, workflow runs with writes, improvement apply/restore and "
+                                         "quarantine/restore run once after approval, when resubmitted with the approval "
+                                         "ID (v4.3/v4.4).")),
             SubsystemReport(key="tools", name="Read-only tool runtime",
                             state="operational" if settings.tools_enabled else "disabled"),
             SubsystemReport(key="chat_tools", name="Chat tool use",
@@ -152,8 +153,9 @@ class StatusService:
                                          "The calendar is local only.")),
             SubsystemReport(key="workflow", name="Workflows (v3.2/v3.8)", state="limited",
                             storage=_storage(getattr(state, "workflow_service", None)),
-                            limitations=("Steps run synchronously without per-step timeouts or working cancel (v4.4).",
-                                         "Tool steps fail as unavailable: no tool handlers are wired (v4.4).")),
+                            limitations=("A timed-out write step cannot be stopped; its outcome is reported as unknown.",
+                                         "Tool steps run only read-only, low-risk tools (the tool runtime's policy).",
+                                         "Runs with write steps wait for an approved request (v4.4).")),
             SubsystemReport(key="knowledge", name="Knowledge store (v3.3)", state="limited",
                             storage=_storage(getattr(state, "knowledge_service", None)),
                             limitations=("Semantic scoring uses process-specific hashing; only lexical search is "
@@ -169,7 +171,7 @@ class StatusService:
             SubsystemReport(key="finance", name="Finance (v3.7)", state="limited",
                             storage=_storage(getattr(state, "finance_service", None)),
                             limitations=("Analytical only; manually entered data; no trading.",
-                                         "Balance updates are not atomic (v4.4).")),
+                                         "Balance updates are atomic with their transaction (v4.4).")),
             SubsystemReport(key="improvement", name="Controlled improvement (v3.9)", state="limited",
                             storage=_storage(getattr(state, "improvement_service", None)),
                             limitations=("Proposals and snapshots are kept in memory and lost on restart (v4.9).",

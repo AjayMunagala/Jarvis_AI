@@ -27,3 +27,13 @@ def approve_in_service(approvals: ApprovalService, owner_id, call):
         raise AssertionError("the action ran without an approval")
     approvals.decide(owner_id, approval_id, approve=True, note=None)
     return call(approval_id)
+
+
+def approve_if_required(approvals: ApprovalService, owner_id, call):
+    """Like ``approve_in_service``, but a call that needs no approval simply returns its result."""
+    try:
+        return call(None)
+    except ApprovalRequired as required:
+        approval_id = required.request.approval_id
+    approvals.decide(owner_id, approval_id, approve=True, note=None)
+    return call(approval_id)

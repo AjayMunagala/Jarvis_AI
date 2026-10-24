@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from database import runner
-from approval_flow import approve_in_service, memory_approvals
+from approval_flow import approve_if_required, approve_in_service, memory_approvals
 from jarvis.core.config import Settings
 from jarvis.health.quarantine import QuarantineManager
 from jarvis.improvement.immutable import ImmutableSecurityFileError, resolve_improvement_target
@@ -223,7 +223,9 @@ def test_knowledge_chunks_are_owner_scoped():
 def run_single_step(service, step):
     definition = service.create_definition(OWNER, WorkflowDefinitionCreateRequest(
         name="v41", dag_spec=DAGSpec(steps=[{"step_id": "s1", "name": "S1", **step}])))
-    return service.trigger_run(OWNER, definition.id, {})
+    service.approval_service = service.approval_service or memory_approvals()  # v4.4: writes need approval
+    return approve_if_required(service.approval_service, OWNER,
+                               lambda approval_id: service.trigger_run(OWNER, definition.id, {}, approval_id))
 
 
 @pytest.mark.parametrize("step, reason", [

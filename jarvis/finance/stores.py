@@ -60,6 +60,16 @@ class FinanceStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def record_transaction(self, tx: FinancialTransaction) -> None:
+        """v4.4: store the transaction and adjust the account balance together, or do neither."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def delete_transaction_reversing(self, owner_id: UUID, tx_id: UUID) -> FinancialTransaction | None:
+        """v4.4: delete the transaction and reverse its balance together; None if it is already gone."""
+        raise NotImplementedError
+
+    @abstractmethod
     def save_snapshot(self, snapshot: FinancialSnapshot) -> None:
         raise NotImplementedError
 
@@ -159,6 +169,29 @@ class MemoryFinanceStore(FinanceStore):
                 del self._transactions[tx_id]
                 return True
             return False
+
+    def record_transaction(self, tx: FinancialTransaction) -> None:
+        """v4.4: store the transaction and adjust the balance together, or do neither."""
+        with self._lock:
+            acc = self._accounts.get(tx.account_id)
+            if acc is None or acc.owner_id != tx.owner_id:
+                raise ValueError(f"Account {tx.account_id} not found.")
+            self._transactions[tx.id] = tx
+            self._accounts[tx.account_id] = acc.model_copy(update={
+                "balance": round(acc.balance + tx.amount, 2), "updated_at": datetime.now(timezone.utc)})
+
+    def delete_transaction_reversing(self, owner_id: UUID, tx_id: UUID) -> FinancialTransaction | None:
+        """v4.4: delete the transaction and reverse its balance change together; None if it is already gone."""
+        with self._lock:
+            tx = self._transactions.get(tx_id)
+            if tx is None or tx.owner_id != owner_id:
+                return None
+            del self._transactions[tx_id]
+            acc = self._accounts.get(tx.account_id)
+            if acc is not None and acc.owner_id == owner_id:
+                self._accounts[tx.account_id] = acc.model_copy(update={
+                    "balance": round(acc.balance - tx.amount, 2), "updated_at": datetime.now(timezone.utc)})
+            return tx
 
     def save_snapshot(self, snapshot: FinancialSnapshot) -> None:
         with self._lock:
@@ -394,6 +427,51 @@ class PostgresFinanceStore(FinanceStore):
                     for r in rows
                 ]
                 return txs, total
+
+    def record_transaction(self, tx: FinancialTransaction) -> None:
+        """v4.4: insert the transaction and adjust the balance in one database transaction."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE jarvis_app.financial_accounts SET balance = balance + %s, updated_at = CURRENT_TIMESTAMP
+                       WHERE id = %s AND owner_id = %s""",
+                    (tx.amount, tx.account_id, tx.owner_id),
+                )
+                if cur.rowcount != 1:
+                    conn.rollback()
+                    raise ValueError(f"Account {tx.account_id} not found.")
+                cur.execute(
+                    """INSERT INTO jarvis_app.financial_transactions (
+                           id, account_id, owner_id, amount, category, description, transaction_date, created_at
+                       ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (tx.id, tx.account_id, tx.owner_id, tx.amount, tx.category, tx.description,
+                     tx.transaction_date, tx.created_at),
+                )
+            conn.commit()
+
+    def delete_transaction_reversing(self, owner_id: UUID, tx_id: UUID) -> FinancialTransaction | None:
+        """v4.4: delete and reverse the balance in one database transaction; None if it is already gone."""
+        tx = self.get_transaction(owner_id, tx_id)
+        if tx is None:
+            return None
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """DELETE FROM jarvis_app.financial_transactions WHERE id = %s AND owner_id = %s
+                       RETURNING amount, account_id""",
+                    (tx_id, owner_id),
+                )
+                row = cur.fetchone()
+                if row is None:  # deleted concurrently: the balance was already reversed by that delete
+                    conn.rollback()
+                    return None
+                cur.execute(
+                    """UPDATE jarvis_app.financial_accounts SET balance = balance - %s, updated_at = CURRENT_TIMESTAMP
+                       WHERE id = %s AND owner_id = %s""",
+                    (row[0], row[1], owner_id),
+                )
+            conn.commit()
+        return tx
 
     def delete_transaction(self, owner_id: UUID, tx_id: UUID) -> bool:
         query = "DELETE FROM jarvis_app.financial_transactions WHERE id = %s AND owner_id = %s;"

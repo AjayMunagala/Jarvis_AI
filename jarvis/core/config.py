@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     chat_tool_max_calls: int = Field(default=4, ge=1, le=8)
     # Approval gateway (v2.9): pending requests expire; approval executes nothing.
     approvals_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
+    # Workflow execution (v4.4): per-step timeout, overall run deadline, and concurrently active runs.
+    workflow_step_timeout_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
+    workflow_run_timeout_seconds: float = Field(default=300.0, ge=5.0, le=3_600.0)
+    workflow_max_active_runs: int = Field(default=4, ge=1, le=16)
     # Voice (v3.0): offer optional browser-native voice controls. The owner must still opt in
     # per page session; the server never receives audio.
     voice_enabled: bool = True

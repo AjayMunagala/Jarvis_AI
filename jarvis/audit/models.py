@@ -22,8 +22,9 @@ AuditCategory = Literal["tool", "browser", "approval", "intelligence", "orchestr
                         "knowledge", "research", "scheduler", "health", "finance", "improvement"]
 ApprovalState = Literal["pending", "approved", "rejected", "expired"]
 # v4.3 (migration 0062): enforced categories, whose approved action runs once.
-ApprovalCategory = Literal["tool", "browser", "autonomous", "improvement", "quarantine"]
-ENFORCED_CATEGORIES = frozenset({"autonomous", "improvement", "quarantine"})
+# v4.4 (migration 0063): workflow runs with write steps.
+ApprovalCategory = Literal["tool", "browser", "autonomous", "improvement", "quarantine", "workflow"]
+ENFORCED_CATEGORIES = frozenset({"autonomous", "improvement", "quarantine", "workflow"})
 ApprovalExecution = Literal["not_available", "single_use"]
 RiskLevel = Literal["low", "medium", "high", "critical", "consequential"]
 DetailValue = StrictStr | int | float | bool | None

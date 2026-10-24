@@ -35,7 +35,7 @@ from jarvis.repo.secret_redactor import redact_secrets
 
 logger = logging.getLogger(__name__)
 EXECUTION_NOTE = ("Approving a tool or browser request records your decision only; nothing is executed. "
-                  "Autonomous, improvement and quarantine actions wait for your approval: once approved, the action "
+                  "Autonomous, improvement, quarantine and workflow actions wait for your approval: once approved, the action "
                   "runs once, when it is submitted again with its approval ID within the approval window.")
 T = TypeVar("T")
 

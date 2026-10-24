@@ -119,9 +119,8 @@ class FinanceService:
             transaction_date=tx_date,
             created_at=now,
         )
-        self.store.save_transaction(tx)
-        # Adjust account balance
-        self.store.update_account_balance(owner_id, req.account_id, tx.amount)
+        # v4.4: the transaction and its balance change are stored together, or not at all.
+        self.store.record_transaction(tx)
 
         self._audit(
             owner_id,
@@ -146,13 +145,9 @@ class FinanceService:
         return FinancialTransactionPage(items=items, total=total)
 
     def delete_transaction(self, owner_id: UUID, tx_id: UUID) -> bool:
-        tx = self.store.get_transaction(owner_id, tx_id)
-        if not tx:
-            return False
-
-        # Reverse balance adjustment
-        self.store.update_account_balance(owner_id, tx.account_id, -tx.amount)
-        deleted = self.store.delete_transaction(owner_id, tx_id)
+        # v4.4: delete and reverse together; a second delete finds nothing and reverses nothing.
+        tx = self.store.delete_transaction_reversing(owner_id, tx_id)
+        deleted = tx is not None
         if deleted:
             self._audit(
                 owner_id,

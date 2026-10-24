@@ -750,7 +750,7 @@ export interface ApprovalRequest {
   approval_id: string
   owner_id: string
   // v4.3: autonomous, improvement and quarantine requests are enforced; their approved action runs once.
-  category: 'tool' | 'browser' | 'autonomous' | 'improvement' | 'quarantine'
+  category: 'tool' | 'browser' | 'autonomous' | 'improvement' | 'quarantine' | 'workflow'
   action: string
   target: string
   reason: string

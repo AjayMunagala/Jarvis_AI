@@ -64,7 +64,7 @@ export default function ActivityPanel({ auth, onUnlock }: { auth: ApiAuth; onUnl
   return <section className="activity-panel" aria-labelledby="activity-heading">
     <p className="activity-kicker">AUDIT TRAIL · APPROVALS</p>
     <h1 id="activity-heading">Activity</h1>
-    <p>Every tool call, browser action and approval decision is recorded here. Approving a tool or browser request records your decision only. Autonomous, improvement and quarantine actions wait for your approval, then run once when the same action is submitted again with the approval ID.</p>
+    <p>Every tool call, browser action and approval decision is recorded here. Approving a tool or browser request records your decision only. Autonomous, workflow, improvement and quarantine actions wait for your approval, then run once when the same action is submitted again with the approval ID.</p>
     {!auth.token && <div role="status"><p>Unlock the workspace to view activity.</p><button type="button" onClick={onUnlock}>Unlock activity</button></div>}
     {error && <p role="alert">{error}</p>}
     {notice && <p role="status" className="activity-notice">{notice}</p>}

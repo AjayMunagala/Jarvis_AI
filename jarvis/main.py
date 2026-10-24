@@ -50,6 +50,7 @@ from jarvis.improvement.service import ImprovementService
 from jarvis.improvement.stores import MemoryImprovementStore
 from jarvis.audit.service import ApprovalError, ApprovalRequired, ApprovalService, AuditService
 from jarvis.audit.models import ApprovalRequiredResponse
+from jarvis.tools.handlers import build_tool_context
 from jarvis.audit.stores import (
     MemoryApprovalStore, MemoryAuditStore, PostgresApprovalStore, PostgresAuditStore,
 )
@@ -108,7 +109,11 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         logger.info("JARVIS starting", extra={"environment": resolved_settings.environment})
+        # v4.4: runs left "running" by a previous process are marked failed, never resumed silently. This runs in
+        # the background so an unreachable database cannot delay startup.
+        app.state.workflow_service.start_recovery(resolved_settings.owner_id)
         yield
+        app.state.workflow_service.close()
         # Browser contexts hold page state; close every session on shutdown.
         app.state.browser_service.close_all()
         app.state.tool_runtime.close()
@@ -211,6 +216,11 @@ def create_app(
         scheduler_service=app.state.scheduler_service,
         health_service=app.state.health_service,
         finance_service=app.state.finance_service,
+        tool_runtime=app.state.tool_runtime,
+        tool_context_factory=lambda owner: build_tool_context(app.state, owner),
+        step_timeout_seconds=resolved_settings.workflow_step_timeout_seconds,
+        run_timeout_seconds=resolved_settings.workflow_run_timeout_seconds,
+        max_active_runs=resolved_settings.workflow_max_active_runs,
     )
     app.state.autonomous_coordinator = AutonomousCoordinator(
         assistant_service=app.state.assistant_service,
@@ -224,7 +234,8 @@ def create_app(
         audit_service=app.state.audit_service,
     )
     # v4.3: autonomous writes, improvement apply/restore and quarantine/restore wait for an approved request.
-    for component in (app.state.autonomous_coordinator, app.state.improvement_service, app.state.health_service):
+    for component in (app.state.autonomous_coordinator, app.state.improvement_service, app.state.health_service,
+                      app.state.workflow_service):
         component.approval_service = app.state.approval_service
     # v4.2: one truthful status source, also used by health snapshots, scheduled health checks and the
     # autonomous overview (each previously reported fixed "operational"/"healthy" values).
