@@ -621,3 +621,17 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - **Removed fakes:** constant CPU and memory values, the fixed "operational" labels, the always-healthy scheduled check, and the overview's marketing claims.
 - **Review fixes before acceptance:** 500 errors keep their correlation ID, the audit write runs off the event loop, the unmeasured-disk crash, the Linux probe errors, and PostgreSQL-backed subsystems shown as unavailable when the database is.
 - **Details:** `docs/V41_V50_PROGRAM.md`.
+
+## v4.3 — Enforced approvals (accepted by the project lead on 2026-10-24)
+
+- **Owner decision:** writes from the autonomous coordinator, controlled improvement and quarantine wait for the owner's approval. This replaces the v2.9 decision that approvals are recorded only, for these actions.
+- **Flow:**
+  - The first call returns HTTP 202 with an approval ID, and nothing runs.
+  - Approve the request at `/approvals/{id}/approve`.
+  - Repeat the call with `approval_id` to run it once.
+  - A changed target, a different action, reuse, or an approval older than 15 minutes is refused with 409.
+- **New code:** `run_approved` and `ApprovalService.consume` in `jarvis/audit/service.py`, and an atomic `consume` in both approval stores.
+- **Migration:** 0062 (enforced categories and `consumed_at`).
+- **Unchanged:** tool and browser approvals stay record-only.
+- **Next:** workflow-step gating moves to v4.4/v4.5.
+- **Details:** `docs/V41_V50_PROGRAM.md`.

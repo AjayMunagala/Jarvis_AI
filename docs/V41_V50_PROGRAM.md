@@ -60,7 +60,8 @@ Results are always labelled as real, mock or unavailable.
 |---|---|---|---|
 | v4.1 | ACCEPTED by the owner on 2026-10-24; pushed | Python 1071 passed; live PostgreSQL 51 passed | `64fb86d` |
 | v4.2 | ACCEPTED by Claude as project lead on 2026-10-24 (acceptance delegated by the owner), after an independent review and fixes | Python 1093 passed; live PostgreSQL 54 passed; Vitest 131; E2E 11 | branch head at push |
-| v4.3–v5.0 | NOT STARTED | — | — |
+| v4.3 | ACCEPTED by Claude as project lead on 2026-10-24 (owner approved the policy change the same day), after an independent review that found one blocking defect, since fixed | Python 1115 passed; live PostgreSQL 57 passed; Vitest 132; E2E 11 | branch head at push |
+| v4.4–v5.0 | NOT STARTED | — | — |
 
 ---
 
@@ -117,8 +118,8 @@ The investigation found that the combined code base could not be installed on Po
 Three existing quarantine tests used to quarantine files from the system temp folder, which is the unsafe behaviour removed here. They now use a temporary repository root, and what they check is unchanged.
 
 ### Known limitations (deferred to later versions)
-- Quarantine and self-improvement approvals are still self-approval by the same owner (v4.3).
-- `/autonomous/execute` still defaults to `dry_run=False` (v4.3).
+- Quarantine and self-improvement approvals are still self-approval by the same owner. Resolved in v4.3.
+- `/autonomous/execute` still defaults to `dry_run=False`. Resolved in v4.3: a command with write steps now waits for approval whatever the default.
 - These defects remain open:
   - finance balance updates are not atomic;
   - `compensate` is not idempotent (v4.4);
@@ -204,3 +205,82 @@ An independent reviewer read the full v4.2 diff and found no blocking issues. It
 **Also noted:** `chat` still reports `operational` without a live probe, and `provider` reports `operational` without contacting the provider (the limitation says so). v4.7 revisits both when chat is connected to the services.
 
 **Tests after the fixes:** 5 new tests (22 in `tests/test_v42_observability.py`). Python: 1093 passed, 0 failed, 17 skipped (symlink privileges). Live PostgreSQL: 54 passed. Live Uvicorn smoke: correlation header echoed, a failed mutation audited with its ID, real telemetry, and the token absent from the log. The frontend was not changed by the fixes (Vitest 131, E2E 11 from the v4.2 run).
+
+## v4.3 — Enforced approvals
+
+### Owner decision
+On 2026-10-24 the owner decided that writes from the autonomous coordinator, controlled improvement and quarantine must wait for the owner's approval before they run. This replaces the v2.9 decision that approvals are recorded only, for these actions. Tool and browser approvals are unchanged: they are still recorded only.
+
+### How it works
+1. **First call.**
+   - You call a gated action as before.
+   - The gateway records a pending approval request whose `scope_sha256` binds the exact action and target.
+   - The response is **HTTP 202** with an `approval_required` body naming the approval ID. Nothing runs.
+   - Asking again for the same action returns the same pending request.
+2. **Approval.** You approve the request with `POST /approvals/{id}/approve`, from the Activity panel or the API. Approving still runs nothing by itself.
+3. **Run once.**
+   - Repeating the original call with `approval_id=<id>` marks the request used and then runs the action.
+   - The request is marked used in one conditional update, so an approval can never run its action twice, even under concurrent calls.
+   - The outcome is audited as `approved_action_succeeded` or `approved_action_failed`.
+4. **Refused with HTTP 409, with nothing run:**
+   - a pending, rejected or expired request;
+   - a request that was already used;
+   - a request approved for a different action;
+   - a target that changed after approval;
+   - a request approved longer ago than the approval window (`approvals_ttl_seconds`, 15 minutes by default).
+5. **Fail closed.** If the gateway is missing, or cannot store the request, the result is HTTP 503 and nothing runs.
+
+### What is gated and what the approval is bound to
+| Action | Endpoint | Bound to |
+|---|---|---|
+| Autonomous command with write steps | `POST /autonomous/execute` (`approval_id` in the body) | prompt, context, `max_steps` and every planned step with its payload |
+| Improvement apply | `POST /improvement/proposals/{id}/decide` with `approved` (`?approval_id=`) | proposal, target, and hashes of the original and proposed content |
+| Improvement restore | `POST /improvement/proposals/{id}/restore` (`?approval_id=`) | proposal, snapshot, and hashes of the current and snapshot content |
+| Quarantine | `POST /health/security/quarantine` (`?approval_id=`) | repository path, file SHA-256 and reason |
+| Quarantine restore | `POST /health/security/quarantined/{id}/restore` (`?approval_id=`) | record, file SHA-256 and path |
+
+### What still runs without approval
+- **Read-only autonomous steps:** `finance.accounts.list`, `knowledge.search` and `improvement.benchmarks.run`. Every other step, including `health.diagnostic.run`, which stores a snapshot, counts as a write.
+- **Dry runs.**
+- **Rejecting an improvement proposal.**
+- **Invalid requests:** a missing file, a path outside the repository, a stale improvement target or an unrestorable record is refused before any approval is requested.
+
+### Database and API changes
+- **Migration 0062:**
+  - adds the categories `autonomous`, `improvement` and `quarantine`;
+  - adds a `consumed_at` column, with a check that it can be set only on an approved request, after its decision;
+  - leaves existing rows unchanged.
+- **API:**
+  - Approval records gain `consumed_at`, and `execution` is now `single_use` for the enforced categories and `not_available` for tool and browser.
+  - Autonomous results gain `approval_id`.
+  - The capabilities flag `approval_execution` stays `false`, because it describes tool and browser approvals.
+- **Activity panel:** enforced requests show "Approve (allows one run)". After approving, it explains how to run the action and shows whether each approval was used.
+
+### Not covered
+- Mutating workflow steps are not gated yet. Workflows run only when the owner starts them, and tool steps fail as unavailable. Gating moves to v4.4, with the reliable step runner, and to v4.5, before the scheduler can start workflows on its own.
+
+### Independent review and acceptance
+An independent reviewer found no way to bypass the gate. It confirmed:
+- every caller of the gated methods;
+- deterministic scope material;
+- the atomic consume in both stores;
+- migration 0062's compatibility with the constraints from 0006;
+- error mapping, owner scoping and audit content.
+
+It also found one blocking defect and four smaller issues, all fixed before acceptance:
+
+1. **Blocking.** Autonomous prompts longer than 480 characters crashed with HTTP 500, because the approval's reason field holds 500 characters. The approval fields are now truncated, and a test uses the longest allowed prompt.
+2. **Misleading audit.** An approved autonomous run whose steps failed was audited as succeeded. The audited outcome now follows the command's real status.
+3. **Approval wasted on restore.** A quarantine restore that could not succeed used up its approval first. A non-mutating precheck now refuses it before any approval is requested.
+4. **Double apply.** Two approvals for the same improvement proposal could both apply it. Apply and restore now re-check the proposal under a lock after the approval is used.
+5. **Test gaps.** New tests cover the store-level approval window and a live PostgreSQL race, in which eight threads try one approval and exactly one succeeds.
+
+**Tests:**
+- `tests/test_v43_approvals.py`: 22 tests.
+- `integration_tests/test_v43_postgres.py`: 3 live tests, covering durability across restart, the database constraints and the race.
+- Seven earlier tests were updated to go through the approval flow.
+- Python: 1115 passed, 0 failed, 17 skipped (symlink privileges).
+- Live PostgreSQL: 57 passed.
+- Vitest: 132. E2E: 11. TypeScript and the build pass.
+- Live Uvicorn smoke: 202 with nothing written, 409 before approval, 200 with exactly one write after approval, 409 on reuse, and the token absent from the log.
+

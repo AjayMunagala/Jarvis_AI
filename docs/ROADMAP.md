@@ -300,3 +300,7 @@ The scope was derived from the repository, because no earlier document defined t
   - Each v3.x subsystem has its own audit category (migration 0060), and failed or denied mutations are audited.
   - `GET /status` reports each subsystem's real state with real checks and limitations.
   - CPU and memory are measured, or reported as null (migration 0061).
+- **v4.3 Enforced approvals: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
+  - Autonomous write commands, improvement apply/restore and quarantine/restore return HTTP 202 and wait for approval, then run once when repeated with the approval ID (migration 0062).
+  - Approvals are bound to the exact action and target, used at most once, and expire 15 minutes after the decision.
+  - Tool and browser approvals stay record-only; workflow-step gating follows in v4.4/v4.5.
