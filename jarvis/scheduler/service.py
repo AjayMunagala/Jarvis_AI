@@ -73,6 +73,9 @@ class SchedulerService:
         self.store = store
         self.audit_service = audit_service
         self.throttler = throttler or AntiFatigueThrottler()
+        # v4.2: set by the application to StatusService.summary_map. Without it a health_check job fails
+        # honestly instead of reporting a fixed "all_healthy: True".
+        self.health_probe = None
         self._running_jobs_lock = threading.Lock()
         self._running_jobs: set[UUID] = set()
 
@@ -81,10 +84,10 @@ class SchedulerService:
             try:
                 self.audit_service.record(
                     owner_id=owner_id,
-                    category="tool",
+                    category="scheduler",
                     event_type=event_type,
-                    decision="allow",
-                    status="success",
+                    decision="allowed",
+                    status="succeeded",
                     subject=subject[:200],
                     details=details,
                 )
@@ -235,9 +238,15 @@ class SchedulerService:
                     ),
                 )
             elif job.action_type == "workflow":
-                output = {"action": "workflow_triggered", "workflow_id": job.payload.get("workflow_id")}
+                # v4.2: nothing ever triggered the workflow; report that instead of "workflow_triggered".
+                raise RuntimeError("Workflow jobs are not connected to the workflow engine yet (planned for v4.5).")
             elif job.action_type == "health_check":
-                output = {"action": "health_check_completed", "all_healthy": True}
+                if self.health_probe is None:
+                    raise RuntimeError("No status source is connected; the health check could not run.")
+                states = dict(self.health_probe())
+                problems = sorted(key for key, state in states.items() if state == "unavailable")
+                output = {"action": "health_check_completed", "all_healthy": not problems,
+                          "unavailable": problems, "checked_subsystems": len(states)}
             else:
                 output = {"action": "custom_job_completed", "payload": job.payload}
 

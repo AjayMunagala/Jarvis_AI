@@ -154,9 +154,9 @@ class PostgresHealthStore(HealthStore):
                 return HealthSnapshot(
                     id=row[0],
                     owner_id=row[1],
-                    cpu_percent=float(row[2]),
-                    memory_percent=float(row[3]),
-                    disk_free_gb=float(row[4]),
+                    cpu_percent=None if row[2] is None else float(row[2]),
+                    memory_percent=None if row[3] is None else float(row[3]),
+                    disk_free_gb=None if row[4] is None else float(row[4]),
                     services_status=row[5] if isinstance(row[5], dict) else json.loads(row[5]),
                     created_at=row[6],
                 )
@@ -182,9 +182,9 @@ class PostgresHealthStore(HealthStore):
                     HealthSnapshot(
                         id=r[0],
                         owner_id=r[1],
-                        cpu_percent=float(r[2]),
-                        memory_percent=float(r[3]),
-                        disk_free_gb=float(r[4]),
+                        cpu_percent=None if r[2] is None else float(r[2]),
+                        memory_percent=None if r[3] is None else float(r[3]),
+                        disk_free_gb=None if r[4] is None else float(r[4]),
                         services_status=r[5] if isinstance(r[5], dict) else json.loads(r[5]),
                         created_at=r[6],
                     )

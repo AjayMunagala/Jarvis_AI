@@ -14,9 +14,10 @@ class StrictSchema(BaseModel):
 class HealthSnapshot(StrictSchema):
     id: UUID
     owner_id: UUID
-    cpu_percent: float = Field(ge=0.0, le=100.0)
-    memory_percent: float = Field(ge=0.0, le=100.0)
-    disk_free_gb: float = Field(ge=0.0)
+    # v4.2: None means "could not be measured", never zero (migration 0061 made the columns nullable).
+    cpu_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+    memory_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+    disk_free_gb: float | None = Field(default=None, ge=0.0)
     services_status: dict[str, str] = Field(default_factory=dict)
     created_at: datetime
 

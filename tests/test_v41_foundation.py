@@ -77,7 +77,9 @@ def test_every_other_migration_is_byte_identical():
     found = {migration_id: checksum for migration_id, _, _, checksum in runner._migration_files(runner.MIGRATIONS_DIR)}
     for migration_id, prefix in UNCHANGED.items():
         assert found[migration_id].startswith(prefix), migration_id
-    assert len(found) == 18
+    # Later versions may only add new migrations numbered 0060 or above.
+    added = sorted(set(found) - set(UNCHANGED) - {path.stem for path in FIXTURES.glob("*.sql")})
+    assert all(migration_id >= "0060" for migration_id in added), added
 
 
 # -------------------------------------------------------------- quarantine

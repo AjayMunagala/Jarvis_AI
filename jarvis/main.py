@@ -18,6 +18,7 @@ from jarvis.api.routes.health import router as health_router
 from jarvis.advanced_intelligence import build_intelligence
 from jarvis.api.routes.intelligence import router as intelligence_router
 from jarvis.api.routes.interface import router as interface_router
+from jarvis.api.routes.status import router as status_router
 from jarvis.api.routes.memories import router as memories_router
 from jarvis.api.routes.repo import router as repo_router
 from jarvis.api.routes.tools import router as tools_router
@@ -54,6 +55,8 @@ from jarvis.audit.stores import (
 from jarvis.browser.service import BrowserService
 from jarvis.core.config import Settings, get_settings
 from jarvis.core.logging_config import configure_logging
+from jarvis.core.correlation import CorrelationIdMiddleware
+from jarvis.core.failure_audit import FailedMutationAuditMiddleware
 from jarvis.core.middleware import RequestBodyLimitMiddleware
 from jarvis.intelligence.base import IntelligenceProvider
 from jarvis.intelligence.router import build_provider
@@ -62,6 +65,7 @@ from jarvis.persistence.postgres import PostgresConversationRepository
 from jarvis.persistence.memory_postgres import PostgresMemoryRepository
 from jarvis.repo.service import RepoIntelligenceService
 from jarvis.security.policy import CapabilityPolicy
+from jarvis.status.service import StatusService
 from jarvis.tools.runtime import ToolRuntime
 from jarvis.verification.service import VerificationService
 
@@ -218,11 +222,21 @@ def create_app(
         improvement_service=app.state.improvement_service,
         audit_service=app.state.audit_service,
     )
+    # v4.2: one truthful status source, also used by health snapshots, scheduled health checks and the
+    # autonomous overview (each previously reported fixed "operational"/"healthy" values).
+    app.state.status_service = StatusService(app.state)
+    app.state.health_service.status_provider = app.state.status_service.summary_map
+    app.state.scheduler_service.health_probe = app.state.status_service.summary_map
+    app.state.autonomous_coordinator.status_service = app.state.status_service
 
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=resolved_settings.max_request_body_bytes,
     )
+    # v4.2: added last so they run first (outermost): every request gets a correlation ID, and failed
+    # v3.x mutations are audited with it.
+    app.add_middleware(FailedMutationAuditMiddleware)
+    app.add_middleware(CorrelationIdMiddleware)
     app.include_router(health_router)
     app.include_router(health_diagnostic_router)
     app.include_router(chat_router)
@@ -244,6 +258,7 @@ def create_app(
     app.include_router(improvement_router)
     app.include_router(autonomous_router)
     app.include_router(intelligence_router)
+    app.include_router(status_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

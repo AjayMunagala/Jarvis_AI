@@ -35,16 +35,18 @@ class HealthService:
         q_dir = quarantine_dir or (self.repo_root / ".quarantine")
         self.quarantine_manager = QuarantineManager(q_dir, allowed_root=self.repo_root)
         self.audit_service = audit_service
+        # v4.2: set by the application to StatusService.summary_map; snapshots used to record fixed values.
+        self.status_provider = None
 
     def _audit(self, owner_id: UUID, event_type: str, subject: str, details: dict[str, Any]) -> None:
         if self.audit_service is not None:
             try:
                 self.audit_service.record(
                     owner_id=owner_id,
-                    category="tool",
+                    category="health",
                     event_type=event_type,
-                    decision="allow",
-                    status="success",
+                    decision="allowed",
+                    status="succeeded",
                     subject=subject[:200],
                     details=details,
                 )
@@ -54,11 +56,12 @@ class HealthService:
     def capture_snapshot(self, owner_id: UUID) -> HealthSnapshot:
         telemetry = get_system_telemetry(self.repo_root)
         now = datetime.now(timezone.utc)
-        services = {
-            "api_server": "healthy",
-            "database": "operational",
-            "orchestrator": "idle",
-        }
+        services = {"status": "not_connected"}
+        if self.status_provider is not None:
+            try:
+                services = dict(self.status_provider())
+            except Exception:  # noqa: BLE001 - a failing status probe must not block the snapshot
+                services = {"status": "unavailable"}
         snapshot = HealthSnapshot(
             id=uuid4(),
             owner_id=owner_id,
@@ -93,7 +96,9 @@ class HealthService:
         findings = scan_directory_for_secrets(target_root, max_findings=50)
 
         recommendations: list[str] = []
-        if telemetry.disk_free_gb < 5.0:
+        if telemetry.disk_free_gb is None:
+            recommendations.append("Disk space could not be measured.")
+        elif telemetry.disk_free_gb < 5.0:
             recommendations.append("Warning: Disk space is critically low (< 5GB free).")
         else:
             recommendations.append("Disk space is adequate.")

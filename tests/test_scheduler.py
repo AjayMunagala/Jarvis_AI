@@ -104,10 +104,14 @@ def test_scheduler_store_and_service_lifecycle():
     assert updated is not None
     assert updated.schedule_expr == "7200"
 
-    # Execute job
+    # Execute job. v4.2: without a connected status source the health check fails honestly
+    # (it used to report a fixed all_healthy=True).
+    unconnected = service.execute_job(TEST_OWNER, job.id)
+    assert unconnected.status == "failure" and "No status source" in unconnected.error
+    service.health_probe = lambda: {"database": "operational", "scheduler": "limited", "provider": "unavailable"}
     result = service.execute_job(TEST_OWNER, job.id)
     assert result.status == "success"
-    assert result.output["all_healthy"] is True
+    assert result.output["all_healthy"] is False and result.output["unavailable"] == ["provider"]
 
     # Due jobs query
     future = datetime.now(timezone.utc) + timedelta(days=1)

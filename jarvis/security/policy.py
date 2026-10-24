@@ -53,6 +53,8 @@ class Capability(StrEnum):
     IMPROVEMENT_APPROVE = "improvement.approve"
     # Autonomous AI Operating System Capstone (v4.0): unified multi-subsystem autonomous coordination.
     AUTONOMOUS_READ = "autonomous.read"
+    # v4.2: read the per-subsystem status report (no side effects).
+    STATUS_READ = "status.read"
     AUTONOMOUS_EXECUTE = "autonomous.execute"
     # Advanced intelligence (v5.1-v5.6). None of these grants tool or action execution.
     INTELLIGENCE_READ = "intelligence.read"
@@ -96,6 +98,7 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.IMPROVEMENT_PROPOSE,
     Capability.IMPROVEMENT_APPROVE,
     Capability.AUTONOMOUS_READ,
+    Capability.STATUS_READ,
     Capability.AUTONOMOUS_EXECUTE,
     Capability.INTELLIGENCE_READ,
     Capability.INTELLIGENCE_EVALUATE,

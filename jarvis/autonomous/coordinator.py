@@ -58,8 +58,8 @@ class AutonomousCoordinator:
                     owner_id=owner_id,
                     category="orchestration",
                     event_type=event_type,
-                    decision="allow",
-                    status="success",
+                    decision="allowed",
+                    status="succeeded",
                     subject=subject[:200],
                     details=details,
                 )
@@ -361,6 +361,7 @@ class AutonomousCoordinator:
             details="Prompt mutation proposals and 1-click restore operational.",
         )
 
+        subsystems = self._truthful(subsystems)
         all_operational = all(s.operational for s in subsystems.values())
 
         return SystemOverview(
@@ -380,6 +381,35 @@ class AutonomousCoordinator:
             version="4.0.0",
             timestamp=datetime.now(timezone.utc),
         )
+
+    def _truthful(self, subsystems: dict[str, SubsystemStatus]) -> dict[str, SubsystemStatus]:
+        """v4.2: keep measured counts; replace fixed claims with the shared status report.
+
+        Text metrics such as "Hybrid BM25 + Vector RRF" and "... operational" details
+        were fixed strings, not observations. Only numeric (counted) metrics are kept,
+        and the state and limitations come from StatusService. Without a status
+        service, nothing beyond "configured" is claimed.
+        """
+        reports = {}
+        status_service = getattr(self, "status_service", None)
+        if status_service is not None:
+            reports = {item.key: item for item in status_service.report().subsystems}
+        result = {}
+        for key, item in subsystems.items():
+            metrics = {name: value for name, value in item.metrics.items()
+                       if isinstance(value, (int, float)) and not isinstance(value, bool)}
+            report = reports.get(key)
+            if report is None:
+                result[key] = item.model_copy(update={"metrics": metrics, "details": (
+                    "Configured; no status check is available." if item.operational else item.details)})
+                continue
+            metrics["state"] = report.state
+            result[key] = item.model_copy(update={
+                "operational": item.operational and report.state not in {"unavailable", "disabled"},
+                "metrics": metrics,
+                "details": "; ".join(report.limitations) or f"State: {report.state}.",
+            })
+        return result
 
     def get_history(self, owner_id: UUID, limit: int = 50) -> list[AutonomousCommandResult]:
         """Returns autonomous execution history for the given owner."""
