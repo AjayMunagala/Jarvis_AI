@@ -25,6 +25,7 @@ class AntiFatigueThrottler:
         category: str,
         priority: str = "normal",
         now: datetime | None = None,
+        last_dispatched: datetime | None = None,
     ) -> tuple[bool, str | None]:
         """Evaluates whether a notification is allowed to fire.
 
@@ -43,6 +44,9 @@ class AntiFatigueThrottler:
 
         with self._lock:
             last_time = self._last_dispatched.get(key)
+            # v4.5: the persisted last delivery (from storage) survives restarts; use the later of the two.
+            if last_dispatched is not None and (last_time is None or last_dispatched > last_time):
+                last_time = last_dispatched
             if last_time is not None:
                 elapsed = (now - last_time).total_seconds()
                 if elapsed < self.throttle_seconds:

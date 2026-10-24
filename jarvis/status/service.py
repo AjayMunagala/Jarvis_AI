@@ -107,6 +107,21 @@ class StatusService:
             + ("Quarantine is a move with a SHA-256 check, not encryption.",
                "Quarantine and restore wait for an approved request (v4.3)."))
 
+    def _scheduler(self) -> SubsystemReport:
+        runner = getattr(self.state, "scheduler_runner", None)
+        running = bool(getattr(runner, "running", False))
+        checks = (f"background runner {'running' if running else 'off'}",)
+        if running:
+            checks += (f"{runner.ticks} tick(s), {runner.failed_ticks} failed",)
+        limitations = ("Notifications appear in JARVIS only; nothing is sent to other devices.",)
+        if not running:
+            limitations = ("The background runner is off (JARVIS_SCHEDULER_RUNNER_ENABLED=false): reminders and jobs "
+                           "run only when triggered manually.",) + limitations
+        return SubsystemReport(key="scheduler", name="Scheduler and notifications (v3.5/v4.5)",
+                               state="operational" if running and not getattr(runner, "failed_ticks", 0) else "limited",
+                               storage=_storage(getattr(self.state, "scheduler_service", None)), checks=checks,
+                               limitations=limitations)
+
     # ------------------------------------------------------------ report
 
     def report(self) -> StatusReport:
@@ -163,10 +178,7 @@ class StatusService:
             SubsystemReport(key="research", name="Research and documents (v3.4)", state="limited",
                             storage=_storage(getattr(state, "research_service", None)),
                             limitations=("Parses text, JSON and CSV only (no PDF/DOCX).", "Web URLs are not fetched.")),
-            SubsystemReport(key="scheduler", name="Scheduler and notifications (v3.5)", state="limited",
-                            storage=_storage(getattr(state, "scheduler_service", None)),
-                            limitations=("No background runner: jobs run only when triggered manually (v4.5).",
-                                         "Notifications are stored, not delivered.")),
+            self._scheduler(),
             self._telemetry(),
             SubsystemReport(key="finance", name="Finance (v3.7)", state="limited",
                             storage=_storage(getattr(state, "finance_service", None)),

@@ -40,7 +40,9 @@ from jarvis.knowledge.service import KnowledgeService
 from jarvis.knowledge.stores import MemoryKnowledgeStore, PostgresKnowledgeStore
 from jarvis.research.service import ResearchService
 from jarvis.research.stores import MemoryResearchStore, PostgresResearchStore
-from jarvis.scheduler.service import SchedulerService
+from jarvis.scheduler.cron import ScheduleError
+from jarvis.scheduler.runner import SchedulerRunner
+from jarvis.scheduler.service import SchedulerService, parse_quiet_hours
 from jarvis.scheduler.stores import MemorySchedulerStore, PostgresSchedulerStore
 from jarvis.health.service import HealthService
 from jarvis.health.stores import MemoryHealthStore, PostgresHealthStore
@@ -112,7 +114,10 @@ def create_app(
         # v4.4: runs left "running" by a previous process are marked failed, never resumed silently. This runs in
         # the background so an unreachable database cannot delay startup.
         app.state.workflow_service.start_recovery(resolved_settings.owner_id)
+        if resolved_settings.scheduler_runner_enabled:
+            app.state.scheduler_runner.start()
         yield
+        app.state.scheduler_runner.stop()
         app.state.workflow_service.close()
         # Browser contexts hold page state; close every session on shutdown.
         app.state.browser_service.close_all()
@@ -242,6 +247,15 @@ def create_app(
     app.state.status_service = StatusService(app.state)
     app.state.health_service.status_provider = app.state.status_service.summary_map
     app.state.scheduler_service.health_probe = app.state.status_service.summary_map
+    # v4.5: the scheduler can deliver reminders and run workflows (writes still need approval); the background
+    # runner only starts when JARVIS_SCHEDULER_RUNNER_ENABLED=true.
+    scheduler = app.state.scheduler_service
+    scheduler.assistant_service = app.state.assistant_service
+    scheduler.workflow_trigger = lambda owner, workflow_id: app.state.workflow_service.trigger_run(owner, workflow_id, {})
+    scheduler.quiet_hours = parse_quiet_hours(resolved_settings.scheduler_quiet_hours)
+    scheduler.utc_offset_minutes = resolved_settings.scheduler_utc_offset_minutes
+    app.state.scheduler_runner = SchedulerRunner(scheduler, resolved_settings.owner_id,
+                                                 interval_seconds=resolved_settings.scheduler_tick_seconds)
     app.state.autonomous_coordinator.status_service = app.state.status_service
 
     app.add_middleware(
@@ -321,6 +335,10 @@ def create_app(
             },
             headers=exc.headers,
         )
+
+    @app.exception_handler(ScheduleError)
+    async def schedule_error_handler(request: Request, exc: ScheduleError) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"error": "invalid_schedule", "detail": str(exc)})
 
     @app.exception_handler(ApprovalRequired)
     async def approval_required_handler(request: Request, exc: ApprovalRequired) -> JSONResponse:

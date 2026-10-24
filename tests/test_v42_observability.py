@@ -315,7 +315,8 @@ def test_scheduled_health_and_workflow_jobs_report_honestly():
         failed = client.post(f"/scheduler/jobs/{workflow['id']}/run").json()
     assert result["status"] == "success" and result["output"]["all_healthy"] is True
     assert result["output"]["checked_subsystems"] > 10
-    assert failed["status"] == "failure" and "not connected" in failed["error"]
+    # v4.5: workflow jobs reach the engine; an invalid workflow_id fails before anything runs.
+    assert failed["status"] == "failure" and "valid workflow_id" in failed["error"]
 
 
 def test_autonomous_overview_has_no_fixed_marketing_claims():

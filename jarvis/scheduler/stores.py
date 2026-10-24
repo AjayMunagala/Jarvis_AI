@@ -55,6 +55,24 @@ class SchedulerStore(ABC):
     def mark_notification_read(self, owner_id: UUID, notif_id: UUID) -> bool:
         raise NotImplementedError
 
+    # v4.5 background runtime ------------------------------------------------
+
+    @abstractmethod
+    def claim_job(self, owner_id: UUID, job_id: UUID, *, expected_next_run: datetime,
+                  next_run: datetime | None, enabled: bool, now: datetime) -> bool:
+        """Atomically move a due job to its next run time; only one caller can claim a given due run."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def latest_delivered_at(self, owner_id: UUID, category: str) -> datetime | None:
+        """When the last notification of this category was delivered (persisted throttle state)."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def release_held_notifications(self, owner_id: UUID, now: datetime) -> int:
+        """Deliver notifications held during quiet hours."""
+        raise NotImplementedError
+
 
 class MemorySchedulerStore(SchedulerStore):
     def __init__(self) -> None:
@@ -101,6 +119,29 @@ class MemorySchedulerStore(SchedulerStore):
             ]
             due.sort(key=lambda j: j.next_run_at or cutoff)
             return due[:limit]
+
+    def claim_job(self, owner_id, job_id, *, expected_next_run, next_run, enabled, now):
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if (job is None or job.owner_id != owner_id or not job.enabled or job.next_run_at != expected_next_run):
+                return False
+            self._jobs[job_id] = job.model_copy(update={
+                "next_run_at": next_run, "enabled": enabled, "last_run_at": now, "last_status": "running",
+                "updated_at": now})
+            return True
+
+    def latest_delivered_at(self, owner_id, category):
+        with self._lock:
+            times = [n.delivered_at for n in self._notifications.values()
+                     if n.owner_id == owner_id and n.category == category and n.delivered_at is not None]
+        return max(times, default=None)
+
+    def release_held_notifications(self, owner_id, now):
+        with self._lock:
+            held = [n for n in self._notifications.values() if n.owner_id == owner_id and n.delivered_at is None]
+            for n in held:
+                self._notifications[n.id] = n.model_copy(update={"delivered_at": now})
+        return len(held)
 
     def save_notification(self, notification: Notification) -> None:
         with self._lock:
@@ -318,6 +359,40 @@ class PostgresSchedulerStore(SchedulerStore):
                     )
                     for r in rows
                 ]
+
+    def claim_job(self, owner_id, job_id, *, expected_next_run, next_run, enabled, now):
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE jarvis_app.scheduled_jobs
+                       SET next_run_at = %s, enabled = %s, last_run_at = %s, last_status = 'running', updated_at = %s
+                       WHERE id = %s AND owner_id = %s AND enabled = true AND next_run_at = %s""",
+                    (next_run, enabled, now, now, job_id, owner_id, expected_next_run),
+                )
+                claimed = cur.rowcount == 1
+            conn.commit()
+            return claimed
+
+    def latest_delivered_at(self, owner_id, category):
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT max(delivered_at) FROM jarvis_app.notifications
+                       WHERE owner_id = %s AND category = %s AND delivered_at IS NOT NULL""",
+                    (owner_id, category),
+                )
+                return cur.fetchone()[0]
+
+    def release_held_notifications(self, owner_id, now):
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE jarvis_app.notifications SET delivered_at = %s WHERE owner_id = %s AND delivered_at IS NULL",
+                    (now, owner_id),
+                )
+                released = cur.rowcount
+            conn.commit()
+            return released
 
     def save_notification(self, notification: Notification) -> None:
         query = """

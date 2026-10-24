@@ -36,9 +36,13 @@ def test_calculate_next_run():
     next_run = calculate_next_run("once", iso_time, base_time=base)
     assert next_run == datetime.fromisoformat(iso_time)
 
-    # cron fallback
+    # cron (v4.5: evaluated for real; previously every expression ran hourly)
     next_run = calculate_next_run("cron", "0 9 * * *", base_time=base)
-    assert next_run == base + timedelta(hours=1)
+    assert next_run == datetime(2026, 10, 18, 9, 0, tzinfo=timezone.utc)
+
+    # invalid expressions have no next run (v4.5: no silent fallback interval)
+    assert calculate_next_run("interval", "soon", base_time=base) is None
+    assert calculate_next_run("cron", "99 * * * *", base_time=base) is None
 
 
 def test_anti_fatigue_throttling():

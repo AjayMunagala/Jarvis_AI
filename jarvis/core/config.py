@@ -5,7 +5,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -79,9 +79,24 @@ class Settings(BaseSettings):
     workflow_step_timeout_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
     workflow_run_timeout_seconds: float = Field(default=300.0, ge=5.0, le=3_600.0)
     workflow_max_active_runs: int = Field(default=4, ge=1, le=16)
+    # Background scheduler runner (v4.5). Off by default (execution-disabled defaults); when on, it delivers due
+    # reminders, runs due jobs once each, and holds non-urgent notifications during quiet hours ("22:00-07:00",
+    # local time = UTC + the offset).
+    scheduler_runner_enabled: bool = False
+    scheduler_tick_seconds: float = Field(default=30.0, ge=5.0, le=3_600.0)
+    scheduler_quiet_hours: str | None = None
+    scheduler_utc_offset_minutes: int = Field(default=0, ge=-720, le=840)
     # Voice (v3.0): offer optional browser-native voice controls. The owner must still opt in
     # per page session; the server never receives audio.
     voice_enabled: bool = True
+
+    @field_validator("scheduler_quiet_hours")
+    @classmethod
+    def validate_quiet_hours(cls, value: str | None) -> str | None:
+        from jarvis.scheduler.service import parse_quiet_hours
+
+        parse_quiet_hours(value)  # raises a clear ValueError for a malformed value
+        return value or None
 
     @model_validator(mode="after")
     def validate_provider_configuration(self) -> "Settings":

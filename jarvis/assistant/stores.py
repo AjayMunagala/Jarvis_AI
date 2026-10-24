@@ -71,6 +71,8 @@ class AssistantStore(Protocol):
     ) -> tuple[list[Reminder], int]: ...
     def update_reminder(self, owner_id: UUID, reminder_id: UUID, updates: dict[str, Any]) -> Reminder | None: ...
     def delete_reminder(self, owner_id: UUID, reminder_id: UUID) -> bool: ...
+    # v4.5: atomically move a pending reminder to "triggered"; None if it was not pending (already delivered).
+    def trigger_reminder(self, owner_id: UUID, reminder_id: UUID, now: datetime) -> Reminder | None: ...
 
     # Calendar Events
     def create_calendar_event(self, event: CalendarEvent) -> None: ...
@@ -257,6 +259,15 @@ class MemoryAssistantStore:
                 return False
             del self._reminders[reminder_id]
             return True
+
+    def trigger_reminder(self, owner_id: UUID, reminder_id: UUID, now: datetime) -> Reminder | None:
+        with self._lock:
+            reminder = self._reminders.get(reminder_id)
+            if not reminder or reminder.owner_id != owner_id or reminder.status != ReminderStatus.PENDING:
+                return None
+            updated = reminder.model_copy(update={"status": ReminderStatus.TRIGGERED, "updated_at": now})
+            self._reminders[reminder_id] = updated
+            return updated
 
     # Calendar Events
     def create_calendar_event(self, event: CalendarEvent) -> None:
@@ -628,6 +639,21 @@ class PostgresAssistantStore:
                 return bool(cur.rowcount and cur.rowcount > 0)
         except Exception as exc:
             raise AssistantStorageError("Failed to delete reminder in PostgreSQL.") from exc
+
+    def trigger_reminder(self, owner_id: UUID, reminder_id: UUID, now: datetime) -> Reminder | None:
+        deadline = operation_deadline(self._operation_timeout, clock=monotonic)
+        sql = ("UPDATE jarvis_app.reminders SET status = 'triggered', updated_at = %s "
+               "WHERE id = %s AND owner_id = %s AND status = 'pending' "
+               "RETURNING id, owner_id, task_id, title, remind_at, status, created_at, updated_at")
+        try:
+            with self._open(deadline) as conn:
+                row = execute_with_deadline(conn, deadline, sql, (now, reminder_id, owner_id), clock=monotonic).fetchone()
+                if not row:
+                    return None
+                return Reminder(id=row[0], owner_id=row[1], task_id=row[2], title=row[3], remind_at=row[4],
+                                status=ReminderStatus(row[5]), created_at=row[6], updated_at=row[7])
+        except Exception as exc:
+            raise AssistantStorageError("Failed to trigger reminder in PostgreSQL.") from exc
 
     # Calendar Events
     def create_calendar_event(self, event: CalendarEvent) -> None:
