@@ -2,20 +2,25 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 import json
 import threading
 from typing import Any
 from uuid import UUID
 
+from jarvis.finance.forecasting import DISCLAIMER
 from jarvis.finance.importing import check_balance
 from jarvis.finance.models import (
     FinancialAccount,
     FinancialImportBatch,
     FinancialSnapshot,
     FinancialTransaction,
+    ForecastSnapshot,
+    ForecastSnapshotSummary,
+    ForecastSnapshotTarget,
 )
+from jarvis.finance.tracking import ForecastTargetRows, month_start, parse_month
 
 
 class FinanceStore(ABC):
@@ -109,6 +114,49 @@ class FinanceStore(ABC):
         """Remove exactly the batch's transactions, reverse their balance effect and drop the batch, together."""
         raise NotImplementedError
 
+    # ---------------------------------------------------------------- v7.2 forecast snapshots
+
+    @abstractmethod
+    def save_forecast_snapshot(
+        self, snapshot: ForecastSnapshot, *, day_start: datetime, day_end: datetime, force: bool, cap: int
+    ) -> "SnapshotSaveOutcome":
+        """Atomically: unless ``force``, refuse when the owner already has a snapshot created in
+        [day_start, day_end); store the snapshot and its targets; then delete the owner's oldest snapshots
+        (by created_at, then id) beyond ``cap``. Snapshots are immutable: there is no update method."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_forecast_snapshots(
+        self, owner_id: UUID, limit: int = 50, offset: int = 0
+    ) -> tuple[list[ForecastSnapshotSummary], int]:
+        """Newest first."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_forecast_snapshot(self, owner_id: UUID, snapshot_id: UUID) -> ForecastSnapshot | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def delete_forecast_snapshot(self, owner_id: UUID, snapshot_id: UUID) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def forecast_targets_for_evaluation(self, owner_id: UUID, before: date) -> ForecastTargetRows:
+        """Targets of 'ok' snapshots whose month starts before ``before`` (with their snapshot), and per snapshot
+        the count of targets not yet complete plus the earliest such month."""
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class SnapshotSaveOutcome:
+    snapshot: ForecastSnapshot | None  # None when refused by the one-per-day guard
+    existing_id: UUID | None
+    evicted: int
+
+
+def _summary(snapshot: ForecastSnapshot) -> ForecastSnapshotSummary:
+    return ForecastSnapshotSummary(**snapshot.model_dump(exclude={"targets", "disclaimer"}))
+
 
 @dataclass(frozen=True)
 class ImportOutcome:
@@ -143,6 +191,8 @@ class MemoryFinanceStore(FinanceStore):
         self._import_batches: dict[UUID, FinancialImportBatch] = {}
         self._fingerprints: dict[tuple[UUID, UUID, str], UUID] = {}
         self._tx_fingerprints: dict[UUID, tuple[UUID, UUID, str]] = {}
+        # v7.2: immutable forecast snapshots (frozen models; there is no update path).
+        self._forecast_snapshots: dict[UUID, ForecastSnapshot] = {}
 
     def _forget_fingerprint(self, tx_id: UUID) -> None:
         key = self._tx_fingerprints.pop(tx_id, None)
@@ -355,6 +405,66 @@ class MemoryFinanceStore(FinanceStore):
                 self._accounts[acc.id] = acc.model_copy(update={
                     "balance": round(acc.balance - float(total), 2), "updated_at": datetime.now(timezone.utc)})
             return UndoOutcome(batch, len(removed), -float(total))
+
+    # ---------------------------------------------------------------- v7.2 forecast snapshots
+
+    def _owned_snapshots(self, owner_id: UUID) -> list[ForecastSnapshot]:
+        return [s for s in self._forecast_snapshots.values() if s.owner_id == owner_id]
+
+    def save_forecast_snapshot(
+        self, snapshot: ForecastSnapshot, *, day_start: datetime, day_end: datetime, force: bool, cap: int
+    ) -> SnapshotSaveOutcome:
+        with self._lock:
+            owned = self._owned_snapshots(snapshot.owner_id)
+            if not force:
+                today = sorted((s for s in owned if day_start <= _aware(s.created_at) < day_end),
+                               key=lambda s: (s.created_at, s.id))
+                if today:
+                    return SnapshotSaveOutcome(None, today[0].id, 0)
+            self._forecast_snapshots[snapshot.id] = snapshot
+            # The new snapshot always stays; the oldest others beyond cap - 1 are deleted.
+            owned.sort(key=lambda s: (_aware(s.created_at), s.id), reverse=True)
+            evicted = owned[max(cap - 1, 0):]
+            for old in evicted:
+                del self._forecast_snapshots[old.id]
+            return SnapshotSaveOutcome(snapshot, None, len(evicted))
+
+    def list_forecast_snapshots(
+        self, owner_id: UUID, limit: int = 50, offset: int = 0
+    ) -> tuple[list[ForecastSnapshotSummary], int]:
+        with self._lock:
+            owned = self._owned_snapshots(owner_id)
+        owned.sort(key=lambda s: (_aware(s.created_at), s.id), reverse=True)
+        return [_summary(s) for s in owned[offset : offset + limit]], len(owned)
+
+    def get_forecast_snapshot(self, owner_id: UUID, snapshot_id: UUID) -> ForecastSnapshot | None:
+        with self._lock:
+            snapshot = self._forecast_snapshots.get(snapshot_id)
+        return snapshot if snapshot is not None and snapshot.owner_id == owner_id else None
+
+    def delete_forecast_snapshot(self, owner_id: UUID, snapshot_id: UUID) -> bool:
+        with self._lock:
+            snapshot = self._forecast_snapshots.get(snapshot_id)
+            if snapshot is None or snapshot.owner_id != owner_id:
+                return False
+            del self._forecast_snapshots[snapshot_id]
+            return True
+
+    def forecast_targets_for_evaluation(self, owner_id: UUID, before: date) -> ForecastTargetRows:
+        with self._lock:
+            owned = [s for s in self._owned_snapshots(owner_id) if s.status == "ok"]
+        rows = ForecastTargetRows()
+        for snapshot in sorted(owned, key=lambda s: (_aware(s.created_at), s.id)):
+            header = _summary(snapshot)
+            for target in snapshot.targets:
+                start = month_start(parse_month(target.target_month))
+                if start < before:
+                    rows.evaluable.append((header, target))
+                else:
+                    rows.pending_by_snapshot[snapshot.id] = rows.pending_by_snapshot.get(snapshot.id, 0) + 1
+                    if rows.earliest_pending is None or start < rows.earliest_pending:
+                        rows.earliest_pending = start
+        return rows
 
 
 class PostgresFinanceStore(FinanceStore):
@@ -838,3 +948,153 @@ class PostgresFinanceStore(FinanceStore):
                             (batch_id, owner_id))
             conn.commit()
         return UndoOutcome(batch, len(amounts), -float(total))
+
+    # ---------------------------------------------------------------- v7.2 forecast snapshots
+
+    _SNAPSHOT_COLUMNS = """id, owner_id, created_at, as_of, horizon, min_train, status, model_version, months_available,
+        transactions_considered, history_transaction_count, history_latest_transaction_date, history_net_total,
+        truncated, accounts_truncated, target_count"""
+
+    @staticmethod
+    def _snapshot_summary(r: Any) -> ForecastSnapshotSummary:
+        return ForecastSnapshotSummary(
+            id=r[0], owner_id=r[1], created_at=r[2], as_of=r[3], horizon=r[4], min_train=r[5], status=r[6],
+            model_version=r[7], months_available=r[8], transactions_considered=r[9], history_transaction_count=r[10],
+            history_latest_transaction_date=r[11], history_net_total=float(r[12]), truncated=r[13],
+            accounts_truncated=r[14], target_count=r[15],
+        )
+
+    @staticmethod
+    def _target(r: Any) -> ForecastSnapshotTarget:
+        return ForecastSnapshotTarget(
+            series=r[0], target_month=f"{r[1].year:04d}-{r[1].month:02d}", horizon=r[2], method=r[3], point=r[4],
+            lower=r[5], upper=r[6], interval_basis=r[7],
+        )
+
+    def save_forecast_snapshot(
+        self, snapshot: ForecastSnapshot, *, day_start: datetime, day_end: datetime, force: bool, cap: int
+    ) -> SnapshotSaveOutcome:
+        """One database transaction under a per-owner advisory lock, so two concurrent requests cannot both pass
+        the one-per-day guard or both miss an eviction."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                            (f"jarvis.forecast_snapshots:{snapshot.owner_id}",))
+                if not force:
+                    cur.execute(
+                        """SELECT id FROM jarvis_app.forecast_snapshots
+                           WHERE owner_id = %s AND created_at >= %s AND created_at < %s
+                           ORDER BY created_at, id LIMIT 1""",
+                        (snapshot.owner_id, day_start, day_end),
+                    )
+                    existing = cur.fetchone()
+                    if existing is not None:
+                        conn.rollback()
+                        return SnapshotSaveOutcome(None, existing[0], 0)
+                cur.execute(
+                    f"""INSERT INTO jarvis_app.forecast_snapshots ({self._SNAPSHOT_COLUMNS})
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (snapshot.id, snapshot.owner_id, snapshot.created_at, snapshot.as_of, snapshot.horizon,
+                     snapshot.min_train, snapshot.status, snapshot.model_version, snapshot.months_available,
+                     snapshot.transactions_considered, snapshot.history_transaction_count,
+                     snapshot.history_latest_transaction_date, Decimal(str(snapshot.history_net_total)),
+                     snapshot.truncated, snapshot.accounts_truncated, snapshot.target_count),
+                )
+                if snapshot.targets:
+                    cur.executemany(
+                        """INSERT INTO jarvis_app.forecast_snapshot_targets (
+                               snapshot_id, owner_id, series, target_month, horizon, method, point, lower_bound,
+                               upper_bound, interval_basis
+                           ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        [(snapshot.id, snapshot.owner_id, t.series, month_start(parse_month(t.target_month)),
+                          t.horizon, t.method, t.point, t.lower, t.upper, t.interval_basis) for t in snapshot.targets],
+                    )
+                # The new snapshot always stays; the oldest others beyond cap - 1 are deleted (targets cascade).
+                cur.execute(
+                    """DELETE FROM jarvis_app.forecast_snapshots WHERE owner_id = %s AND id IN (
+                           SELECT id FROM jarvis_app.forecast_snapshots WHERE owner_id = %s AND id <> %s
+                           ORDER BY created_at DESC, id DESC OFFSET %s)""",
+                    (snapshot.owner_id, snapshot.owner_id, snapshot.id, max(cap - 1, 0)),
+                )
+                evicted = cur.rowcount
+            conn.commit()
+        return SnapshotSaveOutcome(snapshot, None, evicted)
+
+    def list_forecast_snapshots(
+        self, owner_id: UUID, limit: int = 50, offset: int = 0
+    ) -> tuple[list[ForecastSnapshotSummary], int]:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM jarvis_app.forecast_snapshots WHERE owner_id = %s", (owner_id,))
+                total = cur.fetchone()[0]
+                cur.execute(
+                    f"""SELECT {self._SNAPSHOT_COLUMNS} FROM jarvis_app.forecast_snapshots WHERE owner_id = %s
+                        ORDER BY created_at DESC, id DESC LIMIT %s OFFSET %s""",
+                    (owner_id, limit, offset),
+                )
+                return [self._snapshot_summary(r) for r in cur.fetchall()], total
+
+    def get_forecast_snapshot(self, owner_id: UUID, snapshot_id: UUID) -> ForecastSnapshot | None:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""SELECT {self._SNAPSHOT_COLUMNS} FROM jarvis_app.forecast_snapshots
+                        WHERE id = %s AND owner_id = %s""",
+                    (snapshot_id, owner_id),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                cur.execute(
+                    """SELECT series, target_month, horizon, method, point, lower_bound, upper_bound, interval_basis
+                       FROM jarvis_app.forecast_snapshot_targets WHERE snapshot_id = %s AND owner_id = %s
+                       ORDER BY CASE series WHEN 'net' THEN 0 WHEN 'income' THEN 1 ELSE 2 END, horizon""",
+                    (snapshot_id, owner_id),
+                )
+                targets = [self._target(r) for r in cur.fetchall()]
+        summary = self._snapshot_summary(row)
+        return ForecastSnapshot(**summary.model_dump(), targets=targets, disclaimer=DISCLAIMER)
+
+    def delete_forecast_snapshot(self, owner_id: UUID, snapshot_id: UUID) -> bool:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM jarvis_app.forecast_snapshots WHERE id = %s AND owner_id = %s",
+                            (snapshot_id, owner_id))
+                deleted = cur.rowcount > 0
+            conn.commit()
+        return deleted
+
+    def forecast_targets_for_evaluation(self, owner_id: UUID, before: date) -> ForecastTargetRows:
+        """Completed targets are filtered in SQL on (owner_id, target_month); pending ones are only counted."""
+        columns = ", ".join(f"s.{c.strip()}" for c in self._SNAPSHOT_COLUMNS.split(","))
+        rows = ForecastTargetRows()
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""SELECT {columns}, t.series, t.target_month, t.horizon, t.method, t.point, t.lower_bound,
+                               t.upper_bound, t.interval_basis
+                        FROM jarvis_app.forecast_snapshot_targets t
+                        JOIN jarvis_app.forecast_snapshots s ON s.id = t.snapshot_id AND s.owner_id = t.owner_id
+                        WHERE t.owner_id = %s AND t.target_month < %s AND s.status = 'ok'
+                        ORDER BY s.created_at, s.id, t.series, t.horizon""",
+                    (owner_id, before),
+                )
+                headers: dict[UUID, ForecastSnapshotSummary] = {}
+                for r in cur.fetchall():
+                    header = headers.get(r[0])
+                    if header is None:
+                        header = headers[r[0]] = self._snapshot_summary(r[:16])
+                    rows.evaluable.append((header, self._target(r[16:])))
+                cur.execute(
+                    """SELECT t.snapshot_id, COUNT(*), MIN(t.target_month)
+                       FROM jarvis_app.forecast_snapshot_targets t
+                       JOIN jarvis_app.forecast_snapshots s ON s.id = t.snapshot_id AND s.owner_id = t.owner_id
+                       WHERE t.owner_id = %s AND t.target_month >= %s AND s.status = 'ok'
+                       GROUP BY t.snapshot_id""",
+                    (owner_id, before),
+                )
+                for snapshot_id, count, earliest in cur.fetchall():
+                    rows.pending_by_snapshot[snapshot_id] = count
+                    if rows.earliest_pending is None or earliest < rows.earliest_pending:
+                        rows.earliest_pending = earliest
+        return rows

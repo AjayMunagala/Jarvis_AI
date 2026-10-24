@@ -25,6 +25,10 @@ from jarvis.finance.models import (
     ImportPreview,
     ImportPreviewRequest,
     ImportUndoResult,
+    ForecastAccuracyReport,
+    ForecastSnapshot,
+    ForecastSnapshotCreateRequest,
+    ForecastSnapshotPage,
     TransactionCreateRequest,
 )
 from jarvis.finance.importing import (
@@ -34,6 +38,7 @@ from jarvis.finance.importing import (
     ImportRefused,
 )
 from jarvis.finance.service import FinanceService
+from jarvis.finance.tracking import ForecastSnapshotExists
 from jarvis.models.schemas import ErrorResponse
 from jarvis.security.policy import Capability
 
@@ -247,6 +252,86 @@ async def get_forecast(
     return await run_in_threadpool(
         _service(request).get_forecast, owner, horizon=horizon, min_train=min_train
     )
+
+
+
+# ============================================================= Forecast snapshots and accuracy (v7.2)
+# A monthly snapshot is not scheduled automatically in this version: the owner calls POST /forecast/snapshots
+# (at most one per UTC day unless force=true). TODO: a scheduler job type could call it later.
+
+_SNAPSHOT_ERRORS = {code: {"model": ErrorResponse} for code in (401, 403, 404, 409, 422, 503)}
+
+
+@router.post("/forecast/snapshots", response_model=ForecastSnapshot, status_code=status.HTTP_201_CREATED,
+             responses=_SNAPSHOT_ERRORS)
+async def create_forecast_snapshot(
+    request: Request,
+    body: ForecastSnapshotCreateRequest,
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> ForecastSnapshot:
+    """Compute the forecast exactly like GET /forecast and store it, timestamped and immutable. Analysis only."""
+    owner = _owner(owner_id)
+    enforce_capability(request, owner, Capability.FINANCE_WRITE)
+    try:
+        return await run_in_threadpool(_service(request).create_forecast_snapshot, owner, body)
+    except ForecastSnapshotExists as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"A forecast snapshot was already taken today (UTC): {exc.existing_id}. "
+                   "Send force=true to take another.",
+        ) from exc
+
+
+@router.get("/forecast/snapshots", response_model=ForecastSnapshotPage, responses=_ERRORS)
+async def list_forecast_snapshots(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> ForecastSnapshotPage:
+    owner = _owner(owner_id)
+    enforce_capability(request, owner, Capability.FINANCE_READ)
+    return await run_in_threadpool(_service(request).list_forecast_snapshots, owner, limit=limit, offset=offset)
+
+
+@router.get("/forecast/snapshots/{snapshot_id}", response_model=ForecastSnapshot, responses=_ERRORS)
+async def get_forecast_snapshot(
+    request: Request,
+    snapshot_id: UUID,
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> ForecastSnapshot:
+    owner = _owner(owner_id)
+    enforce_capability(request, owner, Capability.FINANCE_READ)
+    snapshot = await run_in_threadpool(_service(request).get_forecast_snapshot, owner, snapshot_id)
+    if snapshot is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="The requested forecast snapshot was not found.")
+    return snapshot
+
+
+@router.delete("/forecast/snapshots/{snapshot_id}", status_code=status.HTTP_204_NO_CONTENT, responses=_ERRORS)
+async def delete_forecast_snapshot(
+    request: Request,
+    snapshot_id: UUID,
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> Response:
+    owner = _owner(owner_id)
+    enforce_capability(request, owner, Capability.FINANCE_WRITE)
+    if not await run_in_threadpool(_service(request).delete_forecast_snapshot, owner, snapshot_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="The requested forecast snapshot was not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/forecast/accuracy", response_model=ForecastAccuracyReport, responses=_ERRORS)
+async def get_forecast_accuracy(
+    request: Request,
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> ForecastAccuracyReport:
+    """Accuracy of stored forecasts for months that are complete, against current data. Analysis only."""
+    owner = _owner(owner_id)
+    enforce_capability(request, owner, Capability.FINANCE_READ)
+    return await run_in_threadpool(_service(request).get_forecast_accuracy, owner)
 
 
 # ============================================================= Bank CSV imports (v7.1)

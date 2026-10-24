@@ -55,6 +55,10 @@ DISCLAIMER = (
     "JARVIS does not execute any transactions or trades."
 )
 
+# v7.2: stored with every forecast snapshot. Bump it whenever the methods, selection, bands or series rules
+# change, so accuracy can be read per model version.
+FORECAST_MODEL_VERSION = "v6.6-1"
+
 INTERVAL_LEVEL = 0.8
 LOWER_Q = 0.1
 UPPER_Q = 0.9

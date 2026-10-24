@@ -309,3 +309,112 @@ class ImportUndoResult(StrictSchema):
     account_id: UUID
     removed: int = Field(ge=0)
     balance_change: float
+
+
+# ============================================================= v7.2 forecast snapshots and accuracy (analysis only)
+
+ForecastSeriesName = Literal["net", "income", "spending"]
+
+
+class ForecastSnapshotCreateRequest(StrictSchema):
+    horizon: int = Field(default=3, ge=1, le=12)
+    min_train: int = Field(default=6, ge=3, le=24)
+    # At most one snapshot per owner per UTC day unless force is true (avoids accidental floods).
+    force: bool = False
+
+
+class ForecastSnapshotTarget(StrictSchema):
+    """One forecast month of one series, exactly as the live forecast reported it."""
+
+    series: ForecastSeriesName
+    target_month: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    horizon: int = Field(ge=1, le=12)  # months ahead of the snapshot's as_of month (1 = the as_of month)
+    method: str = Field(min_length=1, max_length=64)
+    point: float = Field(allow_inf_nan=False)
+    lower: float | None = Field(default=None, allow_inf_nan=False)
+    upper: float | None = Field(default=None, allow_inf_nan=False)
+    interval_basis: str = Field(min_length=1, max_length=64)
+
+
+class ForecastSnapshotSummary(StrictSchema):
+    id: UUID
+    owner_id: UUID
+    created_at: datetime  # when the forecast was made (UTC)
+    as_of: datetime
+    horizon: int = Field(ge=1, le=12)
+    min_train: int = Field(ge=3, le=24)
+    status: Literal["ok", "insufficient_history"]
+    model_version: str = Field(min_length=1, max_length=32)
+    months_available: int = Field(ge=0)
+    transactions_considered: int = Field(ge=0)
+    # Data fingerprint of the history the forecast used (transactions dated before the as_of month).
+    history_transaction_count: int = Field(ge=0)
+    history_latest_transaction_date: datetime | None = None
+    history_net_total: float = Field(allow_inf_nan=False)
+    truncated: bool
+    accounts_truncated: bool
+    target_count: int = Field(ge=0)
+
+
+class ForecastSnapshot(ForecastSnapshotSummary):
+    targets: list[ForecastSnapshotTarget] = Field(default_factory=list)
+    disclaimer: str
+
+
+class ForecastSnapshotPage(StrictSchema):
+    items: list[ForecastSnapshotSummary]
+    total: int = Field(ge=0)
+    disclaimer: str
+
+
+class ForecastAccuracyGroup(StrictSchema):
+    series: ForecastSeriesName
+    horizon: int | None = None  # set in by_horizon
+    method: str | None = None  # set in by_method
+    evaluated: int = Field(ge=0)
+    mae: float
+    mean_error: float  # bias: mean of (actual - forecast)
+    mape: float | None = None
+    mape_note: str | None = None
+    interval_level: float
+    interval_coverage: float | None = None
+    coverage_targets: int = Field(ge=0)
+    naive_mae: float
+    naive_mean_error: float
+    beats_naive: bool
+    comparison: str
+
+
+class ForecastSnapshotEvaluation(StrictSchema):
+    snapshot_id: UUID
+    created_at: datetime
+    as_of: datetime
+    model_version: str
+    targets_evaluated: int = Field(ge=0)
+    targets_pending: int = Field(ge=0)
+    targets_without_actuals: int = Field(ge=0)
+    # True when transactions in the months before as_of were added, removed or imported after the snapshot;
+    # None when it cannot be told because a transaction read was truncated.
+    data_changed_since_snapshot: bool | None = None
+
+
+class ForecastAccuracyReport(StrictSchema):
+    status: Literal["ok", "nothing_to_evaluate_yet", "no_actuals_available"]
+    generated_at: datetime
+    current_month: str
+    disclaimer: str
+    model_version: str
+    interval_level: float
+    snapshots_considered: int = Field(ge=0)
+    targets_evaluated: int = Field(ge=0)
+    targets_pending: int = Field(ge=0)
+    targets_without_actuals: int = Field(ge=0)
+    first_pending_month: str | None = None
+    first_target_completes_at: datetime | None = None
+    data_truncated: bool = False
+    overall: list[ForecastAccuracyGroup] = Field(default_factory=list)
+    by_horizon: list[ForecastAccuracyGroup] = Field(default_factory=list)
+    by_method: list[ForecastAccuracyGroup] = Field(default_factory=list)
+    snapshots: list[ForecastSnapshotEvaluation] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)

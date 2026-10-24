@@ -24,6 +24,7 @@ Each version passes the same gate as v6: tests, the full Python and live Postgre
 | Version | Status | Evidence |
 |---|---|---|
 | v7.1 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found no blocking issues; four medium and six low findings fixed | Commit 1e8eaa2 tested alone from a clean copy: Python 1544 passed (the git-only repo test fails outside a checkout, as expected); live PostgreSQL 82 passed |
+| v7.2 | IMPLEMENTED, TESTED; in review | 32 new tests pass; live PostgreSQL 88 passed; one v7.3 test assumes 0070 is the newest migration and is being updated with the v7.3 fixes |
 | v7.3 | IMPLEMENTED, TESTED; in review | Python 1639 passed (with v7.1); live PostgreSQL 86 passed |
 
 ## v7.1 — Bank CSV import

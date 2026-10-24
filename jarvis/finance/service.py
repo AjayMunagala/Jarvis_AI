@@ -15,7 +15,7 @@ from jarvis.finance.analytics import (
     compute_cash_flow_and_runway,
     compute_net_worth,
 )
-from jarvis.finance.forecasting import build_forecast
+from jarvis.finance.forecasting import DISCLAIMER, _utc, build_forecast
 from jarvis.finance.importing import (
     DELIMITERS,
     MAX_EXISTING_SCAN,
@@ -56,9 +56,21 @@ from jarvis.finance.models import (
     ImportPreviewRequest,
     ImportRowResult,
     ImportUndoResult,
+    ForecastAccuracyReport,
+    ForecastSnapshot,
+    ForecastSnapshotCreateRequest,
+    ForecastSnapshotPage,
     TransactionCreateRequest,
 )
 from jarvis.finance.stores import FinanceStore, ImportOutcome
+from jarvis.finance.tracking import (
+    ForecastSnapshotExists,
+    HistoryIndex,
+    evaluate_accuracy,
+    history_cutoff,
+    month_start,
+    snapshot_from_forecast,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +78,8 @@ logger = logging.getLogger(__name__)
 # v6.6: bounded single reads for on-demand forecasts (newest first; the rest is reported as truncated).
 FORECAST_MAX_TRANSACTIONS = 5000
 FORECAST_MAX_ACCOUNTS = 1000
+# v7.2: stored forecast snapshots per owner; the oldest are deleted first beyond this.
+FORECAST_SNAPSHOT_CAP = 500
 
 
 class FinanceService:
@@ -288,13 +302,18 @@ class FinanceService:
         as_of: datetime | None = None,
     ) -> FinanceForecast:
         """Computed on demand from the owner's stored data; nothing is written or audited (a read)."""
+        return self._forecast_with_inputs(owner_id, horizon, min_train, as_of)[0]
+
+    def _forecast_with_inputs(
+        self, owner_id: UUID, horizon: int, min_train: int, as_of: datetime | None
+    ) -> tuple[FinanceForecast, list[FinancialTransaction]]:
         transactions, truncated = self._read_bounded(
             self.store.list_transactions, owner_id, FORECAST_MAX_TRANSACTIONS
         )
         accounts, accounts_truncated = self._read_bounded(
             self.store.list_accounts, owner_id, FORECAST_MAX_ACCOUNTS
         )
-        return build_forecast(
+        forecast = build_forecast(
             accounts,
             transactions,
             horizon=horizon,
@@ -303,6 +322,65 @@ class FinanceService:
             accounts_truncated=accounts_truncated,
             as_of=as_of,
         )
+        return forecast, transactions
+
+    # ========================================================= Forecast snapshots and accuracy (v7.2)
+    # TODO(v7.x): a scheduler job type could call create_forecast_snapshot monthly; until then the owner calls
+    # POST /finance/forecast/snapshots (the one-per-UTC-day guard keeps repeated calls harmless).
+
+    def create_forecast_snapshot(
+        self,
+        owner_id: UUID,
+        req: ForecastSnapshotCreateRequest,
+        now: datetime | None = None,
+        as_of: datetime | None = None,
+    ) -> ForecastSnapshot:
+        """Compute the forecast exactly like GET /finance/forecast and store it immutably with its timestamp.
+
+        Raises ForecastSnapshotExists when one was already taken this UTC day and ``req.force`` is false.
+        """
+        now = _utc(now or datetime.now(timezone.utc))
+        as_of = _utc(as_of or now)
+        if as_of > now:
+            raise ValueError("as_of cannot be in the future")
+        forecast, transactions = self._forecast_with_inputs(owner_id, req.horizon, req.min_train, as_of)
+        fingerprint = HistoryIndex(transactions).before(history_cutoff(as_of))
+        snapshot = snapshot_from_forecast(forecast, snapshot_id=uuid4(), owner_id=owner_id, created_at=now,
+                                          fingerprint=fingerprint)
+        day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+        outcome = self.store.save_forecast_snapshot(snapshot, day_start=day_start,
+                                                    day_end=day_start + timedelta(days=1), force=req.force,
+                                                    cap=FORECAST_SNAPSHOT_CAP)
+        if outcome.snapshot is None:
+            raise ForecastSnapshotExists(outcome.existing_id)
+        self._audit(owner_id, "finance.forecast_snapshot.create", f"finance:forecast_snapshot:{snapshot.id}",
+                    {"status": snapshot.status, "horizon": snapshot.horizon, "targets": snapshot.target_count,
+                     "forced": req.force, "evicted": outcome.evicted})
+        return outcome.snapshot
+
+    def list_forecast_snapshots(self, owner_id: UUID, limit: int = 50, offset: int = 0) -> ForecastSnapshotPage:
+        items, total = self.store.list_forecast_snapshots(owner_id, limit=max(1, min(limit, 200)),
+                                                          offset=max(0, offset))
+        return ForecastSnapshotPage(items=items, total=total, disclaimer=DISCLAIMER)
+
+    def get_forecast_snapshot(self, owner_id: UUID, snapshot_id: UUID) -> ForecastSnapshot | None:
+        return self.store.get_forecast_snapshot(owner_id, snapshot_id)
+
+    def delete_forecast_snapshot(self, owner_id: UUID, snapshot_id: UUID) -> bool:
+        deleted = self.store.delete_forecast_snapshot(owner_id, snapshot_id)
+        if deleted:
+            self._audit(owner_id, "finance.forecast_snapshot.delete", f"finance:forecast_snapshot:{snapshot_id}",
+                        {"deleted": True})
+        return deleted
+
+    def get_forecast_accuracy(self, owner_id: UUID, now: datetime | None = None) -> ForecastAccuracyReport:
+        """Score stored targets whose month is complete against actuals from current data (a read)."""
+        now = _utc(now or datetime.now(timezone.utc))
+        rows = self.store.forecast_targets_for_evaluation(owner_id, month_start((now.year, now.month)))
+        transactions, truncated = self._read_bounded(
+            self.store.list_transactions, owner_id, FORECAST_MAX_TRANSACTIONS
+        )
+        return evaluate_accuracy(rows, transactions, truncated=truncated, now=now)
 
     # ========================================================= Bank CSV imports (v7.1)
 
