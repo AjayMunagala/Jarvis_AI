@@ -39,6 +39,7 @@ The v5.1 router stays available for evaluations. Routing chat across several mod
 | v6.1 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (recording blocked the request), since fixed with six other findings | Python 1247 passed; live PostgreSQL 68 passed (clean e371e13); real NVIDIA call recorded 48/383 tokens |
 | v6.2 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (pypdf limit errors reached the API as HTTP 500), since fixed with five other findings | Python 1261 passed (with v6.1 and v6.3); hostile PDFs refused with 422 in under 1 s |
 | v6.3 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found no blocking issues; two medium and five low findings fixed | Python 1266 passed; live PostgreSQL 69 passed |
+| v6.4 | IMPLEMENTED, TESTED; in review | Vitest 138 passed; Playwright E2E 11 passed; TypeScript clean |
 
 ## v6.1 — Usage and cost tracking, fallback model
 
@@ -144,4 +145,16 @@ No blocking issues. Findings, all fixed with tests:
 5. **Low (docs):** cron runs in UTC; documented with an example.
 6. **Low (design):** the overdue and date-only rules are documented.
 7. **Low:** tests added for a negative offset, day boundaries, out-of-range offsets, stale reminders, conflict truncation, the throttle, and a live PostgreSQL run.
+
+## v6.4 — Notifications view and desktop delivery
+
+### What it does
+- **Notifications view** (new nav item with an unread badge): lists reminders, briefings and alerts from `GET /scheduler/notifications`, and marks them read.
+- **Desktop delivery:** while JARVIS is open and unlocked, it checks for unread notifications every 30 seconds. Each new one is shown once as a browser desktop notification, only after the owner clicks "Enable desktop notifications" and the browser grants permission. Notifications already unread at unlock are not re-announced.
+- **Nothing leaves the device:** no push service, no email, no phone. Delivery to other devices needs the owner's accounts and stays deferred.
+- **Assistant view:** it was built in v3.1 but its nav item was marked "SOON" and could not be opened. v6.4 makes it reachable, and corrects the v4.7 record that said otherwise.
+
+### Tests
+- `NotificationsPanel.test.tsx`: locked state, listing and mark-as-read, permission asked only on click, blocked/unsupported/error states.
+- `App.test.tsx`: both views open; polling after unlock, the unread badge, and desktop notifications only for new items.
 

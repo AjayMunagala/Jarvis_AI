@@ -3,11 +3,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import userEvent from '@testing-library/user-event'
 import App from './App'
 import './styles.css'
-import { getConversationMessages, getInterfaceConfig, getMemory, getReadiness, listConversations, listMemories, sendChatMessage, type ConversationPage, type ReadinessResponse } from './services/api'
+import { getConversationMessages, getInterfaceConfig, getMemory, getNotifications, getReadiness, listConversations, listMemories, sendChatMessage, type ConversationPage, type ReadinessResponse } from './services/api'
 
 vi.mock('./services/api', () => ({
   sendChatMessage: vi.fn(), listConversations: vi.fn(), getConversationMessages: vi.fn(), listMemories: vi.fn(), searchMemories: vi.fn(),
   createMemory: vi.fn(), updateMemory: vi.fn(), deleteMemory: vi.fn(), getMemory: vi.fn(), getReadiness: vi.fn(), analyzeCoding: vi.fn(), getInterfaceConfig: vi.fn(),
+  getNotifications: vi.fn(), markNotificationRead: vi.fn(),
 }))
 const sendMock = vi.mocked(sendChatMessage)
 const listConversationsMock = vi.mocked(listConversations)
@@ -580,5 +581,41 @@ describe('JARVIS unified interface and voice (v3.0)', () => {
     await waitFor(() => expect(document.querySelectorAll('.nav-off')).toHaveLength(2))
     expect(screen.queryByRole('button', { name: /voice input/i })).toBeNull()
     expect(screen.getByRole('button', { name: 'Browser' })).toBeInTheDocument()
+  })
+
+  it('opens the Assistant and Notifications views, which are no longer marked as coming soon', async () => {
+    render(<App />)
+    expect(screen.getByRole('button', { name: 'Assistant' })).not.toHaveTextContent('SOON')
+    expect(screen.getByRole('button', { name: 'Notifications' })).not.toHaveTextContent('SOON')
+    await userEvent.click(screen.getByRole('button', { name: 'Assistant' }))
+    expect(await screen.findByText('Unlock the workspace to view and manage personal assistant items.')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Notifications' }))
+    expect(await screen.findByText('Unlock the workspace to view notifications.')).toBeInTheDocument()
+    expect(getNotifications).not.toHaveBeenCalled()
+  })
+
+  it('polls unread notifications after unlock and shows only new ones on the desktop', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const shown = vi.fn()
+    vi.stubGlobal('Notification', Object.assign(function (this: unknown, title: string) { shown(title) }, { permission: 'granted', requestPermission: vi.fn() }))
+    const item = (id: string, title: string) => ({ id, owner_id: 'o', category: 'reminder', title, message: 'm', priority: 'normal' as const,
+      read: false, delivered_at: null, created_at: '2026-10-24T07:00:00Z' })
+    vi.mocked(getNotifications)
+      .mockResolvedValueOnce({ items: [item('a', 'Already there')], total: 1 })
+      .mockResolvedValue({ items: [item('b', 'Call mom'), item('a', 'Already there')], total: 2 })
+    try {
+      render(<App />)
+      await unlockWithToken()
+      await waitFor(() => expect(screen.getByLabelText('1 unread notifications')).toBeInTheDocument())
+      expect(getNotifications).toHaveBeenCalledWith(true, 50, expect.objectContaining({ token: 'a'.repeat(32) }))
+      expect(shown).not.toHaveBeenCalled()  // what was already unread at unlock is not re-announced
+      await act(async () => { vi.advanceTimersByTime(30_000) })
+      await waitFor(() => expect(screen.getByLabelText('2 unread notifications')).toBeInTheDocument())
+      expect(shown).toHaveBeenCalledTimes(1)
+      expect(shown).toHaveBeenCalledWith('Call mom')
+    } finally {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
   })
 })

@@ -182,7 +182,8 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
   }
   if (response.status === 204) return undefined as T
   if (!response.ok && (path.startsWith('/browser') || path.startsWith('/tools') || path === '/capabilities'
-    || path.startsWith('/approvals') || path.startsWith('/activity') || path.startsWith('/assistant'))) {
+    || path.startsWith('/approvals') || path.startsWith('/activity') || path.startsWith('/assistant')
+    || path.startsWith('/scheduler'))) {
     // Browser and tool routes return short, sanitized policy messages that explain blocks.
     let detail = ''
     try {
@@ -258,6 +259,30 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
 const json = (body: unknown): RequestInit => ({
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 })
+
+// ----------------------------------------------- notifications (v6.4)
+
+export interface JarvisNotification {
+  id: string
+  owner_id: string
+  category: string
+  title: string
+  message: string
+  priority: 'low' | 'normal' | 'high' | 'urgent'
+  read: boolean
+  delivered_at: string | null
+  created_at: string
+}
+export interface NotificationPage { items: JarvisNotification[]; total: number }
+
+export function getNotifications(unreadOnly: boolean, limit: number, auth?: ApiAuth): Promise<NotificationPage> {
+  const query = new URLSearchParams({ unread_only: String(unreadOnly), limit: String(limit) })
+  return request<NotificationPage>(`/scheduler/notifications?${query.toString()}`, undefined, false, auth)
+}
+
+export function markNotificationRead(notificationId: string, auth?: ApiAuth): Promise<{ marked: boolean }> {
+  return request<{ marked: boolean }>(`/scheduler/notifications/${encodeURIComponent(notificationId)}/read`, json({}), false, auth)
+}
 
 export type CodingWorkflow = 'auto' | 'explain' | 'locate' | 'trace' | 'diagnose' | 'recommend' | 'patch' | 'review_patch' | 'tests'
 export interface CodingChange {
