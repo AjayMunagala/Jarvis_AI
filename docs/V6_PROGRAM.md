@@ -41,7 +41,7 @@ The v5.1 router stays available for evaluations. Routing chat across several mod
 | v6.3 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found no blocking issues; two medium and five low findings fixed | Python 1266 passed; live PostgreSQL 69 passed |
 | v6.4 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (mark-as-read used POST; the API only accepts PATCH), since fixed with six other findings | Vitest 141 passed (twice); Playwright E2E 11 passed; TypeScript clean |
 | v6.5 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found no blocking issues; one medium and seven low findings fixed | Python 1324 passed; live PostgreSQL 73 passed (tutor live tests rerun after the fixes) |
-| v6.6 | IMPLEMENTED, TESTED; in review | Python 1356 passed; live PostgreSQL 74 passed |
+| v6.6 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (an "ok" forecast could rest on one fold with no uncertainty band), since fixed with eight other findings | Python 1371 passed; live PostgreSQL 75 passed; short-history probe: 7–9 months give insufficient_history, 10+ give bands on every point |
 
 ## v6.1 — Usage and cost tracking, fallback model
 
@@ -198,4 +198,35 @@ No blocking issues. Findings, all fixed with tests unless noted:
 7. **Low:** generation called the model before checking the exercise cap; it now checks first.
 8. **Low:** tests added for the caps, short-span plans, the date limit, timeouts and cross-owner updates.
 9. **Design note (not changed):** `explain` is a model call gated by `tutor.read`. JARVIS has a single owner today; revisit if read-only tokens are ever issued.
+
+## v6.6 — Finance forecasts (analysis only)
+
+### What it does
+`GET /finance/forecast?horizon=1..12&min_train=3..24` (authenticated, `finance.read`) forecasts monthly net cash flow, income and spending from stored transactions.
+- **History:** complete UTC months before today; the current month is horizon 1. Future-dated transactions are excluded from history and added back to the starting balance so they are not counted twice.
+- **Methods:** naive (last month), trailing mean of 3 and 6 months, seasonal naive (same month last year), and simple exponential smoothing whose smoothing factor is chosen only on each training window.
+- **Evaluation:** rolling-origin backtest on months each method did not see; all methods are scored on the same origins. The lowest out-of-sample MAE wins, ties go to the simpler method, and the response says plainly whether it beats the naive baseline.
+- **Uncertainty:** 80% intervals from out-of-sample errors, with the measured coverage. A minimum band width (5% of the typical monthly level, at least 1.00) stops a steady series from looking certain; coverage is not reported where it would not mean anything.
+- **Balance scenario:** checking and savings plus the cumulative forecast flow, with a band and the first month its lower bound goes below zero. It is labelled a scenario, not a prediction.
+- **Not enough data:** "ok" requires at least 3 backtest origins and 8 out-of-sample errors; otherwise the status is `insufficient_history` with the months needed (10 with the defaults). Seasonal naive needs 16 months for horizon 3 or more.
+- **Every response** says it is analysis only, not financial advice, that past patterns may not continue, and that nothing is executed. There is no trading or broker code.
+- **Data quality:** non-finite amounts are refused on write (422), and any stored ones are skipped and counted. Reads are bounded (5000 transactions, 1000 accounts) and flagged when cut off.
+
+### Known limits
+- Transfers between your own accounts, refunds (counted as income), and credit-card purchases plus their payments can inflate income and spending.
+- The chosen method's error, coverage and intervals come from the same folds used to choose it, so they may be slightly optimistic; on noisy data the measured coverage is often below 80%.
+- Forecasts are computed on demand and not stored, so their accuracy is not tracked over time yet.
+
+### v6.6 independent review and acceptance
+The reviewer found one blocking defect, fixed before acceptance: with 7 months of history the forecast returned "ok", claimed to beat the naive baseline from a single test month, and had no uncertainty band. "ok" now needs at least 3 origins and 8 errors, and an "ok" result can never lack a band.
+
+Eight more findings, all fixed with tests:
+1. **Medium:** a constant series (a fixed salary) had a zero-width "80%" band with 100% coverage; a minimum width now applies and coverage is marked not meaningful.
+2. **Medium:** future-dated transactions were counted twice in the balance scenario.
+3. **Medium:** paged reads without a unique sort order could skip or repeat transactions; reads are now ordered by date and id, in one bounded query.
+4. **Low/medium:** NaN and infinite amounts were accepted and corrupted the forecast.
+5. **Low:** notes added on selection optimism and the unmeasured balance band.
+6. **Low:** the seasonal method's real history requirement is now computed and stated.
+7. **Low:** the error minimum rose to 8, and the cumulative balance band widens with the horizon, not its square root.
+8. **Low:** account-read truncation is flagged; refunds and credit-card double counting are noted.
 

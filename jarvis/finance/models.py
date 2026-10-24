@@ -28,7 +28,7 @@ class AccountCreateRequest(StrictSchema):
     name: str = Field(min_length=1, max_length=200)
     account_type: str = Field(pattern=r"^(checking|savings|credit|investment|loan)$")
     institution: str = Field(min_length=1, max_length=200)
-    balance: float = 0.0
+    balance: float = Field(default=0.0, allow_inf_nan=False)
     currency: str = Field(default="USD", min_length=1, max_length=10)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -46,7 +46,7 @@ class FinancialTransaction(StrictSchema):
 
 class TransactionCreateRequest(StrictSchema):
     account_id: UUID
-    amount: float
+    amount: float = Field(allow_inf_nan=False)  # v6.6: NaN/inf would corrupt balances and forecasts
     category: str | None = Field(default=None, max_length=100)
     description: str = Field(min_length=1, max_length=500)
     transaction_date: datetime | None = None
@@ -99,6 +99,8 @@ class ForecastDataSummary(StrictSchema):
     last_month: str | None = None
     transactions_considered: int = Field(ge=0)
     truncated: bool
+    accounts_truncated: bool = False
+    excluded_invalid: int = Field(default=0, ge=0)
     excluded_current_month: int = Field(ge=0)
     excluded_future_dated: int = Field(ge=0)
     excluded_older_than_window: int = Field(ge=0)
@@ -114,6 +116,7 @@ class MethodBacktest(StrictSchema):
     mape_note: str | None = None
     interval_coverage: float | None = None
     coverage_folds: int = Field(ge=0)
+    coverage_note: str | None = None
 
 
 class ForecastPoint(StrictSchema):
@@ -139,6 +142,8 @@ class SeriesForecast(StrictSchema):
     interval_level: float
     empirical_coverage: float | None = None
     coverage_folds: int = Field(ge=0)
+    coverage_note: str | None = None
+    interval_note: str | None = None
     points: list[ForecastPoint]
 
 
@@ -155,6 +160,7 @@ class BalanceScenario(StrictSchema):
     starting_liquid_balance: float
     liquid_accounts: int = Field(ge=0)
     current_month_net_to_date: float
+    future_dated_net: float = 0.0
     points: list[BalancePoint]
     first_month_lower_bound_below_zero: str | None = None
     note: str

@@ -109,16 +109,30 @@ def test_methods_on_hand_computed_series():
     assert params == {"alpha": 0.2} and values == pytest.approx([12.0])
 
 
-def test_candidates_share_origins_and_seasonal_needs_13_months():
+def test_candidates_share_origins_and_seasonal_needs_its_real_history():
     names = lambda ms: [m.name for m in ms]  # noqa: E731
-    methods, start = fc.select_candidates(7, 6)
+    methods, start = fc.select_candidates(10, 6, 3)
     assert start == 6 and "seasonal_naive" not in names(methods) and "trailing_mean_6" in names(methods)
-    methods, start = fc.select_candidates(8, 3)
-    assert start == 3 and "trailing_mean_6" not in names(methods)  # would leave only 2 origins
-    methods, start = fc.select_candidates(18, 6)
+    # trailing_mean_6 would leave 6 one-step errors (< MIN_POOLED_ERRORS) at 12 months; it joins at 14.
+    assert "trailing_mean_6" not in names(fc.select_candidates(12, 3, 1)[0])
+    assert "trailing_mean_6" in names(fc.select_candidates(14, 3, 1)[0])
+    # Seasonal naive trains on 12 months, so it needs more than 13 months to be evaluated honestly.
+    assert fc.months_needed_for("seasonal_naive", 6, 3) == 16
+    assert fc.months_needed_for("seasonal_naive", 3, 3) == 16
+    assert fc.months_needed_for("seasonal_naive", 6, 1) == 20
+    assert "seasonal_naive" not in names(fc.select_candidates(15, 6, 3)[0])
+    methods, start = fc.select_candidates(16, 6, 3)
     assert start == 12 and "seasonal_naive" in names(methods)
-    methods, _ = fc.select_candidates(12, 6)
-    assert "seasonal_naive" not in names(methods)
+
+
+def test_seasonal_requirement_is_reported_in_notes():
+    short = fc.build_forecast([], net_transactions([100.0 + i % 3 for i in range(14)]), as_of=AS_OF)
+    assert short.status == "ok"
+    assert any("Seasonal naive" in note and "16" in note for note in short.notes)
+    assert "seasonal_naive" not in {m.method for m in short.net.methods}
+    full = fc.build_forecast([], net_transactions([100.0 + i % 3 for i in range(16)]), as_of=AS_OF)
+    assert "seasonal_naive" in {m.method for m in full.net.methods}
+    assert not any("Seasonal naive" in note for note in full.notes)
 
 
 # ============================================================= Backtest
@@ -152,8 +166,8 @@ def test_backtest_fold_counts_and_targets():
 
 
 def test_selection_prefers_lower_mae_and_reports_naive_comparison():
-    alternating = [10.0 if i % 2 == 0 else 0.0 for i in range(12)]
-    outcome = fc.forecast_series("net", alternating, months_back(12), 1, 6)
+    alternating = [10.0 if i % 2 == 0 else 0.0 for i in range(16)]
+    outcome = fc.forecast_series("net", alternating, months_back(16), 1, 6)
     assert outcome.forecast.chosen_method == "trailing_mean_6"
     assert outcome.forecast.beats_naive is True
     assert outcome.forecast.naive_baseline_mae == 10.0 and outcome.forecast.chosen_mae == 5.0
@@ -161,7 +175,7 @@ def test_selection_prefers_lower_mae_and_reports_naive_comparison():
 
 
 def test_naive_wins_ties_and_is_reported_plainly():
-    outcome = fc.forecast_series("net", [50.0] * 10, months_back(10), 2, 6)
+    outcome = fc.forecast_series("net", [50.0] * 12, months_back(12), 2, 6)
     assert outcome.forecast.chosen_method == "naive"
     assert outcome.forecast.beats_naive is False
     assert "No method beat the naive baseline" in outcome.forecast.comparison
@@ -180,11 +194,13 @@ def test_tie_breaking_goes_to_the_simpler_method():
 
 
 def test_mape_is_null_with_a_reason_when_an_actual_is_zero():
-    outcome = fc.forecast_series("net", [10.0, 20.0, 0.0, 30.0, 0.0, 15.0, 0.0, 25.0], months_back(8), 1, 3)
+    with_zero = [10.0, 20.0, 0.0, 30.0, 0.0, 15.0, 0.0, 25.0, 10.0, 0.0, 20.0, 5.0]
+    outcome = fc.forecast_series("net", with_zero, months_back(12), 1, 3)
     naive_score = next(m for m in outcome.forecast.methods if m.method == "naive")
     assert naive_score.mape is None and "zero" in naive_score.mape_note
-    positive = fc.forecast_series("net", [10.0, 20.0, 10.0, 30.0, 20.0, 15.0, 10.0, 25.0], months_back(8), 1, 3)
-    assert all(m.mape is not None and m.mape_note is None for m in positive.forecast.methods)
+    positive = [10.0, 20.0, 10.0, 30.0, 20.0, 15.0, 10.0, 25.0, 10.0, 5.0, 20.0, 5.0]
+    positive_outcome = fc.forecast_series("net", positive, months_back(12), 1, 3)
+    assert all(m.mape is not None and m.mape_note is None for m in positive_outcome.forecast.methods)
 
 
 def test_rmse_and_mae_on_known_errors():
@@ -197,13 +213,43 @@ def test_rmse_and_mae_on_known_errors():
 
 
 def test_intervals_are_empirical_then_scaled_and_never_narrow():
-    errors = {1: [-2.0, -1.0, 0.0, 1.0, 2.0], 2: [-5.0, 5.0]}
+    errors = {1: [-2.0, -1.0, 0.0, 1.0, 2.0], 2: [-5.0, 5.0], 3: [-1.0]}
     offsets = fc.interval_offsets(errors, 3)
     assert offsets[0] == (pytest.approx(-1.6), pytest.approx(1.6), "empirical")
     assert offsets[1][2] == "sqrt_h_scaled" and offsets[2][2] == "sqrt_h_scaled"
     widths = [o[1] - o[0] for o in offsets]
     assert widths == sorted(widths)
-    assert fc.interval_offsets({1: [1.0, 2.0]}, 2) == [None, None]
+    # Fewer than MIN_POOLED_ERRORS (8) errors: no band at all.
+    assert fc.MIN_POOLED_ERRORS == 8
+    assert fc.interval_offsets({1: [1.0] * 7}, 2) == [None, None]
+
+
+def test_zero_errors_get_the_documented_minimum_band():
+    offsets = fc.interval_offsets({1: [0.0] * 8}, 2, min_half_width=10.0)
+    assert offsets[0] == (-10.0, 10.0, "empirical+minimum_width")
+    assert offsets[1][2] == "sqrt_h_scaled+minimum_width"
+    assert offsets[1][1] - offsets[1][0] == pytest.approx(20.0 * 2 ** 0.5)
+    cumulative = fc.interval_offsets({1: [0.0] * 8}, 3, min_half_width=10.0, cumulative=True)
+    assert cumulative[2][2] == "h_scaled+minimum_width"
+    assert cumulative[2][1] - cumulative[2][0] == pytest.approx(60.0)  # h-scaled, not sqrt(h)
+    assert fc.minimum_half_width([3000.0] * 4) == 150.0 and fc.minimum_half_width([0.0] * 4) == 1.0
+
+
+def test_constant_series_has_a_non_zero_band_and_no_fake_coverage():
+    txs = []
+    for (y, m) in months_back(24):
+        txs.append(tx(3000.0, datetime(y, m, 1, tzinfo=timezone.utc)))
+    result = fc.build_forecast([account("checking", 100.0)], txs, horizon=3, as_of=AS_OF)
+    for series in (result.income, result.net):
+        assert all(p.upper - p.lower > 0 for p in series.points)
+        assert all(p.interval_basis.endswith("+minimum_width") for p in series.points)
+        assert series.empirical_coverage is None and series.coverage_note == fc.COVERAGE_NOT_MEANINGFUL
+        assert series.interval_note and "minimum" in series.interval_note
+    assert result.income.points[0].lower == 2850.0 and result.income.points[0].upper == 3150.0
+    # Spending is all zero: the band is the 1.00 floor, clamped at zero.
+    assert all(p.lower == 0.0 and p.upper > 0 for p in result.spending.points)
+    assert all(m.interval_coverage is None for m in result.spending.methods)
+    assert all(p.upper - p.lower > 0 for p in result.balance_scenario.points)
 
 
 def test_out_of_sample_coverage_is_close_to_nominal_on_noisy_series():
@@ -216,9 +262,9 @@ def test_out_of_sample_coverage_is_close_to_nominal_on_noisy_series():
 
 
 def test_coverage_only_uses_errors_observed_before_each_origin():
-    folds = [fc.Fold(o, 1, 0.0, 1.0) for o in range(3, 8)] + [fc.Fold(8, 1, 0.0, 100.0)]
+    folds = [fc.Fold(o, 1, 0.0, 1.0) for o in range(3, 13)] + [fc.Fold(13, 1, 0.0, 100.0)]
     coverage, scored = fc.out_of_sample_coverage(folds, 1)
-    # Origins 3-5 have fewer than 3 earlier errors; 6 and 7 are covered; the shock at 8 is not.
+    # Origins 3-10 have fewer than 8 earlier errors; 11 and 12 are covered; the shock at 13 is not.
     assert scored == 3 and coverage == pytest.approx(2 / 3)
 
 
@@ -228,28 +274,83 @@ def test_coverage_only_uses_errors_observed_before_each_origin():
 def test_insufficient_history_returns_no_forecast():
     result = fc.build_forecast([], net_transactions([100.0] * 6), horizon=3, min_train=6, as_of=AS_OF)
     assert result.status == "insufficient_history"
-    assert (result.data.months_available, result.data.months_needed) == (6, 7)
+    assert (result.data.months_available, result.data.months_needed) == (6, 10)
     assert result.net is None and result.balance_scenario is None
     assert result.disclaimer == fc.DISCLAIMER
+    assert any("10 needed" in note for note in result.notes)
     empty = fc.build_forecast([], [], as_of=AS_OF)
     assert empty.status == "insufficient_history" and empty.data.months_available == 0
     with pytest.raises(ValueError):
         fc.build_forecast([], net_transactions([1.0, 2.0]), min_train=1, as_of=AS_OF)
 
 
+@pytest.mark.parametrize("extra", [1, 2, 3])
+def test_a_handful_of_folds_is_never_reported_as_ok(extra):
+    # min_train + 1 and + 2 months used to return "ok" with one or two folds and no band.
+    rng = random.Random(extra)
+    values = [round(500 + rng.gauss(0, 50), 2) for _ in range(6 + extra)]
+    result = fc.build_forecast([account("checking", 100.0)], net_transactions(values), horizon=3, min_train=6,
+                               as_of=AS_OF)
+    assert result.status == "insufficient_history" and result.net is None
+    one_step = fc.build_forecast([], net_transactions(values + [500.0]), horizon=1, min_train=6, as_of=AS_OF)
+    assert one_step.status == "insufficient_history"
+
+
+@pytest.mark.parametrize(("months", "horizon"), [(10, 3), (14, 1), (10, 12)])
+def test_ok_forecasts_always_carry_a_band_for_every_point(months, horizon):
+    rng = random.Random(months + horizon)
+    values = [round(500 + rng.gauss(0, 50), 2) for _ in range(months)]
+    result = fc.build_forecast([account("checking", 100.0)], net_transactions(values), horizon=horizon,
+                               min_train=6, as_of=AS_OF)
+    assert result.status == "ok" and result.data.months_needed == months
+    assert result.net.evaluation_origins >= fc.MIN_COMMON_ORIGINS
+    for series in (result.net, result.income, result.spending):
+        assert all(p.lower is not None and p.upper is not None for p in series.points)
+        assert sum(m.folds for m in series.methods if m.method == "naive") >= fc.MIN_POOLED_ERRORS
+    assert all(p.lower is not None for p in result.balance_scenario.points)
+
+
 def test_balance_path_and_first_month_below_zero():
     accounts = [account("checking", 1000.0), account("savings", 500.0), account("credit", -300.0)]
-    txs = net_transactions([-400.0] * 8) + [tx(-100.0, datetime(2026, 10, 3, tzinfo=timezone.utc))]
+    txs = net_transactions([-400.0] * 12) + [tx(-100.0, datetime(2026, 10, 3, tzinfo=timezone.utc))]
     result = fc.build_forecast(accounts, txs, horizon=5, min_train=6, as_of=AS_OF)
     assert result.status == "ok" and result.net.chosen_method == "naive"
     scenario = result.balance_scenario
     assert scenario.label == "scenario" and "not a prediction" in scenario.note
+    assert "not measured" in scenario.note
     assert (scenario.starting_liquid_balance, scenario.liquid_accounts) == (1500.0, 2)
     assert scenario.current_month_net_to_date == -100.0
     # 1500 + 100 already spent this month - 400 per month.
     assert [p.point for p in scenario.points] == [1200.0, 800.0, 400.0, 0.0, -400.0]
     assert [p.month for p in scenario.points][0] == "2026-10"
-    assert scenario.first_month_lower_bound_below_zero == "2027-02"
+    # Every backtest error is zero, so the band is the documented minimum: 5% of 400 = 20, scaled by h.
+    assert [p.point - p.lower for p in scenario.points] == pytest.approx([20.0, 40.0, 60.0, 80.0, 100.0])
+    assert all(p.lower < p.point < p.upper for p in scenario.points)
+    # The lower bound crosses zero a month before the point does.
+    assert scenario.first_month_lower_bound_below_zero == "2027-01"
+
+
+def test_future_dated_transactions_do_not_move_the_balance_scenario():
+    history = net_transactions([-400.0] * 12)
+    rent = tx(-400.0, datetime(2026, 11, 1, tzinfo=timezone.utc))  # dated after as_of
+    # record_transaction applies the rent to the balance immediately: 1900 before, 1500 after.
+    before = fc.build_forecast([account("checking", 1900.0)], history, horizon=3, as_of=AS_OF)
+    after = fc.build_forecast([account("checking", 1500.0)], history + [rent], horizon=3, as_of=AS_OF)
+    assert after.data.excluded_future_dated == 1 and after.balance_scenario.future_dated_net == -400.0
+    assert [(p.point, p.lower, p.upper) for p in after.balance_scenario.points] == \
+        [(p.point, p.lower, p.upper) for p in before.balance_scenario.points]
+
+
+def test_non_finite_stored_amounts_are_skipped_and_counted():
+    bad = tx(0.0, datetime(2026, 3, 5, tzinfo=timezone.utc)).model_copy(update={"amount": float("nan")})
+    inf = tx(0.0, datetime(2026, 4, 5, tzinfo=timezone.utc)).model_copy(update={"amount": float("inf")})
+    result = fc.build_forecast([account("checking", 10.0)], net_transactions([100.0] * 12) + [bad, inf],
+                               as_of=AS_OF)
+    assert result.status == "ok" and result.data.excluded_invalid == 2
+    assert any("non-finite" in note for note in result.notes)
+    import json
+    assert "NaN" not in json.dumps(result.model_dump(mode="json"))
+    assert [h.net for h in result.data.history] == [100.0] * 12
 
 
 def test_lower_bound_crossing_precedes_the_point_crossing():
@@ -284,18 +385,46 @@ def test_response_models_are_frozen():
 
 def test_service_reports_truncation_when_the_read_limit_is_hit(monkeypatch):
     monkeypatch.setattr(finance_service_module, "FORECAST_MAX_TRANSACTIONS", 10)
-    monkeypatch.setattr(finance_service_module, "FORECAST_PAGE_SIZE", 4)
     store = MemoryFinanceStore()
     for t in net_transactions([float(i) for i in range(1, 13)]):
         store.save_transaction(t)
     service = FinanceService(store)
-    result = service.get_forecast(TEST_OWNER, horizon=2, min_train=3, as_of=AS_OF)
+    result = service.get_forecast(TEST_OWNER, horizon=1, min_train=3, as_of=AS_OF)
     assert result.data.truncated is True
     # The newest 10 months were read; the earliest of them may be partial and is dropped.
     assert result.data.months_available == 9 and result.data.first_month == "2026-01"
     assert any("most recent" in note for note in result.notes)
-    monkeypatch.setattr(finance_service_module, "FORECAST_MAX_TRANSACTIONS", 5000)
+    monkeypatch.setattr(finance_service_module, "FORECAST_MAX_TRANSACTIONS", 12)
     assert service.get_forecast(TEST_OWNER, as_of=AS_OF).data.truncated is False
+
+
+def test_service_flags_a_truncated_accounts_read(monkeypatch):
+    monkeypatch.setattr(finance_service_module, "FORECAST_MAX_ACCOUNTS", 1)
+    store = MemoryFinanceStore()
+    store.save_account(account("checking", 10.0))
+    store.save_account(account("savings", 20.0))
+    result = FinanceService(store).get_forecast(TEST_OWNER, as_of=AS_OF)
+    assert result.data.accounts_truncated is True
+    assert any("accounts" in note for note in result.notes)
+
+
+def test_memory_store_ordering_has_a_unique_tiebreaker():
+    store = MemoryFinanceStore()
+    same_time = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    for _ in range(7):
+        store.save_transaction(tx(-1.0, same_time))
+    seen = []
+    for offset in range(0, 7, 2):
+        page, _ = store.list_transactions(TEST_OWNER, limit=2, offset=offset)
+        seen.extend(t.id for t in page)
+    assert len(seen) == len(set(seen)) == 7
+    assert seen == sorted(seen, reverse=True)
+
+
+def test_notes_flag_optimism_and_double_counting_risks():
+    result = fc.build_forecast([], net_transactions([100.0 + i % 4 for i in range(12)]), as_of=AS_OF)
+    text = " ".join(result.notes)
+    assert "slightly optimistic" in text and "refunds count as income" in text and "credit-card" in text
 
 
 def test_forecast_writes_nothing_and_records_no_audit():
@@ -385,7 +514,21 @@ def test_api_forecast_is_owner_scoped_and_always_carries_the_disclaimer(client):
             "transaction_date": datetime(y, m, 12, tzinfo=timezone.utc).isoformat()}).status_code == 201
     body = client.get("/finance/forecast?horizon=4&min_train=4").json()
     assert body["status"] == "ok" and body["horizon"] == 4 and len(body["net"]["points"]) == 4
+    assert all(p["lower"] is not None for p in body["net"]["points"])
     assert body["disclaimer"] == fc.DISCLAIMER
     assert body["data"]["months_available"] == 10
     assert body["balance_scenario"]["label"] == "scenario"
     assert {m["method"] for m in body["net"]["methods"]} >= {"naive", "trailing_mean_3"}
+
+
+def test_api_rejects_non_finite_amounts(client):
+    acc = client.post("/finance/accounts", json={"name": "Main", "account_type": "checking",
+                                                 "institution": "Bank", "balance": 10.0}).json()
+    for literal in ("NaN", "Infinity", "-Infinity"):
+        res = client.post("/finance/transactions", headers={"Content-Type": "application/json"},
+                          content=f'{{"account_id": "{acc["id"]}", "amount": {literal}, "description": "bad"}}')
+        assert res.status_code == 422, literal
+    res = client.post("/finance/accounts", headers={"Content-Type": "application/json"},
+                      content='{"name": "X", "account_type": "checking", "institution": "B", "balance": NaN}')
+    assert res.status_code == 422
+    assert client.get(f"/finance/accounts/{acc['id']}").json()["balance"] == 10.0

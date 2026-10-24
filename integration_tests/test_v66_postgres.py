@@ -35,3 +35,24 @@ def test_forecast_from_stored_transactions(isolated_postgres):
     assert restarted.get_forecast(owner).data.months_available == 18
     isolated = restarted.get_forecast(other)
     assert isolated.status == "insufficient_history" and isolated.data.months_available == 0
+
+
+def test_transactions_with_equal_dates_page_without_gaps_or_repeats(isolated_postgres):
+    from jarvis.finance.models import AccountCreateRequest, TransactionCreateRequest
+    from jarvis.finance.service import FinanceService
+    from jarvis.finance.stores import PostgresFinanceStore
+
+    owner = uuid4()
+    store = PostgresFinanceStore(isolated_postgres.database_url)
+    service = FinanceService(store)
+    account = service.create_account(owner, AccountCreateRequest(
+        name="Ties", account_type="checking", institution="Test", balance=0.0))
+    same_time = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
+    for _ in range(7):
+        service.record_transaction(owner, TransactionCreateRequest(
+            account_id=account.id, amount=-1.0, description="same instant", transaction_date=same_time))
+    seen = []
+    for offset in range(0, 7, 2):
+        page, _ = store.list_transactions(owner, limit=2, offset=offset)
+        seen.extend(t.id for t in page)
+    assert len(seen) == len(set(seen)) == 7
