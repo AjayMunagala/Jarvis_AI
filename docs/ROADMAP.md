@@ -312,3 +312,7 @@ The scope was derived from the repository, because no earlier document defined t
   - Real cron and strict schedules; an optional background runner (off by default) runs each due job at most once.
   - Reminders are delivered once; quiet hours hold notifications; the throttle survives restarts.
   - Workflow jobs run through the engine; write workflows pause for the owner's approval.
+- **v4.6 One knowledge and context contract: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
+  - Stable embeddings (survive restarts), one token estimator, the knowledge budget on the shared packer.
+  - Research documents can be indexed in knowledge and the graph, with every chunk marked untrusted (migration 0064).
+  - DOCX parsing; PDF is refused until the owner approves a PDF library.

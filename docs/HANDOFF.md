@@ -653,3 +653,12 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - **Quiet hours:** they hold notifications (`JARVIS_SCHEDULER_QUIET_HOURS`), and the throttle survives restarts.
 - **Workflow jobs:** they use the engine. A write workflow pauses for approval.
 - **Details:** `docs/V41_V50_PROGRAM.md`.
+
+## v4.6 — One knowledge and context contract (accepted by the project lead on 2026-10-24)
+
+- **Embeddings:** they are stable across restarts. Legacy vectors are recomputed and replaced.
+- **Budgets:** one token estimator is used everywhere, and the knowledge budget uses the shared v5.3 packer.
+- **Research indexing:** with `index_in_knowledge`, research documents are indexed in the knowledge store and recorded in the graph. Every chunk is marked untrusted (migration 0064).
+- **Parsing:** DOCX is parsed safely, and PDF is refused.
+- **Open decision:** the owner must approve a PDF library before PDF support can be added.
+- **Details:** `docs/V41_V50_PROGRAM.md`.

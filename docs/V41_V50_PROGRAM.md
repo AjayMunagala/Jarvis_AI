@@ -63,7 +63,8 @@ Results are always labelled as real, mock or unavailable.
 | v4.3 | ACCEPTED by Claude as project lead on 2026-10-24 (owner approved the policy change the same day), after an independent review that found one blocking defect, since fixed | Python 1115 passed; live PostgreSQL 57 passed; Vitest 132; E2E 11 | branch head at push |
 | v4.4 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review (no bypass found; 8 status-reporting and robustness findings, all fixed) | Python 1135 passed; live PostgreSQL 59 passed; Vitest 132; E2E 11 | branch head at push |
 | v4.5 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review found one blocking defect (a run could resurrect a deleted job or rewind the schedule), since fixed with nine other findings | Python 1160 passed; live PostgreSQL 61 passed; frontend unchanged | branch head at push |
-| v4.6–v5.0 | NOT STARTED | — | — |
+| v4.6 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review found three blocking defects in research indexing (fence lost on chunking, filename breaking the fence, a chunker that crawled), since fixed with eight other findings | Python 1182 passed; live PostgreSQL 63 passed; frontend unchanged | branch head at push |
+| v4.7–v5.0 | NOT STARTED | — | — |
 
 ---
 
@@ -448,4 +449,79 @@ These were run on the v4.5 commit in a separate clean checkout. The frontend is 
 **Known limits:**
 - Notifications appear in JARVIS only; nothing is sent to other devices.
 - Delivery is at most once: a run claimed by a process that then crashes is not retried.
+
+## v4.6 — One knowledge and context contract
+
+### Why it was needed
+- **Embeddings went stale on every restart:** they used Python's `hash()`, which changes from process to process, so stored vectors were noise after a restart.
+- **Two token estimators** gave different counts, 4 and 3 characters per token.
+- **The knowledge budget ignored the shared packer:** it used its own greedy packer instead of the v5.3 context packer.
+- **Research output reached neither the knowledge index nor the graph.**
+- **PDF and DOCX uploads were stored as garbage:** they were decoded as UTF-8 text.
+- **The search audit stored the raw query text.**
+
+### Changes
+1. **Stable embeddings.**
+   - BLAKE2b hashing (`stable-hash-64-v2`) gives the same vector in every process.
+   - In PostgreSQL, a vector stored under the old model is recomputed in memory for the search. It is then stored in a separate, best-effort transaction, so the search itself stays read-only.
+   - Semantic search scans the most recent 5000 chunks, in order.
+2. **One token estimator** (`jarvis.routing.requirements.estimate_tokens`, about 3 characters per token) for every budget.
+3. **One context contract.**
+   - The knowledge context budget packs chunks with the shared v5.3 packer: deduplication, the token budget and excerpts.
+   - It reports `omitted_count`, `truncated_count` and `untrusted_content`.
+   - Explicitly chosen documents keep their chunk order.
+   - At most 30 chunks are selected per request.
+4. **Research to knowledge and graph** (`index_in_knowledge`, opt-in).
+   - The parsed text is indexed after the research document is saved. Every chunk is marked `untrusted` (migration 0064), because a fence around the whole document would not survive chunking.
+   - The document is recorded as a graph entity.
+   - Deleting the research document removes its knowledge copy and its graph entity.
+5. **Parsing.**
+   - DOCX is parsed with a streaming expat parser, with these limits:
+     - 5 MB of XML;
+     - text capped at the extraction limit;
+     - any DTD refused, in any encoding.
+   - PDF is refused with a clear message. It needs a PDF library, and adding one is a new dependency that needs your approval. **Owner decision pending.**
+   - Other binary uploads are refused.
+   - Pre-extracted text is always accepted.
+   - Invalid base64 is answered with 422.
+   - The fence header can no longer be closed by a crafted filename or content type.
+6. **Privacy:** the knowledge search audit records only the query length.
+
+### Independent review and acceptance
+The reviewer confirmed:
+- embedding stability;
+- owner scoping;
+- bounded decompression;
+- budget arithmetic;
+- that other callers of the packer are unchanged;
+- that the search audit no longer leaks the query.
+
+It found three blocking defects, all in the new indexing, fixed before acceptance:
+1. Untrusted research text lost its fence once chunked. An injected instruction in a middle chunk reached context as ordinary, pinned knowledge.
+2. A crafted filename could close the fence. This was pre-existing, and v4.6 copied it further.
+3. The chunker advanced one character at a time at line and document ends, producing dozens of tiny junk chunks. This was also pre-existing.
+
+It also found eight more issues, all fixed with tests:
+1. The graph entity was left behind on delete.
+2. Partial failures could leave orphaned knowledge copies.
+3. Embedding writes ran inside the search transaction.
+4. The chunk order changed for explicitly chosen documents.
+5. DOCX parsing could use excessive memory and CPU.
+6. A UTF-16 DOCTYPE bypassed the DTD check.
+7. Text that merely looked like PDF or ZIP was refused.
+8. Tests that proved less than they claimed.
+
+**Tests:**
+- `tests/test_v46_knowledge_contract.py`: 26 tests.
+- `integration_tests/test_v46_postgres.py`: 2 live tests, covering legacy vectors that are recomputed and replaced, and durable research indexing with cleanup.
+- Python: 1182 passed, 0 failed, 17 skipped.
+- Live PostgreSQL: 63 passed.
+
+These were run on the v4.6 commit in a separate clean checkout.
+
+**Behaviour changes:**
+- Token counts are about 33% higher (3 instead of 4 characters per token).
+- The context budget selects at most 30 chunks.
+- Uploads of PDF or other binary files now return 422 instead of storing garbage.
+- Chat context assembly (v2.2) keeps its character budget. v4.7 adds knowledge to chat through the shared records.
 
