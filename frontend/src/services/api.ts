@@ -281,7 +281,7 @@ export function getNotifications(unreadOnly: boolean, limit: number, auth?: ApiA
 }
 
 export function markNotificationRead(notificationId: string, auth?: ApiAuth): Promise<{ marked: boolean }> {
-  return request<{ marked: boolean }>(`/scheduler/notifications/${encodeURIComponent(notificationId)}/read`, json({}), false, auth)
+  return request<{ marked: boolean }>(`/scheduler/notifications/${encodeURIComponent(notificationId)}/read`, { method: 'PATCH' }, false, auth)
 }
 
 export type CodingWorkflow = 'auto' | 'explain' | 'locate' | 'trace' | 'diagnose' | 'recommend' | 'patch' | 'review_patch' | 'tests'

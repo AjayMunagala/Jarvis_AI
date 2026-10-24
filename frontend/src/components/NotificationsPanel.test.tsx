@@ -18,7 +18,8 @@ function stubNotification(permission: NotificationPermission | null, requested: 
     Reflect.deleteProperty(window, 'Notification')
     return
   }
-  const fake = Object.assign(vi.fn(), { permission, requestPermission: vi.fn().mockResolvedValue(requested) })
+  const fake = Object.assign(vi.fn(), { permission, requestPermission: vi.fn() })
+  fake.requestPermission.mockImplementation(async () => { fake.permission = requested; return requested })
   vi.stubGlobal('Notification', fake)
   return fake
 }
@@ -71,5 +72,14 @@ describe('NotificationsPanel', () => {
     vi.mocked(getNotifications).mockResolvedValue({ items: [], total: 0 })
     render(<NotificationsPanel auth={auth} onUnlock={() => undefined} />)
     expect(await screen.findByText('This browser does not support desktop notifications.')).toBeInTheDocument()
+  })
+
+  it('reads the permission back when requestPermission returns nothing or fails (older Safari)', async () => {
+    const fake = stubNotification('default')!
+    fake.requestPermission.mockImplementation(() => { fake.permission = 'denied'; return undefined })
+    vi.mocked(getNotifications).mockResolvedValue({ items: [], total: 0 })
+    render(<NotificationsPanel auth={auth} onUnlock={() => undefined} />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Enable desktop notifications' }))
+    expect(await screen.findByText(/blocked in this browser's site settings/)).toBeInTheDocument()
   })
 })

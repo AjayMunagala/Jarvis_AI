@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createMemory, deleteMemory, getConversationMessages, getReadiness, getRepoInventory, ingestDocument, listConversations, listMemories, searchMemories, sendChatMessage, updateMemory } from './api'
+import { getNotifications, markNotificationRead, createMemory, deleteMemory, getConversationMessages, getReadiness, getRepoInventory, ingestDocument, listConversations, listMemories, searchMemories, sendChatMessage, updateMemory } from './api'
 
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.resetModules() })
 const page = { items: [], total: 0, limit: 20, offset: 0, has_more: false }
@@ -164,5 +164,17 @@ describe('API client', () => {
     // non-json 503 on ready throws safe error
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('bad gateway', { status: 503 })))
     await expect(getReadiness()).rejects.toThrow('JARVIS services are not ready. Check backend status and try again.')
+  })
+  it('lists notifications and marks one read with PATCH and no body (v6.4)', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ items: [], total: 0 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ marked: true }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await getNotifications(true, 50, { token: 'local-token' })
+    await markNotificationRead('n/1', { token: 'local-token' })
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/scheduler/notifications?unread_only=true&limit=50')
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/scheduler/notifications/n%2F1/read')
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'PATCH' })
+    expect(fetchMock.mock.calls[1][1]?.body).toBeUndefined()
   })
 })

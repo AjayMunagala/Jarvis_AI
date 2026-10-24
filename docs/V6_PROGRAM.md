@@ -39,7 +39,7 @@ The v5.1 router stays available for evaluations. Routing chat across several mod
 | v6.1 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (recording blocked the request), since fixed with six other findings | Python 1247 passed; live PostgreSQL 68 passed (clean e371e13); real NVIDIA call recorded 48/383 tokens |
 | v6.2 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (pypdf limit errors reached the API as HTTP 500), since fixed with five other findings | Python 1261 passed (with v6.1 and v6.3); hostile PDFs refused with 422 in under 1 s |
 | v6.3 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found no blocking issues; two medium and five low findings fixed | Python 1266 passed; live PostgreSQL 69 passed |
-| v6.4 | IMPLEMENTED, TESTED; in review | Vitest 138 passed; Playwright E2E 11 passed; TypeScript clean |
+| v6.4 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (mark-as-read used POST; the API only accepts PATCH), since fixed with six other findings | Vitest 141 passed (twice); Playwright E2E 11 passed; TypeScript clean |
 
 ## v6.1 — Usage and cost tracking, fallback model
 
@@ -157,4 +157,17 @@ No blocking issues. Findings, all fixed with tests:
 ### Tests
 - `NotificationsPanel.test.tsx`: locked state, listing and mark-as-read, permission asked only on click, blocked/unsupported/error states.
 - `App.test.tsx`: both views open; polling after unlock, the unread badge, and desktop notifications only for new items.
+
+### v6.4 independent review and acceptance
+The reviewer found one blocking defect, fixed before acceptance: "Mark as read" sent POST, but the API route is PATCH, so every click failed with 405. The panel tests mocked the API, which hid it. An API-level test now checks the method, URL and empty body.
+
+Six more findings, all fixed with tests:
+1. **Medium:** after unlocking with nothing unread, the first new notification was never shown on the desktop (the "first load" rule was inferred from an empty set). A separate primed flag now marks the first successful poll.
+2. **Low:** a browser whose `Notification` constructor throws (Android Chrome) lost the rest of that batch silently; each call is now guarded, and desktop delivery stops for that page after the first failure.
+3. **Low:** older Safari's `requestPermission` returns nothing; the panel now reads the permission back and catches failures.
+4. **Low:** an old notification scrolling into the newest-50 window could be announced hours late; only notifications delivered after unlock (with one minute of clock tolerance) are announced.
+5. **Low:** the unread badge's label was on a plain span and reused the "SOON" style; it now has screen-reader text inside the button and its own style.
+6. **Low:** a poll started under an earlier unlock could seed the new session; unlock now aborts the old requests and stale poll results are dropped.
+
+**Known limit:** the view and the desktop announcements cover the newest 50 unread notifications; the badge count is always the full unread total.
 

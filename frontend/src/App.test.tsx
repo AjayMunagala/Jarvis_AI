@@ -594,25 +594,56 @@ describe('JARVIS unified interface and voice (v3.0)', () => {
     expect(getNotifications).not.toHaveBeenCalled()
   })
 
-  it('polls unread notifications after unlock and shows only new ones on the desktop', async () => {
+  it('polls unread notifications after unlock and shows only newly delivered ones on the desktop', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const shown = vi.fn()
     vi.stubGlobal('Notification', Object.assign(function (this: unknown, title: string) { shown(title) }, { permission: 'granted', requestPermission: vi.fn() }))
-    const item = (id: string, title: string) => ({ id, owner_id: 'o', category: 'reminder', title, message: 'm', priority: 'normal' as const,
-      read: false, delivered_at: null, created_at: '2026-10-24T07:00:00Z' })
+    const item = (id: string, title: string, at: string) => ({ id, owner_id: 'o', category: 'reminder', title, message: 'm', priority: 'normal' as const,
+      read: false, delivered_at: at, created_at: at })
+    const old = '2026-01-01T07:00:00Z'
     vi.mocked(getNotifications)
-      .mockResolvedValueOnce({ items: [item('a', 'Already there')], total: 1 })
-      .mockResolvedValue({ items: [item('b', 'Call mom'), item('a', 'Already there')], total: 2 })
+      .mockResolvedValueOnce({ items: [item('a', 'Already there', old)], total: 1 })
+      .mockResolvedValueOnce({ items: [item('b', 'Call mom', new Date().toISOString()), item('a', 'Already there', old), item('c', 'Older, scrolled in', old)], total: 3 })
     try {
       render(<App />)
       await unlockWithToken()
-      await waitFor(() => expect(screen.getByLabelText('1 unread notifications')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByRole('button', { name: /1 unread/ })).toBeInTheDocument())
       expect(getNotifications).toHaveBeenCalledWith(true, 50, expect.objectContaining({ token: 'a'.repeat(32) }))
       expect(shown).not.toHaveBeenCalled()  // what was already unread at unlock is not re-announced
       await act(async () => { vi.advanceTimersByTime(30_000) })
-      await waitFor(() => expect(screen.getByLabelText('2 unread notifications')).toBeInTheDocument())
-      expect(shown).toHaveBeenCalledTimes(1)
+      await waitFor(() => expect(screen.getByRole('button', { name: /3 unread/ })).toBeInTheDocument())
+      expect(shown).toHaveBeenCalledTimes(1)  // only the newly delivered one; an old item scrolling into view is not
       expect(shown).toHaveBeenCalledWith('Call mom')
+    } finally {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('announces the first notification after an unlock with nothing unread, and survives a throwing constructor', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const shown = vi.fn()
+    let throwNext = false
+    vi.stubGlobal('Notification', Object.assign(function (this: unknown, title: string) {
+      if (throwNext) throw new TypeError('Illegal constructor')
+      shown(title)
+    }, { permission: 'granted', requestPermission: vi.fn() }))
+    const item = (id: string) => ({ id, owner_id: 'o', category: 'reminder', title: id, message: 'm', priority: 'normal' as const,
+      read: false, delivered_at: new Date().toISOString(), created_at: new Date().toISOString() })
+    vi.mocked(getNotifications)
+      .mockResolvedValueOnce({ items: [], total: 0 })
+      .mockResolvedValueOnce({ items: [item('first')], total: 1 })
+      .mockResolvedValue({ items: [item('second'), item('first')], total: 2 })
+    try {
+      render(<App />)
+      await unlockWithToken()
+      await waitFor(() => expect(getNotifications).toHaveBeenCalled())
+      await act(async () => { vi.advanceTimersByTime(30_000) })
+      await waitFor(() => expect(shown).toHaveBeenCalledWith('first'))
+      throwNext = true
+      await act(async () => { vi.advanceTimersByTime(30_000) })
+      await waitFor(() => expect(screen.getByRole('button', { name: /2 unread/ })).toBeInTheDocument())
+      expect(shown).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
       vi.unstubAllGlobals()

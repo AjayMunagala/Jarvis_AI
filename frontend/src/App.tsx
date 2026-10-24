@@ -83,6 +83,12 @@ export default function App() {
   const [activeView, setActiveView] = useState<View>('Chat')
   const [unreadCount, setUnreadCount] = useState(0)
   const seenNotifications = useRef<Set<string>>(new Set())
+  // v6.4 review: announce only after a first successful poll, only items delivered after unlock, and drop
+  // results of polls started under an earlier unlock.
+  const notificationsPrimed = useRef(false)
+  const unlockedAt = useRef(0)
+  const pollGeneration = useRef(0)
+  const desktopBroken = useRef(false)
   const [inspectMemoryIds, setInspectMemoryIds] = useState<string[]>([])
   const [providerInfo, setProviderInfo] = useState<{ provider: string; demo: boolean } | null>(null)
   const [credential, setCredential] = useState('')
@@ -392,20 +398,33 @@ export default function App() {
   // (only after the owner allowed it in the Notifications view). Nothing is polled while the workspace is locked.
   async function pollNotifications() {
     if (!credential) return
+    const generation = pollGeneration.current
     try {
       const page = await getNotifications(true, 50, currentAuth())
+      if (generation !== pollGeneration.current) return  // started under an earlier unlock
       setUnreadCount(page.total)
-      const fresh = page.items.filter((item) => !seenNotifications.current.has(item.id))
-      const firstLoad = seenNotifications.current.size === 0
+      const fresh = page.items.filter((item) => !seenNotifications.current.has(item.id)
+        && Date.parse(item.delivered_at ?? item.created_at) >= unlockedAt.current)
+      const primed = notificationsPrimed.current
       page.items.forEach((item) => seenNotifications.current.add(item.id))
-      if (!firstLoad && desktopPermission() === 'granted') {
-        fresh.forEach((item) => { new window.Notification(item.title, { body: item.message.slice(0, 240), tag: item.id }) })
+      notificationsPrimed.current = true
+      if (!primed || desktopBroken.current || desktopPermission() !== 'granted') return
+      for (const item of fresh) {
+        try {
+          new window.Notification(item.title, { body: item.message.slice(0, 240), tag: item.id })
+        } catch {
+          desktopBroken.current = true  // e.g. Android Chrome, which only allows service-worker notifications
+          break
+        }
       }
     } catch { /* the badge simply keeps its last value */ }
   }
 
   useEffect(() => {
+    pollGeneration.current += 1
     seenNotifications.current = new Set()
+    notificationsPrimed.current = false
+    unlockedAt.current = Date.now() - 60_000  // tolerate a little clock skew between browser and server
     setUnreadCount(0)
     if (!credential) return
     void pollNotifications()
@@ -446,7 +465,7 @@ export default function App() {
             const active = label === activeView
             const available = (AVAILABLE_VIEWS as readonly string[]).includes(label)
             return <button key={label} className={`nav-item ${active ? 'nav-active' : ''}`} onClick={() => selectNav(label)} aria-current={active ? 'page' : undefined}>
-              <Icon size={17} strokeWidth={1.8} /><span>{label}</span>{!available && <span className="nav-soon">SOON</span>}{label === 'Notifications' && unreadCount > 0 && <span className="nav-soon" aria-label={`${unreadCount} unread notifications`}>{unreadCount}</span>}{available && featureOff(label) && <span className="nav-soon nav-off" aria-hidden="true" title="Disabled by the server configuration">OFF</span>}
+              <Icon size={17} strokeWidth={1.8} /><span>{label}</span>{!available && <span className="nav-soon">SOON</span>}{label === 'Notifications' && unreadCount > 0 && <span className="nav-badge"><span aria-hidden="true">{unreadCount}</span><span className="sr-only">, {unreadCount} unread</span></span>}{available && featureOff(label) && <span className="nav-soon nav-off" aria-hidden="true" title="Disabled by the server configuration">OFF</span>}
             </button>
           })}
         </nav>
@@ -518,7 +537,7 @@ export default function App() {
           <div className="composer-footer"><span><ShieldCheck size={12} /> Memory saving is explicit</span><span><Clock3 size={12} /> Chat history depends on backend persistence</span></div>
         </div></>}
       </main>
-      {unlockOpen && <div className="credential-backdrop"><section className="credential-dialog" role="dialog" aria-modal="true" aria-labelledby="credential-title" aria-describedby="credential-help"><h2 id="credential-title">Unlock local workspace</h2><p id="credential-help">Enter the local access token configured for this JARVIS instance. It is kept in this page's memory only and must be entered again after reload.</p><form onSubmit={(event) => { event.preventDefault(); const token = credentialDraft.trim(); if (token.length < 32) return; sessionVersionRef.current += 1; sessionControllerRef.current = new AbortController(); setCredential(token); setCredentialDraft(''); setUnlockOpen(false) }}><label htmlFor="workspace-token">Local access token</label><input id="workspace-token" type="password" autoComplete="off" value={credentialDraft} onChange={(event) => setCredentialDraft(event.target.value)} autoFocus /><div className="credential-actions"><button type="submit" disabled={credentialDraft.trim().length < 32}>Unlock</button><button type="button" onClick={() => { setCredentialDraft(''); setUnlockOpen(false) }}>Continue without unlocking</button></div></form><p className="credential-warning">This single-owner local prototype is not approved for shared or public deployment. Plain HTTP is unsafe on untrusted networks, and XSS could expose the in-memory token.</p></section></div>}
+      {unlockOpen && <div className="credential-backdrop"><section className="credential-dialog" role="dialog" aria-modal="true" aria-labelledby="credential-title" aria-describedby="credential-help"><h2 id="credential-title">Unlock local workspace</h2><p id="credential-help">Enter the local access token configured for this JARVIS instance. It is kept in this page's memory only and must be entered again after reload.</p><form onSubmit={(event) => { event.preventDefault(); const token = credentialDraft.trim(); if (token.length < 32) return; sessionVersionRef.current += 1; sessionControllerRef.current.abort(); sessionControllerRef.current = new AbortController(); setCredential(token); setCredentialDraft(''); setUnlockOpen(false) }}><label htmlFor="workspace-token">Local access token</label><input id="workspace-token" type="password" autoComplete="off" value={credentialDraft} onChange={(event) => setCredentialDraft(event.target.value)} autoFocus /><div className="credential-actions"><button type="submit" disabled={credentialDraft.trim().length < 32}>Unlock</button><button type="button" onClick={() => { setCredentialDraft(''); setUnlockOpen(false) }}>Continue without unlocking</button></div></form><p className="credential-warning">This single-owner local prototype is not approved for shared or public deployment. Plain HTTP is unsafe on untrusted networks, and XSS could expose the in-memory token.</p></section></div>}
     </div>
   )
 }

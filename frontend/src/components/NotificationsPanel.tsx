@@ -48,8 +48,10 @@ export default function NotificationsPanel({ auth, onUnlock, onChanged }: { auth
 
   async function enableDesktop() {
     if (permission === 'unsupported') return
-    const result = await window.Notification.requestPermission()
-    setPermission(result as Permission)
+    try {
+      await window.Notification.requestPermission()  // older Safari returns nothing; read the result back below
+    } catch { /* fall through to the browser's current answer */ }
+    setPermission(desktopPermission())
   }
 
   return <section className="activity-panel" aria-labelledby="notifications-heading">
