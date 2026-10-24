@@ -26,6 +26,8 @@ class ResearchStore(Protocol):
         self, owner_id: UUID, *, limit: int = 50, offset: int = 0
     ) -> tuple[list[ParsedDocument], int]: ...
     def delete_document(self, owner_id: UUID, doc_id: UUID) -> bool: ...
+    # v4.6: replace the metadata of a stored document (for example its knowledge index links).
+    def update_metadata(self, owner_id: UUID, doc_id: UUID, metadata: dict) -> bool: ...
 
     def save_synthesis(self, synthesis: ResearchSynthesis) -> None: ...
     def get_synthesis(self, owner_id: UUID, synthesis_id: UUID) -> ResearchSynthesis | None: ...
@@ -69,6 +71,14 @@ class MemoryResearchStore:
             if not doc or doc.owner_id != owner_id:
                 return False
             del self._documents[doc_id]
+            return True
+
+    def update_metadata(self, owner_id: UUID, doc_id: UUID, metadata: dict) -> bool:
+        with self._lock:
+            doc = self._documents.get(doc_id)
+            if not doc or doc.owner_id != owner_id:
+                return False
+            self._documents[doc_id] = doc.model_copy(update={"metadata": dict(metadata)})
             return True
 
     def save_synthesis(self, synthesis: ResearchSynthesis) -> None:
@@ -206,6 +216,16 @@ class PostgresResearchStore:
                 return getattr(res, "rowcount", 1) > 0
         except Exception as exc:
             raise ResearchStorageError("Failed to delete parsed document from PostgreSQL.") from exc
+
+    def update_metadata(self, owner_id: UUID, doc_id: UUID, metadata: dict) -> bool:
+        deadline = operation_deadline(self._operation_timeout, clock=monotonic)
+        sql = "UPDATE jarvis_app.parsed_documents SET metadata = %s WHERE id = %s AND owner_id = %s"
+        try:
+            with self._open(deadline) as conn:
+                res = execute_with_deadline(conn, deadline, sql, (json.dumps(metadata), doc_id, owner_id), clock=monotonic)
+                return getattr(res, "rowcount", 1) > 0
+        except Exception as exc:
+            raise ResearchStorageError("Failed to update parsed document metadata in PostgreSQL.") from exc
 
     def save_synthesis(self, synthesis: ResearchSynthesis) -> None:
         deadline = operation_deadline(self._operation_timeout, clock=monotonic)

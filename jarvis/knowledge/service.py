@@ -67,6 +67,7 @@ class KnowledgeService:
                     content=text,
                     token_count=estimate_tokens(text),
                     created_at=now,
+                    untrusted=req.untrusted,
                 )
             )
 
@@ -179,13 +180,17 @@ class KnowledgeService:
                            max_items=30, min_score=0.0),
             [MemoryCandidate(candidate_id=key, owner_id=chunk.owner_id, category="retrieved_knowledge",
                              content=chunk.content[:4000], source_ref=f"knowledge:{chunk.document_id}#{chunk.chunk_index}",
-                             reliability="document", pinned=True, updated_at=chunk.created_at)
+                             reliability="inferred" if chunk.untrusted else "document", pinned=True,
+                             updated_at=chunk.created_at)
              for key, chunk in by_id.items()],
             budget_override=budget_for_chunks,
         )
+        # Keep the caller's order: the documents as listed and each document's chunk order, or the search ranking.
+        order = {key: position for position, key in enumerate(by_id)}
+        chosen = sorted(package.items, key=lambda item: order[item.candidate_id])
         selected = [by_id[item.candidate_id].model_copy(update={"content": item.excerpt,
                                                                 "token_count": estimate_tokens(item.excerpt)})
-                    for item in package.items]
+                    for item in chosen]
         accumulated_tokens = package.used_tokens
 
         total_used = prompt_tokens + system_reserve + accumulated_tokens
@@ -203,4 +208,5 @@ class KnowledgeService:
             selected_chunks=selected,
             omitted_count=len(package.omitted),
             truncated_count=sum(1 for item in package.items if item.truncated),
+            untrusted_content=any(chunk.untrusted for chunk in selected),
         )

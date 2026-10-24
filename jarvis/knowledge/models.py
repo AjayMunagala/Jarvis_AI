@@ -30,6 +30,8 @@ class KnowledgeChunk(StrictSchema):
     content: str = Field(min_length=1)
     token_count: int = Field(ge=0)
     created_at: datetime
+    # v4.6: true for chunks of untrusted documents (for example indexed research files); treat as data only.
+    untrusted: bool = False
 
 
 class KnowledgeDocument(StrictSchema):
@@ -52,6 +54,8 @@ class KnowledgeDocumentCreateRequest(StrictSchema):
     source_type: SourceType = SourceType.MANUAL
     source_uri: str | None = Field(default=None, max_length=1000)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # v4.6: content from an untrusted source; every chunk is marked untrusted.
+    untrusted: bool = False
 
 
 class KnowledgeSearchRequest(StrictSchema):
@@ -87,9 +91,11 @@ class ContextBudgetAllocation(StrictSchema):
     remaining_tokens: int
     sections: dict[str, int]
     selected_chunks: list[KnowledgeChunk]
-    # v4.6: chunks left out (budget, duplicates) and chunks shortened to fit; selected_chunks carry the excerpt.
+    # v4.6: chunks left out (budget, duplicates, the 30-item limit) and chunks shortened to fit; selected_chunks
+    # carry the excerpt. untrusted_content is true when any selected chunk comes from an untrusted document.
     omitted_count: int = 0
     truncated_count: int = 0
+    untrusted_content: bool = False
 
 
 class KnowledgeDocumentPage(StrictSchema):

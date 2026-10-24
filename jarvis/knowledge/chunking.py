@@ -50,9 +50,12 @@ def chunk_text(
         if chunk_str:
             chunks.append(chunk_str)
 
-        start = max(start + 1, end - chunk_overlap)
-        if start >= text_len:
+        if end >= text_len:
             break
+        # v4.6: advance by the window minus the overlap; never by one character (which produced dozens of tiny
+        # suffix chunks at the end of every document and after long lines).
+        next_start = end - chunk_overlap
+        start = next_start if next_start > start else end
 
     return chunks
 

@@ -2,12 +2,15 @@
 
 from datetime import datetime, timezone
 import json
+import logging
 import threading
 from time import monotonic
 from typing import Any, Callable, Protocol
 from uuid import UUID
 
 from jarvis.knowledge.chunking import EMBEDDING_MODEL, compute_deterministic_embedding, cosine_similarity
+
+logger = logging.getLogger(__name__)
 
 SEMANTIC_SCAN_LIMIT = 5000  # most recent chunks scanned per semantic search (v4.6; was an unordered 500)
 EMBEDDING_BACKFILL_LIMIT = 200  # stale vectors replaced per search
@@ -188,8 +191,8 @@ class PostgresKnowledgeStore:
         """
         chunk_sql = """
             INSERT INTO jarvis_app.knowledge_chunks
-                (id, document_id, owner_id, chunk_index, content, token_count, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (id, document_id, owner_id, chunk_index, content, token_count, created_at, untrusted)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """
         emb_sql = """
             INSERT INTO jarvis_app.knowledge_embeddings
@@ -209,7 +212,7 @@ class PostgresKnowledgeStore:
                     execute_with_deadline(
                         conn, deadline, chunk_sql,
                         (chunk.id, chunk.document_id, chunk.owner_id, chunk.chunk_index,
-                         chunk.content, chunk.token_count, chunk.created_at),
+                         chunk.content, chunk.token_count, chunk.created_at, chunk.untrusted),
                         clock=monotonic,
                     )
                     emb = compute_deterministic_embedding(chunk.content)
@@ -250,7 +253,7 @@ class PostgresKnowledgeStore:
     def get_document_chunks(self, owner_id: UUID, document_id: UUID) -> list[KnowledgeChunk]:
         deadline = operation_deadline(self._operation_timeout, clock=monotonic)
         sql = """
-            SELECT id, document_id, owner_id, chunk_index, content, token_count, created_at
+            SELECT id, document_id, owner_id, chunk_index, content, token_count, created_at, untrusted
             FROM jarvis_app.knowledge_chunks
             WHERE document_id = %s AND owner_id = %s
             ORDER BY chunk_index ASC
@@ -267,6 +270,7 @@ class PostgresKnowledgeStore:
                         content=r[4],
                         token_count=r[5],
                         created_at=r[6],
+                        untrusted=r[7],
                     )
                     for r in rows
                 ]
@@ -322,7 +326,8 @@ class PostgresKnowledgeStore:
     ) -> list[tuple[KnowledgeChunk, str]]:
         deadline = operation_deadline(self._operation_timeout, clock=monotonic)
         sql = """
-            SELECT c.id, c.document_id, c.owner_id, c.chunk_index, c.content, c.token_count, c.created_at, d.title
+            SELECT c.id, c.document_id, c.owner_id, c.chunk_index, c.content, c.token_count, c.created_at, d.title,
+                   c.untrusted
             FROM jarvis_app.knowledge_chunks c
             JOIN jarvis_app.knowledge_documents d ON c.document_id = d.id
             WHERE c.owner_id = %s AND (
@@ -345,6 +350,7 @@ class PostgresKnowledgeStore:
                             content=r[4],
                             token_count=r[5],
                             created_at=r[6],
+                            untrusted=r[8],
                         ),
                         r[7],
                     )
@@ -362,7 +368,7 @@ class PostgresKnowledgeStore:
         # process-specific hash) is recomputed from the chunk text and replaced.
         sql = """
             SELECT c.id, c.document_id, c.owner_id, c.chunk_index, c.content, c.token_count, c.created_at, d.title,
-                   e.embedding, e.model_name
+                   e.embedding, e.model_name, c.untrusted
             FROM jarvis_app.knowledge_chunks c
             JOIN jarvis_app.knowledge_documents d ON c.document_id = d.id AND d.owner_id = c.owner_id
             LEFT JOIN jarvis_app.knowledge_embeddings e ON c.id = e.chunk_id
@@ -370,26 +376,19 @@ class PostgresKnowledgeStore:
             ORDER BY c.created_at DESC, c.id
             LIMIT %s
         """
-        upsert_sql = """
-            INSERT INTO jarvis_app.knowledge_embeddings (chunk_id, owner_id, model_name, embedding, created_at)
-            VALUES (%s, %s, %s, %s, now())
-            ON CONFLICT (chunk_id) DO UPDATE SET model_name = EXCLUDED.model_name, embedding = EXCLUDED.embedding
-        """
+        stale: list[tuple[UUID, list[float]]] = []
         try:
             with self._open(deadline) as conn:
                 rows = execute_with_deadline(conn, deadline, sql, (owner_id, SEMANTIC_SCAN_LIMIT),
                                              clock=monotonic).fetchall()
                 scored: list[tuple[float, KnowledgeChunk, str]] = []
-                refreshed = 0
                 for r in rows:
                     if r[9] == EMBEDDING_MODEL and r[8] is not None:
                         vec = json.loads(r[8]) if isinstance(r[8], str) else r[8]
                     else:
-                        vec = compute_deterministic_embedding(r[4])
-                        if refreshed < EMBEDDING_BACKFILL_LIMIT:
-                            execute_with_deadline(conn, deadline, upsert_sql,
-                                                  (r[0], owner_id, EMBEDDING_MODEL, json.dumps(vec)), clock=monotonic)
-                            refreshed += 1
+                        vec = compute_deterministic_embedding(r[4])  # scored in memory; stored afterwards
+                        if len(stale) < EMBEDDING_BACKFILL_LIMIT:
+                            stale.append((r[0], vec))
                     sim = cosine_similarity(query_vector, vec)
                     if sim > 0.05:
                         chunk = KnowledgeChunk(
@@ -400,9 +399,31 @@ class PostgresKnowledgeStore:
                             content=r[4],
                             token_count=r[5],
                             created_at=r[6],
+                            untrusted=r[10],
                         )
                         scored.append((sim, chunk, r[7]))
                 scored.sort(key=lambda x: x[0], reverse=True)
-                return [(item[1], item[2]) for item in scored[:limit]]
+                result = [(item[1], item[2]) for item in scored[:limit]]
         except Exception as exc:
             raise KnowledgeStorageError("Failed to perform semantic search in PostgreSQL.") from exc
+        if stale:
+            self._store_refreshed_embeddings(owner_id, stale)
+        return result
+
+    def _store_refreshed_embeddings(self, owner_id: UUID, stale: list[tuple[UUID, list[float]]]) -> None:
+        """v4.6: best effort, in its own short transaction after the search: a failure (or a chunk deleted in the
+        meantime) never fails the search, and the read itself stays read-only."""
+        sql = """
+            INSERT INTO jarvis_app.knowledge_embeddings (chunk_id, owner_id, model_name, embedding, created_at)
+            SELECT c.id, c.owner_id, %s, %s, now() FROM jarvis_app.knowledge_chunks c
+            WHERE c.id = %s AND c.owner_id = %s
+            ON CONFLICT (chunk_id) DO UPDATE SET model_name = EXCLUDED.model_name, embedding = EXCLUDED.embedding
+        """
+        deadline = operation_deadline(self._operation_timeout, clock=monotonic)
+        try:
+            with self._open(deadline) as conn:
+                for chunk_id, vec in stale:
+                    execute_with_deadline(conn, deadline, sql, (EMBEDDING_MODEL, json.dumps(vec), chunk_id, owner_id),
+                                          clock=monotonic)
+        except Exception as exc:  # noqa: BLE001 - the vectors are recomputed in memory next time
+            logger.warning("Refreshed knowledge embeddings could not be stored: %s", type(exc).__name__)

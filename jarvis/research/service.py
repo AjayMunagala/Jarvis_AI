@@ -16,7 +16,8 @@ from jarvis.research.models import (
     ResearchSynthesisPage,
     ResearchSynthesizeRequest,
 )
-from jarvis.research.parsers import DocumentParsingError, parse_document_content
+from jarvis.research.parsers import (DocumentParsingError, apply_injection_fence, extract_document_text,
+                                    fence_attribute)
 from jarvis.research.stores import ResearchStore
 
 logger = logging.getLogger(__name__)
@@ -54,18 +55,17 @@ class ResearchService:
             except (binascii.Error, ValueError) as exc:  # v4.6: was an unhandled 500
                 raise DocumentParsingError("data_base64 is not valid base64.") from exc
 
-        fenced_text, file_size, page_count = parse_document_content(
+        plain_text, file_size, page_count = extract_document_text(
             filename=req.filename,
             content_type=req.content_type,
             raw_bytes=raw_bytes,
             text_content=req.text_content,
         )
+        fenced_text = apply_injection_fence(req.filename, req.content_type, plain_text)
 
         now = datetime.now(timezone.utc)
         doc_id = uuid4()
         metadata: dict[str, Any] = {"fenced": True, "encoding": "utf-8"}
-        if req.index_in_knowledge:
-            metadata.update(self._index(owner_id, doc_id, req, fenced_text))
         doc = ParsedDocument(
             id=doc_id,
             owner_id=owner_id,
@@ -79,6 +79,11 @@ class ResearchService:
         )
 
         self.store.save_document(doc)
+        if req.index_in_knowledge:
+            # v4.6: indexed only after the research document is stored, so a failed save leaves no orphans.
+            metadata.update(self._index(owner_id, doc_id, req, plain_text))
+            self.store.update_metadata(owner_id, doc_id, metadata)
+            doc = doc.model_copy(update={"metadata": metadata})
         self._audit(
             owner_id,
             "research.document.parse",
@@ -87,7 +92,7 @@ class ResearchService:
         )
         return doc
 
-    def _index(self, owner_id: UUID, doc_id: UUID, req: DocumentParseRequest, fenced_text: str) -> dict[str, Any]:
+    def _index(self, owner_id: UUID, doc_id: UUID, req: DocumentParseRequest, plain_text: str) -> dict[str, Any]:
         """v4.6: index the parsed document in the knowledge store and the knowledge graph; failures are reported."""
         result: dict[str, Any] = {}
         if self.knowledge_service is None:
@@ -95,9 +100,14 @@ class ResearchService:
         try:
             from jarvis.knowledge.models import KnowledgeDocumentCreateRequest, SourceType
 
+            if not plain_text.strip():
+                return {"knowledge_index": "skipped (no text)"}
+            # The plain text is indexed with every chunk marked untrusted: a fence around the whole document
+            # would not survive chunking, so the marking travels with each chunk instead.
             detail = self.knowledge_service.ingest_document(owner_id, KnowledgeDocumentCreateRequest(
-                title=req.filename[:200], content=fenced_text, source_type=SourceType.FILE,
-                source_uri=f"research:{doc_id}", metadata={"research_document_id": str(doc_id), "untrusted": True}))
+                title=fence_attribute(req.filename)[:200], content=plain_text, source_type=SourceType.FILE,
+                source_uri=f"research:{doc_id}", metadata={"research_document_id": str(doc_id), "untrusted": True},
+                untrusted=True))
             result.update(knowledge_index="indexed", knowledge_document_id=str(detail.document.id),
                           knowledge_chunks=len(detail.chunks))
         except Exception as exc:  # noqa: BLE001 - the parsed document is still stored; the failure is visible
@@ -110,7 +120,7 @@ class ResearchService:
             from jarvis.knowledge_graph.models import EntityInput, Provenance
 
             entity = self.graph_service.upsert_entity(owner_id, EntityInput(
-                entity_type="document", name=req.filename[:200], key=f"research:{doc_id}",
+                entity_type="document", name=fence_attribute(req.filename)[:200], key=f"research:{doc_id}",
                 attributes={"knowledge_document_id": result["knowledge_document_id"],
                             "content_type": req.content_type[:100]},
                 provenance=Provenance(source_kind="document", source_ref=f"research:{doc_id}", extractor="rule")))
@@ -133,11 +143,20 @@ class ResearchService:
 
     def delete_document(self, owner_id: UUID, doc_id: UUID) -> bool:
         existing = self.store.get_document(owner_id, doc_id)
+        metadata = (existing.metadata or {}) if existing else {}
+        # v4.6: linked copies go first, best effort, so deleting (or compensating) a document leaves nothing behind
+        # and a failure there never hides the delete.
+        if metadata.get("knowledge_document_id") and self.knowledge_service is not None:
+            try:
+                self.knowledge_service.delete_document(owner_id, UUID(metadata["knowledge_document_id"]))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Linked knowledge copy of %s could not be deleted: %s", doc_id, type(exc).__name__)
+        if metadata.get("graph_entity_id") and self.graph_service is not None:
+            try:
+                self.graph_service.delete_entity(owner_id, metadata["graph_entity_id"])
+            except Exception as exc:  # noqa: BLE001 - for example already deleted
+                logger.warning("Linked graph entity of %s could not be deleted: %s", doc_id, type(exc).__name__)
         deleted = self.store.delete_document(owner_id, doc_id)
-        linked = (existing.metadata or {}).get("knowledge_document_id") if existing else None
-        if deleted and linked and self.knowledge_service is not None:
-            # v4.6: the knowledge copy goes with it, so deleting (or compensating) a document leaves nothing behind.
-            self.knowledge_service.delete_document(owner_id, UUID(linked))
         if deleted:
             self._audit(
                 owner_id,

@@ -1,8 +1,9 @@
 """Document parsing engine with structural injection fencing and resource bounds (v3.4).
 
-v4.6: DOCX files are parsed with the standard library (zip + XML) under strict
-limits: at most 20 MB of uncompressed XML, and no DTDs or entity
-declarations. PDF and other binary files are refused with a clear message
+v4.6: DOCX files are parsed with the standard library (zip + a streaming expat
+parser) under strict limits: at most 5 MB of uncompressed XML, text capped at
+the extraction limit, and no DTD in any encoding (the parser refuses a
+DOCTYPE itself, not just its bytes). PDF and other binary files are refused with a clear message
 instead of being decoded as text and stored as garbage. PDF support needs a
 PDF library, which requires the owner's approval as a new dependency.
 """
@@ -14,13 +15,13 @@ import json
 import re
 import zipfile
 from typing import Any
-from xml.etree import ElementTree
+from xml.parsers import expat
 
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 MAX_EXTRACTED_CHARS = 500 * 1024        # 500 KB
 MAX_PAGES = 100
-MAX_DOCX_XML_BYTES = 20 * 1024 * 1024
-_WORD_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+MAX_DOCX_XML_BYTES = 5 * 1024 * 1024
+_WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 
 class DocumentParsingError(Exception):
@@ -45,15 +46,21 @@ def apply_injection_fence(filename: str, content_type: str, text: str) -> str:
         .replace("<<<END_UNTRUSTED_DOCUMENT_CONTENT>>>", "[[[END_UNTRUSTED_DOCUMENT_CONTENT]]]")
     )
     return (
-        f'<<<UNTRUSTED_DOCUMENT_CONTENT filename="{filename}" content_type="{content_type}">>>\n'
+        f'<<<UNTRUSTED_DOCUMENT_CONTENT filename="{fence_attribute(filename)}" '
+        f'content_type="{fence_attribute(content_type)}">>>\n'
         f"{neutralized}\n"
         f"<<<END_UNTRUSTED_DOCUMENT_CONTENT>>>"
     )
 
 
-def _is_pdf(filename: str, content_type: str, raw_bytes: bytes | None) -> bool:
-    return (filename.endswith(".pdf") or "pdf" in content_type
-            or (raw_bytes is not None and raw_bytes[:5] == b"%PDF-"))
+def fence_attribute(value: str) -> str:
+    """v4.6: a header value that cannot close the fence: no control characters, newlines, quotes or angle brackets."""
+    cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", value)
+    return re.sub(r'[<>"]', "_", cleaned)[:300]
+
+
+def _is_pdf(filename: str, content_type: str, raw_bytes: bytes) -> bool:
+    return raw_bytes[:5] == b"%PDF-" or content_type == "application/pdf" or filename.endswith(".pdf")
 
 
 def _is_docx(filename: str, content_type: str) -> bool:
@@ -61,7 +68,7 @@ def _is_docx(filename: str, content_type: str) -> bool:
 
 
 def extract_docx_text(raw_bytes: bytes) -> str:
-    """Paragraph text of a DOCX file, read with the standard library under strict limits."""
+    """Paragraph text of a DOCX file, read with a streaming expat parser under strict limits."""
     try:
         with zipfile.ZipFile(io.BytesIO(raw_bytes)) as archive:
             try:
@@ -71,26 +78,67 @@ def extract_docx_text(raw_bytes: bytes) -> str:
             if info.file_size > MAX_DOCX_XML_BYTES:
                 raise DocumentTooLargeError("The DOCX text is too large to extract safely.")
             with archive.open(info) as handle:
-                xml = handle.read(MAX_DOCX_XML_BYTES + 1)
+                xml = handle.read(MAX_DOCX_XML_BYTES + 1)  # bounds the real size, whatever the header declares
     except zipfile.BadZipFile as exc:
         raise DocumentParsingError("The file is not a valid DOCX document.") from exc
     if len(xml) > MAX_DOCX_XML_BYTES:
         raise DocumentTooLargeError("The DOCX text is too large to extract safely.")
-    if b"<!DOCTYPE" in xml or b"<!ENTITY" in xml:
-        raise DocumentParsingError("The DOCX document declares XML entities, which are refused for safety.")
+
+    paragraphs: list[str] = []
+    current: list[str] = []
+    state = {"in_text": 0, "chars": 0}
+    parser = expat.ParserCreate(namespace_separator=" ")
+
+    def refuse_dtd(*_args):
+        raise DocumentParsingError("The DOCX document declares a DTD or XML entities, which are refused for safety.")
+
+    def start(name, _attributes):
+        if name == f"{_WORD_NS} t":
+            state["in_text"] += 1
+
+    def end(name):
+        if name == f"{_WORD_NS} t":
+            state["in_text"] -= 1
+        elif name == f"{_WORD_NS} p":
+            if current:
+                paragraphs.append("".join(current))
+                current.clear()
+
+    def text(data):
+        if state["in_text"]:
+            state["chars"] += len(data)
+            if state["chars"] > MAX_EXTRACTED_CHARS:
+                raise DocumentTooLargeError("The DOCX text exceeds the extraction limit.")
+            current.append(data)
+
+    parser.StartDoctypeDeclHandler = refuse_dtd
+    parser.EntityDeclHandler = refuse_dtd
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    parser.CharacterDataHandler = text
     try:
-        root = ElementTree.fromstring(xml)
-    except ElementTree.ParseError as exc:
+        parser.Parse(xml, True)
+    except expat.ExpatError as exc:
         raise DocumentParsingError("The DOCX document XML could not be parsed.") from exc
-    paragraphs = []
-    for paragraph in root.iter(f"{_WORD_NS}p"):
-        text = "".join(node.text or "" for node in paragraph.iter(f"{_WORD_NS}t"))
-        if text:
-            paragraphs.append(text)
     return "\n".join(paragraphs)
 
 
 def parse_document_content(
+    filename: str,
+    content_type: str,
+    raw_bytes: bytes | None = None,
+    text_content: str | None = None,
+) -> tuple[str, int, int]:
+    """Parses raw document content into bounded, structurally fenced text.
+
+    Returns:
+        (fenced_text, file_size_bytes, page_count)
+    """
+    text, file_size, page_count = extract_document_text(filename, content_type, raw_bytes, text_content)
+    return apply_injection_fence(filename, content_type, text), file_size, page_count
+
+
+def extract_document_text(
     filename: str,
     content_type: str,
     raw_bytes: bytes | None = None,
@@ -117,7 +165,8 @@ def parse_document_content(
     extracted_text = ""
     page_count = 1
 
-    if _is_pdf(lower_name, lower_type, raw_bytes):
+    # v4.6: binary checks apply to uploaded bytes only; pre-extracted text_content is always accepted as text.
+    if raw_bytes is not None and _is_pdf(lower_name, lower_type, raw_bytes):
         raise DocumentParsingError("PDF parsing is not available yet: it needs a PDF library, which has not been "
                                    "approved as a dependency. Nothing was stored.")
     if raw_bytes is not None and _is_docx(lower_name, lower_type):
@@ -125,8 +174,8 @@ def parse_document_content(
         if len(extracted_text) > MAX_EXTRACTED_CHARS:
             extracted_text = extracted_text[:MAX_EXTRACTED_CHARS] + "\n[Content truncated at 500KB limit]"
         page_count = min(MAX_PAGES, max(1, len(extracted_text) // 3000 + (1 if len(extracted_text) % 3000 else 0)))
-        return apply_injection_fence(filename, content_type, extracted_text), file_size, page_count
-    if raw_bytes is not None and (b"\x00" in raw_bytes[:8192] or raw_bytes[:2] == b"PK"):
+        return extracted_text, file_size, page_count
+    if raw_bytes is not None and (b"\x00" in raw_bytes[:8192] or raw_bytes[:4] == b"PK\x03\x04"):
         raise DocumentParsingError("This binary file type is not supported; only text, Markdown, JSON, CSV and DOCX "
                                    "documents can be parsed. Nothing was stored.")
 
@@ -158,5 +207,4 @@ def parse_document_content(
     # Heuristic page count: 3,000 characters per page
     page_count = min(MAX_PAGES, max(1, len(extracted_text) // 3000 + (1 if len(extracted_text) % 3000 else 0)))
 
-    fenced = apply_injection_fence(filename, content_type, extracted_text)
-    return fenced, file_size, page_count
+    return extracted_text, file_size, page_count
