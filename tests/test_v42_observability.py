@@ -162,8 +162,10 @@ def test_migration_0060_keeps_every_category_and_matches_the_model():
     from jarvis.audit.models import AuditCategory
 
     sql = (runner.MIGRATIONS_DIR / "0060_audit_subsystem_categories.sql").read_text(encoding="utf-8")
+    latest = (runner.MIGRATIONS_DIR / "0065_integrations.sql").read_text(encoding="utf-8")  # v4.8 adds integration
     for category in get_args(AuditCategory):
-        assert f"'{category}'" in sql
+        assert f"'{category}'" in latest
+        assert f"'{category}'" in sql or category == "integration"
     assert "DROP NOT NULL" in (runner.MIGRATIONS_DIR / "0061_health_telemetry_nullable.sql").read_text(encoding="utf-8")
 
 

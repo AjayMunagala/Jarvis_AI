@@ -23,7 +23,7 @@ TOKEN = "v43-enforced-approvals-token-with-32-chars"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 FINANCE = {"prompt": "Review my financial runway", "dry_run": False}
 MIGRATION = Path(__file__).resolve().parents[1] / "database" / "scripts" / "0062_enforced_approvals.sql"
-LATEST_CATEGORY_MIGRATION = MIGRATION.with_name("0063_workflow_approvals.sql")
+LATEST_CATEGORY_MIGRATION = MIGRATION.with_name("0065_integrations.sql")  # v4.8: the newest category list
 
 
 def make_client(**overrides):
@@ -306,10 +306,11 @@ def test_tool_and_browser_approvals_stay_record_only():
 def test_migration_0062_matches_the_model():
     def categories(path):
         sql = path.read_text(encoding="utf-8")
-        return set(re.search(r"category IN \(([^)]*)\)", sql).group(1).replace("'", "").replace(" ", "").split(","))
+        found = re.search(r"approval_requests_category_allowed\s+CHECK \(category IN \(([^)]*)\)", sql)
+        return set(re.sub(r"[\s']", "", found.group(1)).split(","))
 
     sql = MIGRATION.read_text(encoding="utf-8")
-    allowed = categories(LATEST_CATEGORY_MIGRATION)  # v4.4 (0063) keeps every 0062 category and adds "workflow"
+    allowed = categories(LATEST_CATEGORY_MIGRATION)  # later migrations keep every 0062 category and add more
     assert categories(MIGRATION) < allowed
     assert allowed == set(ApprovalCategory.__args__) and ENFORCED_CATEGORIES < allowed
     assert "ADD COLUMN consumed_at timestamptz" in sql and "DROP TABLE" not in sql.upper()

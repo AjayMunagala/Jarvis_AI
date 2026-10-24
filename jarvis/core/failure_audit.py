@@ -35,7 +35,7 @@ PREFIX_CATEGORY = (
     ("/assistant/", "assistant"), ("/workflows/", "workflow"), ("/knowledge/", "knowledge"),
     ("/research/", "research"), ("/scheduler/", "scheduler"), ("/health/diagnostic", "health"),
     ("/health/security", "health"), ("/finance/", "finance"), ("/improvement/", "improvement"),
-    ("/autonomous/", "orchestration"),
+    ("/autonomous/", "orchestration"), ("/integrations/", "integration"),
 )
 _ID = re.compile(r"/(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Z]{2}-[0-9a-f]{16})(?=/|$)")
 

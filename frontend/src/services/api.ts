@@ -737,6 +737,7 @@ export interface AuditRecord {
   occurred_at: string
   owner_id: string
   category: 'tool' | 'browser' | 'approval' | 'intelligence' | 'orchestration' | 'assistant' | 'workflow'
+    | 'integration'
     | 'knowledge' | 'research' | 'scheduler' | 'health' | 'finance' | 'improvement'
   event_type: string
   decision: string
@@ -752,7 +753,7 @@ export interface ApprovalRequest {
   approval_id: string
   owner_id: string
   // v4.3: autonomous, improvement and quarantine requests are enforced; their approved action runs once.
-  category: 'tool' | 'browser' | 'autonomous' | 'improvement' | 'quarantine' | 'workflow'
+  category: 'tool' | 'browser' | 'autonomous' | 'improvement' | 'quarantine' | 'workflow' | 'integration'
   action: string
   target: string
   reason: string

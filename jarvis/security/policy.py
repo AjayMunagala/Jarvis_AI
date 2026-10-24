@@ -55,6 +55,10 @@ class Capability(StrEnum):
     AUTONOMOUS_READ = "autonomous.read"
     # v4.2: read the per-subsystem status report (no side effects).
     STATUS_READ = "status.read"
+    # Integration and device readiness (v4.8). Activation and state-changing actions also need approval.
+    INTEGRATIONS_READ = "integrations.read"
+    INTEGRATIONS_MANAGE = "integrations.manage"
+    INTEGRATIONS_ACT = "integrations.act"
     AUTONOMOUS_EXECUTE = "autonomous.execute"
     # Advanced intelligence (v5.1-v5.6). None of these grants tool or action execution.
     INTELLIGENCE_READ = "intelligence.read"
@@ -100,6 +104,9 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.AUTONOMOUS_READ,
     Capability.STATUS_READ,
     Capability.AUTONOMOUS_EXECUTE,
+    Capability.INTEGRATIONS_READ,
+    Capability.INTEGRATIONS_MANAGE,
+    Capability.INTEGRATIONS_ACT,
     Capability.INTELLIGENCE_READ,
     Capability.INTELLIGENCE_EVALUATE,
     Capability.KNOWLEDGE_GRAPH_WRITE,

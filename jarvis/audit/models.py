@@ -18,13 +18,15 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 
 # "intelligence" (v5.x hardening, migration 0058); "orchestration" (v4.0 capstone & v3.8 workflows, migration 0059);
 # one category per v3.x subsystem (v4.2, migration 0060).
+# "integration" (v4.8, migration 0065).
 AuditCategory = Literal["tool", "browser", "approval", "intelligence", "orchestration", "assistant", "workflow",
-                        "knowledge", "research", "scheduler", "health", "finance", "improvement"]
+                        "knowledge", "research", "scheduler", "health", "finance", "improvement", "integration"]
 ApprovalState = Literal["pending", "approved", "rejected", "expired"]
 # v4.3 (migration 0062): enforced categories, whose approved action runs once.
 # v4.4 (migration 0063): workflow runs with write steps.
-ApprovalCategory = Literal["tool", "browser", "autonomous", "improvement", "quarantine", "workflow"]
-ENFORCED_CATEGORIES = frozenset({"autonomous", "improvement", "quarantine", "workflow"})
+# v4.8 (migration 0065): integration activation and state-changing device actions.
+ApprovalCategory = Literal["tool", "browser", "autonomous", "improvement", "quarantine", "workflow", "integration"]
+ENFORCED_CATEGORIES = frozenset({"autonomous", "improvement", "quarantine", "workflow", "integration"})
 ApprovalExecution = Literal["not_available", "single_use"]
 RiskLevel = Literal["low", "medium", "high", "critical", "consequential"]
 DetailValue = StrictStr | int | float | bool | None

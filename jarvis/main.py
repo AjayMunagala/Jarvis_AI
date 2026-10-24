@@ -32,6 +32,9 @@ from jarvis.api.routes.health_diagnostic import router as health_diagnostic_rout
 from jarvis.api.routes.finance import router as finance_router
 from jarvis.api.routes.improvement import router as improvement_router
 from jarvis.api.routes.autonomous import router as autonomous_router
+from jarvis.api.routes.integrations import router as integrations_router
+from jarvis.integrations.service import IntegrationService
+from jarvis.integrations.stores import MemoryEnrollmentStore, PostgresEnrollmentStore
 from jarvis.autonomous.coordinator import AutonomousCoordinator
 from jarvis.assistant.service import AssistantService
 from jarvis.assistant.stores import MemoryAssistantStore, PostgresAssistantStore
@@ -249,9 +252,18 @@ def create_app(
         improvement_service=app.state.improvement_service,
         audit_service=app.state.audit_service,
     )
+    # v4.8: integration enrollments (mock adapter only); activation and state-changing actions need approval.
+    if resolved_settings.persistence_enabled:
+        url = resolved_settings.persistence_database_url.get_secret_value()
+        enrollment_store = PostgresEnrollmentStore(
+            url, connect_timeout_seconds=resolved_settings.persistence_connect_timeout_seconds,
+            operation_timeout_seconds=resolved_settings.persistence_operation_timeout_seconds)
+    else:
+        enrollment_store = MemoryEnrollmentStore()
+    app.state.integration_service = IntegrationService(enrollment_store, audit_service=app.state.audit_service)
     # v4.3: autonomous writes, improvement apply/restore and quarantine/restore wait for an approved request.
     for component in (app.state.autonomous_coordinator, app.state.improvement_service, app.state.health_service,
-                      app.state.workflow_service):
+                      app.state.workflow_service, app.state.integration_service):
         component.approval_service = app.state.approval_service
     # v4.2: one truthful status source, also used by health snapshots, scheduled health checks and the
     # autonomous overview (each previously reported fixed "operational"/"healthy" values).
@@ -301,6 +313,7 @@ def create_app(
     app.include_router(autonomous_router)
     app.include_router(intelligence_router)
     app.include_router(status_router)
+    app.include_router(integrations_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
