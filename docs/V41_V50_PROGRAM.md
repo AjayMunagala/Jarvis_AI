@@ -65,7 +65,8 @@ Results are always labelled as real, mock or unavailable.
 | v4.5 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review found one blocking defect (a run could resurrect a deleted job or rewind the schedule), since fixed with nine other findings | Python 1160 passed; live PostgreSQL 61 passed; frontend unchanged | branch head at push |
 | v4.6 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review found three blocking defects in research indexing (fence lost on chunking, filename breaking the fence, a chunker that crawled), since fixed with eight other findings | Python 1182 passed; live PostgreSQL 63 passed; frontend unchanged | branch head at push |
 | v4.7 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review (no blocking issues; 7 findings, all fixed) | Python 1194 passed; live PostgreSQL 63 passed; Vitest 132; E2E 11 | branch head at push |
-| v4.8–v5.0 | NOT STARTED | — | — |
+| v4.8 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review (no blocking issues; 2 medium and 4 low findings, all fixed) | Python 1204 passed; live PostgreSQL 64 passed | branch head at push |
+| v4.9–v5.0 | NOT STARTED | — | — |
 
 ---
 
@@ -581,4 +582,70 @@ Pre-existing, outside v4.7: `MemoryAssistantStore.list_tasks` can fail when stor
 These were run on the v4.7 commit in a separate clean checkout.
 
 **Not covered:** chat still uses the configured provider, not the v5.1 model router.
+
+## v4.8 — Integration and device readiness
+
+### Why it was needed
+There was no safe way to connect anything outside JARVIS: no adapter framework, no enrollment or revocation, and no way to refer to a credential without storing it. As planned, only a mock adapter is provided; no real device is controlled.
+
+### Changes
+1. **Adapter framework** (`jarvis/integrations`).
+   - An adapter declares each of its actions as read-only or state-changing, and validates the arguments.
+   - Only `mock.lamp` is registered: a simulated lamp whose state lives in memory.
+   - A real adapter must implement the same interface and needs its own review before it is registered.
+2. **Enrollments** move from `pending` to `active` to `revoked`.
+   - Activation needs an approved request (category `integration`), bound to the enrollment, adapter and secret reference.
+   - Revocation is immediate, idempotent and final.
+   - A revoke waits for an action that is already running and wins for every later one; revoke and actions are serialized per enrollment.
+3. **Actions.**
+   - A read-only action runs directly on an active enrollment.
+   - A state-changing action needs an approved request bound to the enrollment, the action and its exact validated arguments.
+   - An approval for one enrollment or action never covers another.
+4. **Secret references.** An enrollment stores a reference, `env:JARVIS_INTEGRATION_<NAME>`, never the value.
+   - The value is resolved only when an action runs.
+   - It is never stored, returned, logged or audited.
+   - The API shows only `present`, `missing` or `not_required`.
+   - The variable must be a real process environment variable; values in `.env` are not exported.
+   - The required prefix stops a reference from naming other settings, such as the auth token or the database URL.
+5. **API and database.**
+   - Endpoints:
+     - `/integrations/adapters`;
+     - `/integrations/enrollments` (list and create);
+     - `.../{id}` (get);
+     - `.../{id}/activate`;
+     - `.../{id}/revoke`;
+     - `.../{id}/actions`.
+   - New capabilities: `integrations.read`, `integrations.manage` and `integrations.act`.
+   - Migration 0065 adds the enrollment table with state and format checks, and the `integration` audit and approval categories. Every earlier category is kept.
+   - `/status` reports integrations as `mock`.
+
+### Independent review and acceptance
+The reviewer confirmed:
+- the conditional state transitions;
+- approval binding;
+- the secret-reference pattern, including newline, Unicode and case bypass attempts, and its database check;
+- that no secret appears in logs, audit records or output;
+- input bounds and error mapping;
+- the capability split;
+- the migration.
+
+It found two medium issues:
+1. A revoke during an in-flight action did not stop it, and the action reported success.
+2. `/status` showed the wrong storage.
+
+It also found four low issues, and every finding was fixed with tests before acceptance:
+- an unregistered adapter broke revoke;
+- the `.env` behaviour was undocumented;
+- a docstring named the wrong migration;
+- owner-isolation and approval-binding tests were too weak.
+
+**Tests:**
+- `tests/test_v48_integrations.py`: 10 tests.
+- `integration_tests/test_v48_postgres.py`: durable lifecycle and the database checks.
+- Python: 1204 passed, 0 failed, 17 skipped.
+- Live PostgreSQL: 64 passed.
+
+These were run on the v4.8 commit in a separate clean checkout.
+
+**Known limit:** the revoke/action lock is per process. A multi-process deployment would also need a database row lock.
 

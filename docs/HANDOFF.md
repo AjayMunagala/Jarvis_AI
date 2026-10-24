@@ -671,3 +671,11 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - **Read-only:** chat never writes.
 - **Failure handling:** each source needs its read capability, and a failing source degrades the chat instead of failing it.
 - **Details:** `docs/V41_V50_PROGRAM.md`.
+
+## v4.8 — Integration and device readiness (accepted by the project lead on 2026-10-24)
+
+- **Framework:** `jarvis/integrations` provides adapters and enrollments. Only `mock.lamp` exists, so no real device is controlled.
+- **Approvals:** activation and state-changing actions need an approved request. Revoke is immediate, final, and waits for an in-flight action.
+- **Secrets:** they are `env:JARVIS_INTEGRATION_*` references only, and their values are never stored or shown.
+- **Migration:** 0065.
+- **Details:** `docs/V41_V50_PROGRAM.md`.

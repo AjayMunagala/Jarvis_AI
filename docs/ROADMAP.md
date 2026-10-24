@@ -319,3 +319,6 @@ The scope was derived from the repository, because no earlier document defined t
 - **v4.7 Integrated assistant experience in chat: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
   - Opt-in workspace context (`JARVIS_CHAT_WORKSPACE_CONTEXT_ENABLED`): cited, read-only knowledge excerpts and summaries of tasks, reminders and calendar.
   - Default chat is unchanged; chat never writes.
+- **v4.8 Integration and device readiness: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
+  - Adapter framework with a simulated lamp only (no real device control); enrollments pending -> active -> revoked.
+  - Activation and state-changing actions need approval; revocation is immediate and final; secrets are references only (migration 0065).
