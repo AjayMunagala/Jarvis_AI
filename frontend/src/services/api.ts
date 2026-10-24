@@ -183,14 +183,14 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
   if (response.status === 204) return undefined as T
   if (!response.ok && (path.startsWith('/browser') || path.startsWith('/tools') || path === '/capabilities'
     || path.startsWith('/approvals') || path.startsWith('/activity') || path.startsWith('/assistant')
-    || path.startsWith('/scheduler'))) {
+    || path.startsWith('/scheduler') || path.startsWith('/workflows') || path.startsWith('/integrations'))) {
     // Browser and tool routes return short, sanitized policy messages that explain blocks.
     let detail = ''
     try {
       const data = await response.clone().json() as { detail?: unknown }
       if (typeof data.detail === 'string') detail = data.detail.slice(0, 300)
     } catch { /* fall through to the generic message */ }
-    throw new Error(detail || 'The browser request failed.')
+    throw new Error(detail || (path.startsWith('/browser') ? 'The browser request failed.' : 'JARVIS could not complete that request. Check the fields and try again.'))
   }
   if (!response.ok) {
     if (path === '/coding/analyze') {
@@ -813,6 +813,240 @@ export function decideApproval(approvalId: string, approve: boolean, note: strin
   return request<ApprovalRequest>(`/approvals/${encodeURIComponent(approvalId)}/${approve ? 'approve' : 'reject'}`, json(note ? { note } : {}), false, auth)
 }
 
+// ----------------------------------------------- approval-gated responses (v6.7)
+
+/** HTTP 202 body of an approval-gated route: nothing ran; the owner must approve ``approval`` first. */
+export interface ApprovalRequiredResponse { status: 'approval_required'; detail: string; approval: ApprovalRequest }
+
+export function isApprovalRequired(value: unknown): value is ApprovalRequiredResponse {
+  if (!value || typeof value !== 'object') return false
+  const data = value as { status?: unknown; approval?: unknown }
+  return data.status === 'approval_required' && !!data.approval && typeof data.approval === 'object'
+    && typeof (data.approval as { approval_id?: unknown }).approval_id === 'string'
+}
+
+export const APPROVAL_ID_PATTERN = /^AR-[a-f0-9]{16}$/
+
+// ----------------------------------------------- workflows (v3.2, UI v6.7)
+
+export type WorkflowStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type WorkflowStepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+export type WorkflowStepType = 'tool' | 'assistant' | 'transform' | 'noop'
+export interface WorkflowStepDefinition {
+  step_id: string
+  name: string
+  step_type: WorkflowStepType
+  action: string
+  parameters: Record<string, unknown>
+  depends_on: string[]
+}
+export interface WorkflowDefinition {
+  id: string
+  owner_id: string
+  name: string
+  description: string | null
+  dag_spec: { steps: WorkflowStepDefinition[] }
+  created_at: string
+  updated_at: string
+}
+export interface WorkflowDefinitionPage { items: WorkflowDefinition[]; total: number }
+export interface WorkflowDefinitionCreate {
+  name: string
+  description?: string | null
+  dag_spec: { steps: (Pick<WorkflowStepDefinition, 'step_id' | 'name'> & Partial<WorkflowStepDefinition>)[] }
+}
+export interface WorkflowRun {
+  id: string
+  workflow_id: string | null
+  owner_id: string
+  status: WorkflowStatus
+  inputs: Record<string, unknown>
+  outputs: Record<string, unknown>
+  error_message: string | null
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+}
+export interface WorkflowStepRun {
+  id: string
+  run_id: string
+  step_id: string
+  step_name: string
+  status: WorkflowStepStatus
+  inputs: Record<string, unknown>
+  outputs: Record<string, unknown>
+  error_message: string | null
+  recovery_metadata: Record<string, unknown>
+  started_at: string | null
+  completed_at: string | null
+}
+export interface WorkflowRunPage { items: WorkflowRun[]; total: number }
+export interface WorkflowRunDetail { run: WorkflowRun; steps: WorkflowStepRun[] }
+export interface WorkflowRunTrigger { inputs?: Record<string, unknown>; approval_id?: string; wait?: boolean }
+
+export function listWorkflows(limit: number, offset: number, auth?: ApiAuth): Promise<WorkflowDefinitionPage> {
+  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  return request<WorkflowDefinitionPage>(`/workflows/definitions?${query.toString()}`, undefined, false, auth)
+}
+
+export function createWorkflow(body: WorkflowDefinitionCreate, auth?: ApiAuth): Promise<WorkflowDefinition> {
+  return request<WorkflowDefinition>('/workflows/definitions', json(body), false, auth)
+}
+
+export function deleteWorkflow(workflowId: string, auth?: ApiAuth): Promise<void> {
+  return request<void>(`/workflows/definitions/${encodeURIComponent(workflowId)}`, { method: 'DELETE' }, false, auth)
+}
+
+/** 201 with the run, or 202 when the workflow has write steps and needs an approved request (nothing ran). */
+export function runWorkflow(workflowId: string, body: WorkflowRunTrigger, auth?: ApiAuth): Promise<WorkflowRunDetail | ApprovalRequiredResponse> {
+  return request<WorkflowRunDetail | ApprovalRequiredResponse>(`/workflows/definitions/${encodeURIComponent(workflowId)}/run`, json(body), false, auth)
+}
+
+export function listWorkflowRuns(
+  options: { workflowId?: string; status?: WorkflowStatus; limit?: number; offset?: number } = {}, auth?: ApiAuth,
+): Promise<WorkflowRunPage> {
+  const query = new URLSearchParams({ limit: String(options.limit ?? 50), offset: String(options.offset ?? 0) })
+  if (options.workflowId) query.set('workflow_id', options.workflowId)
+  if (options.status) query.set('status', options.status)
+  return request<WorkflowRunPage>(`/workflows/runs?${query.toString()}`, undefined, false, auth)
+}
+
+export function getWorkflowRun(runId: string, auth?: ApiAuth): Promise<WorkflowRunDetail> {
+  return request<WorkflowRunDetail>(`/workflows/runs/${encodeURIComponent(runId)}`, undefined, false, auth)
+}
+
+export function cancelWorkflowRun(runId: string, auth?: ApiAuth): Promise<WorkflowRunDetail> {
+  return request<WorkflowRunDetail>(`/workflows/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }, false, auth)
+}
+
+// ----------------------------------------------- scheduler jobs (v3.5, UI v6.7)
+
+export type ScheduleType = 'cron' | 'interval' | 'once'
+export type JobLastStatus = 'idle' | 'running' | 'success' | 'failure'
+export interface ScheduledJob {
+  id: string
+  owner_id: string
+  name: string
+  schedule_type: ScheduleType
+  schedule_expr: string
+  action_type: string
+  payload: Record<string, unknown>
+  enabled: boolean
+  next_run_at: string | null
+  last_run_at: string | null
+  last_status: JobLastStatus
+  created_at: string
+  updated_at: string
+}
+export interface ScheduledJobPage { items: ScheduledJob[]; total: number }
+export interface JobCreate {
+  name: string
+  schedule_type: ScheduleType
+  schedule_expr: string
+  action_type: string
+  payload?: Record<string, unknown>
+  enabled?: boolean
+}
+export type JobUpdate = Partial<JobCreate>
+export interface JobRunResult {
+  job_id: string
+  status: 'success' | 'failure'
+  started_at: string
+  completed_at: string
+  output: Record<string, unknown>
+  error: string | null
+}
+
+export function listJobs(limit: number, offset: number, auth?: ApiAuth): Promise<ScheduledJobPage> {
+  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  return request<ScheduledJobPage>(`/scheduler/jobs?${query.toString()}`, undefined, false, auth)
+}
+
+export function createJob(body: JobCreate, auth?: ApiAuth): Promise<ScheduledJob> {
+  return request<ScheduledJob>('/scheduler/jobs', json(body), false, auth)
+}
+
+export function updateJob(jobId: string, body: JobUpdate, auth?: ApiAuth): Promise<ScheduledJob> {
+  return request<ScheduledJob>(`/scheduler/jobs/${encodeURIComponent(jobId)}`, { ...json(body), method: 'PATCH' }, false, auth)
+}
+
+export function deleteJob(jobId: string, auth?: ApiAuth): Promise<void> {
+  return request<void>(`/scheduler/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' }, false, auth)
+}
+
+export function runJob(jobId: string, auth?: ApiAuth): Promise<JobRunResult> {
+  return request<JobRunResult>(`/scheduler/jobs/${encodeURIComponent(jobId)}/run`, { method: 'POST' }, false, auth)
+}
+
+// ----------------------------------------------- integrations (v4.8, UI v6.7)
+
+export type EnrollmentState = 'pending' | 'active' | 'revoked'
+export interface AdapterAction { name: string; read_only: boolean; description: string }
+export interface AdapterDescriptor {
+  adapter_id: string
+  name: string
+  mode: 'mock'
+  requires_secret: boolean
+  actions: AdapterAction[]
+  limitations: string[]
+}
+export interface Enrollment {
+  enrollment_id: string
+  owner_id: string
+  adapter_id: string
+  display_name: string
+  /** A reference such as env:JARVIS_INTEGRATION_LAMP; never the secret value. */
+  secret_ref: string | null
+  state: EnrollmentState
+  created_at: string
+  activated_at: string | null
+  revoked_at: string | null
+  last_action_at: string | null
+  durable: boolean
+}
+export interface EnrollmentView { enrollment: Enrollment; secret_status: 'not_required' | 'present' | 'missing' }
+export interface EnrollmentPage { durable_storage: boolean; enrollments: EnrollmentView[] }
+export interface EnrollmentCreate { adapter_id: string; display_name: string; secret_ref?: string | null }
+export interface IntegrationActionRequest { action: string; arguments: Record<string, unknown>; approval_id?: string }
+export interface IntegrationActionResult {
+  enrollment_id: string
+  action: string
+  read_only: boolean
+  mode: 'mock'
+  output: Record<string, unknown>
+  executed_at: string
+  approval_id: string | null
+}
+
+export const SECRET_REF_PATTERN = /^env:JARVIS_INTEGRATION_[A-Z0-9_]{1,64}$/
+
+export function listAdapters(auth?: ApiAuth): Promise<AdapterDescriptor[]> {
+  return request<AdapterDescriptor[]>('/integrations/adapters', undefined, false, auth)
+}
+
+export function listEnrollments(limit: number, auth?: ApiAuth): Promise<EnrollmentPage> {
+  return request<EnrollmentPage>(`/integrations/enrollments?limit=${encodeURIComponent(String(limit))}`, undefined, false, auth)
+}
+
+export function createEnrollment(body: EnrollmentCreate, auth?: ApiAuth): Promise<EnrollmentView> {
+  return request<EnrollmentView>('/integrations/enrollments', json(body), false, auth)
+}
+
+/** Activation always needs an approved request: the first call returns 202, the repeat carries approval_id. */
+export function activateEnrollment(enrollmentId: string, approvalId: string | undefined, auth?: ApiAuth): Promise<EnrollmentView | ApprovalRequiredResponse> {
+  const query = approvalId ? `?${new URLSearchParams({ approval_id: approvalId }).toString()}` : ''
+  return request<EnrollmentView | ApprovalRequiredResponse>(`/integrations/enrollments/${encodeURIComponent(enrollmentId)}/activate${query}`, { method: 'POST' }, false, auth)
+}
+
+export function revokeEnrollment(enrollmentId: string, auth?: ApiAuth): Promise<EnrollmentView> {
+  return request<EnrollmentView>(`/integrations/enrollments/${encodeURIComponent(enrollmentId)}/revoke`, { method: 'POST' }, false, auth)
+}
+
+/** Read-only actions run at once; state-changing ones return 202 until repeated with an approved approval_id. */
+export function runIntegrationAction(enrollmentId: string, body: IntegrationActionRequest, auth?: ApiAuth): Promise<IntegrationActionResult | ApprovalRequiredResponse> {
+  return request<IntegrationActionResult | ApprovalRequiredResponse>(`/integrations/enrollments/${encodeURIComponent(enrollmentId)}/actions`, json(body), false, auth)
+}
+
 // ------------------------------------------------- unified interface (v3.0)
 
 export interface InterfaceConfig {
@@ -924,7 +1158,7 @@ export function updateTask(
   body: { title?: string; description?: string; status?: TaskStatus; priority?: TaskPriority; due_date?: string; tags?: string[] },
   auth?: ApiAuth,
 ): Promise<TaskItem> {
-  return request<TaskItem>(`/assistant/tasks/${encodeURIComponent(taskId)}`, { method: 'PATCH', ...json(body) }, false, auth)
+  return request<TaskItem>(`/assistant/tasks/${encodeURIComponent(taskId)}`, { ...json(body), method: 'PATCH' }, false, auth)
 }
 
 export function deleteTask(taskId: string, auth?: ApiAuth): Promise<void> {
@@ -956,7 +1190,7 @@ export function updateNote(
   body: { title?: string; content?: string; tags?: string[] },
   auth?: ApiAuth,
 ): Promise<NoteItem> {
-  return request<NoteItem>(`/assistant/notes/${encodeURIComponent(noteId)}`, { method: 'PATCH', ...json(body) }, false, auth)
+  return request<NoteItem>(`/assistant/notes/${encodeURIComponent(noteId)}`, { ...json(body), method: 'PATCH' }, false, auth)
 }
 
 export function deleteNote(noteId: string, auth?: ApiAuth): Promise<void> {
@@ -986,7 +1220,7 @@ export function updateReminder(
   body: { title?: string; remind_at?: string; status?: ReminderStatus },
   auth?: ApiAuth,
 ): Promise<ReminderItem> {
-  return request<ReminderItem>(`/assistant/reminders/${encodeURIComponent(reminderId)}`, { method: 'PATCH', ...json(body) }, false, auth)
+  return request<ReminderItem>(`/assistant/reminders/${encodeURIComponent(reminderId)}`, { ...json(body), method: 'PATCH' }, false, auth)
 }
 
 export function deleteReminder(reminderId: string, auth?: ApiAuth): Promise<void> {

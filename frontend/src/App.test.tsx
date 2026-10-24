@@ -4,11 +4,18 @@ import userEvent from '@testing-library/user-event'
 import App from './App'
 import './styles.css'
 import { getConversationMessages, getInterfaceConfig, getMemory, getNotifications, getReadiness, listConversations, listMemories, sendChatMessage, type ConversationPage, type ReadinessResponse } from './services/api'
+import { getActivity, getApprovals, listAdapters, listEnrollments, listJobs, listWorkflowRuns, listWorkflows, runWorkflow, type ApprovalRequest } from './services/api'
 
 vi.mock('./services/api', () => ({
   sendChatMessage: vi.fn(), listConversations: vi.fn(), getConversationMessages: vi.fn(), listMemories: vi.fn(), searchMemories: vi.fn(),
   createMemory: vi.fn(), updateMemory: vi.fn(), deleteMemory: vi.fn(), getMemory: vi.fn(), getReadiness: vi.fn(), analyzeCoding: vi.fn(), getInterfaceConfig: vi.fn(),
   getNotifications: vi.fn(), markNotificationRead: vi.fn(),
+  // v6.7 views
+  getActivity: vi.fn(), getApprovals: vi.fn(), decideApproval: vi.fn(),
+  listWorkflows: vi.fn(), listWorkflowRuns: vi.fn(), createWorkflow: vi.fn(), deleteWorkflow: vi.fn(), runWorkflow: vi.fn(), getWorkflowRun: vi.fn(), cancelWorkflowRun: vi.fn(),
+  listJobs: vi.fn(), createJob: vi.fn(), updateJob: vi.fn(), deleteJob: vi.fn(), runJob: vi.fn(),
+  listAdapters: vi.fn(), listEnrollments: vi.fn(), createEnrollment: vi.fn(), activateEnrollment: vi.fn(), revokeEnrollment: vi.fn(), runIntegrationAction: vi.fn(),
+  isApprovalRequired: (value: { status?: string }) => value?.status === 'approval_required', SECRET_REF_PATTERN: /^env:JARVIS_INTEGRATION_[A-Z0-9_]{1,64}$/,
 }))
 const sendMock = vi.mocked(sendChatMessage)
 const listConversationsMock = vi.mocked(listConversations)
@@ -592,6 +599,45 @@ describe('JARVIS unified interface and voice (v3.0)', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Notifications' }))
     expect(await screen.findByText('Unlock the workspace to view notifications.')).toBeInTheDocument()
     expect(getNotifications).not.toHaveBeenCalled()
+  })
+
+  it('opens the Workflows, Scheduler and Integrations views locked, without any request', async () => {
+    render(<App />)
+    for (const label of ['Workflows', 'Scheduler', 'Integrations']) {
+      expect(screen.getByRole('button', { name: label })).not.toHaveTextContent('SOON')
+    }
+    await userEvent.click(screen.getByRole('button', { name: 'Workflows' }))
+    expect(await screen.findByText('Unlock the workspace to view and run workflows.')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Scheduler' }))
+    expect(await screen.findByText('Unlock the workspace to view and manage scheduled jobs.')).toBeInTheDocument()
+    expect(screen.getByText(/Cron expressions are evaluated in UTC/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Integrations' }))
+    expect(await screen.findByText('Unlock the workspace to view and manage integrations.')).toBeInTheDocument()
+    expect(listWorkflows).not.toHaveBeenCalled()
+    expect(listJobs).not.toHaveBeenCalled()
+    expect(listEnrollments).not.toHaveBeenCalled()
+    expect(listAdapters).not.toHaveBeenCalled()
+  })
+
+  it('sends the owner from a gated workflow run to the Activity approvals and keeps the approval ID for the repeat run', async () => {
+    const approval = { approval_id: 'AR-0123456789abcdef', state: 'pending', execution: 'single_use' } as ApprovalRequest
+    vi.mocked(listWorkflows).mockResolvedValue({ total: 1, items: [{ id: 'wf-1', owner_id: 'o', name: 'Weekly review', description: null, created_at: '', updated_at: '',
+      dag_spec: { steps: [{ step_id: 'make', name: 'Create task', step_type: 'assistant', action: 'tasks.create', parameters: {}, depends_on: [] }] } }] })
+    vi.mocked(listWorkflowRuns).mockResolvedValue({ items: [], total: 0 })
+    vi.mocked(runWorkflow).mockResolvedValue({ status: 'approval_required', detail: 'Approval required.', approval })
+    vi.mocked(getActivity).mockResolvedValue({ durable_storage: false, storage_note: 'In memory.', events: [] })
+    vi.mocked(getApprovals).mockResolvedValue({ durable_storage: false, execution_note: 'Approve to allow one run.', approvals: [] })
+    render(<App />)
+    await unlockWithToken()
+    await userEvent.click(screen.getByRole('button', { name: 'Workflows' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Run Weekly review' }))
+    expect(runWorkflow).toHaveBeenCalledWith('wf-1', { inputs: {} }, expect.objectContaining({ token: 'a'.repeat(32) }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Open approvals' }))
+    expect(await screen.findByRole('heading', { name: 'Activity' })).toBeInTheDocument()
+    expect(getApprovals).toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', { name: 'Workflows' }))
+    expect(await screen.findByRole('button', { name: 'Run with approval' })).toBeInTheDocument()
+    expect(screen.getByText('AR-0123456789abcdef')).toBeInTheDocument()
   })
 
   it('polls unread notifications after unlock and shows only newly delivered ones on the desktop', async () => {

@@ -42,6 +42,7 @@ The v5.1 router stays available for evaluations. Routing chat across several mod
 | v6.4 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (mark-as-read used POST; the API only accepts PATCH), since fixed with six other findings | Vitest 141 passed (twice); Playwright E2E 11 passed; TypeScript clean |
 | v6.5 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found no blocking issues; one medium and seven low findings fixed | Python 1324 passed; live PostgreSQL 73 passed (tutor live tests rerun after the fixes) |
 | v6.6 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (an "ok" forecast could rest on one fold with no uncertainty band), since fixed with eight other findings | Python 1371 passed; live PostgreSQL 75 passed; short-history probe: 7–9 months give insufficient_history, 10+ give bands on every point |
+| v6.7 | IMPLEMENTED, TESTED; in review | Vitest 187 passed; Playwright E2E 12 passed; TypeScript clean |
 
 ## v6.1 — Usage and cost tracking, fallback model
 

@@ -1,0 +1,19 @@
+/* v6.7: shared styles for the Workflows, Scheduler and Integrations views (on top of ActivityPanel.css). */
+.ops-form { display: grid; gap: 8px; max-width: 640px; padding: 12px; background: #0c1219; border: 1px solid #2c3e52; border-radius: 8px; }
+.ops-form label { display: grid; gap: 4px; font-size: 13px; color: #c9d6e2; }
+.ops-form input, .ops-form select, .ops-form textarea { padding: 7px 9px; color: inherit; background: #111b25; border: 1px solid #3b5068; border-radius: 6px; font: inherit; }
+.ops-form textarea { min-height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.ops-form .ops-inline { display: flex; align-items: center; gap: 8px; }
+.ops-list { list-style: none; padding-left: 0; display: grid; gap: 10px; }
+.ops-list > li { padding: 12px; background: #0c1219; border: 1px solid #2c3e52; border-radius: 8px; }
+.ops-list code, .ops-steps code { color: #8fa7b3; font-size: 12px; }
+.ops-steps { padding-left: 20px; font-size: 13px; }
+.ops-status { padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; background: #1d2f42; color: #a5d3ff; }
+.ops-status-completed, .ops-status-success, .ops-status-active, .ops-status-present, .ops-status-enabled { background: #123326; color: #6ee7b7; }
+.ops-status-failed, .ops-status-failure, .ops-status-missing, .ops-status-revoked { background: #3a1616; color: #ffb6b6; }
+.ops-status-running, .ops-status-pending, .ops-status-disabled { background: #382d12; color: #fde047; }
+.ops-output { margin: 6px 0 0; padding: 8px; max-height: 220px; overflow: auto; font-size: 12px; background: #080d12; border-radius: 6px; white-space: pre-wrap; }
+.gate-approval { margin: 10px 0; padding: 12px; background: #0c1219; border: 1px solid #ca8a04; border-radius: 8px; }
+.gate-approval code { color: #fde047; }
+.gate-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.activity-actions { flex-wrap: wrap; }

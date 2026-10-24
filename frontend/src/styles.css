@@ -46,6 +46,8 @@ button:focus-visible, textarea:focus-visible { outline: 2px solid #5bc8e8; outli
 .nav-soon { margin-left: auto; font-family: var(--mono); font-size: 9px; letter-spacing: .04em; color: #768392; }
 .history-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; margin: 27px 9px 10px; color: #788697; }
 .history-list { min-width: 0; display: grid; gap: 3px; overflow-x: hidden; overflow-y: auto; }
+/* v6.7: more views in the nav; keep the conversation list usable (the sidebar scrolls) instead of squeezing it to nothing. */
+.history-list { min-height: 112px; align-content: start; }
 .history-empty { margin: 2px 9px; max-width: 175px; color: #657182; font-size: 11px; line-height: 1.55; }
 .history-status { margin: 2px 9px; color: #91a0b0; font-size: 10px; }
 .history-error { display: grid; gap: 7px; margin: 3px 5px; padding: 9px; border: 1px solid rgba(232,123,110,.25); border-radius: 6px; color: #e6aaa3; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
