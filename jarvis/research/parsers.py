@@ -3,9 +3,16 @@
 v4.6: DOCX files are parsed with the standard library (zip + a streaming expat
 parser) under strict limits: at most 5 MB of uncompressed XML, text capped at
 the extraction limit, and no DTD in any encoding (the parser refuses a
-DOCTYPE itself, not just its bytes). PDF and other binary files are refused with a clear message
-instead of being decoded as text and stored as garbage. PDF support needs a
-PDF library, which requires the owner's approval as a new dependency.
+DOCTYPE itself, not just its bytes). Other binary files are refused with a clear message instead of being
+decoded as text and stored as garbage.
+
+v6.2: PDF text is extracted with ``pypdf`` (the optional ``documents`` extra;
+without it, PDFs are refused with a message saying how to enable them).
+Encrypted PDFs are refused, at most ``MAX_PAGES`` pages are read (the rest is
+cut off with a visible note), the text is capped like DOCX, and extraction
+stops after ``PDF_TIME_BUDGET_SECONDS`` so a hostile file cannot hang a
+request. A PDF that contains only images yields no text and is reported as
+such (no OCR).
 """
 
 import base64
@@ -21,6 +28,7 @@ MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 MAX_EXTRACTED_CHARS = 500 * 1024        # 500 KB
 MAX_PAGES = 100
 MAX_DOCX_XML_BYTES = 5 * 1024 * 1024
+PDF_TIME_BUDGET_SECONDS = 20.0
 _WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 
@@ -61,6 +69,53 @@ def fence_attribute(value: str) -> str:
 
 def _is_pdf(filename: str, content_type: str, raw_bytes: bytes) -> bool:
     return raw_bytes[:5] == b"%PDF-" or content_type == "application/pdf" or filename.endswith(".pdf")
+
+
+def extract_pdf_text(raw_bytes: bytes) -> tuple[str, int]:
+    """Text and page count of a PDF, read with pypdf under strict limits (v6.2)."""
+    import time
+
+    try:
+        from pypdf import PdfReader
+        from pypdf.errors import PdfReadError
+    except ImportError as exc:
+        raise DocumentParsingError("PDF parsing needs the optional 'documents' extra (pip install -e \".[documents]\"). "
+                                   "Nothing was stored.") from exc
+    try:
+        reader = PdfReader(io.BytesIO(raw_bytes), strict=False)
+        if reader.is_encrypted:
+            raise DocumentParsingError("The PDF is encrypted or password-protected; it was not opened. Nothing was stored.")
+        total_pages = len(reader.pages)
+        started = time.monotonic()
+        parts: list[str] = []
+        chars = 0
+        stopped = None
+        for index, page in enumerate(reader.pages):
+            if index >= MAX_PAGES:
+                stopped = f"[Only the first {MAX_PAGES} of {total_pages} pages were read]"
+                break
+            if time.monotonic() - started > PDF_TIME_BUDGET_SECONDS:
+                stopped = f"[Extraction stopped after {index} of {total_pages} pages: time limit reached]"
+                break
+            text = page.extract_text() or ""
+            parts.append(text.strip())
+            chars += len(text)
+            if chars > MAX_EXTRACTED_CHARS:
+                stopped = f"[Extraction stopped after {index + 1} of {total_pages} pages: text limit reached]"
+                break
+    except DocumentParsingError:
+        raise
+    except (PdfReadError, ValueError, KeyError, TypeError, AttributeError, IndexError, RecursionError,
+            OSError, NotImplementedError) as exc:
+        raise DocumentParsingError("The PDF could not be read (it may be damaged or use unsupported features). "
+                                   "Nothing was stored.") from exc
+    text = "\n\n".join(part for part in parts if part)
+    if not text.strip():
+        raise DocumentParsingError("The PDF contains no extractable text (it may be scanned images; OCR is not "
+                                   "supported). Nothing was stored.")
+    if stopped:
+        text += "\n" + stopped
+    return text, max(1, min(total_pages, MAX_PAGES))
 
 
 def _is_docx(filename: str, content_type: str) -> bool:
@@ -167,8 +222,10 @@ def extract_document_text(
 
     # v4.6: binary checks apply to uploaded bytes only; pre-extracted text_content is always accepted as text.
     if raw_bytes is not None and _is_pdf(lower_name, lower_type, raw_bytes):
-        raise DocumentParsingError("PDF parsing is not available yet: it needs a PDF library, which has not been "
-                                   "approved as a dependency. Nothing was stored.")
+        extracted_text, page_count = extract_pdf_text(raw_bytes)
+        if len(extracted_text) > MAX_EXTRACTED_CHARS:
+            extracted_text = extracted_text[:MAX_EXTRACTED_CHARS] + "\n[Content truncated at 500KB limit]"
+        return extracted_text, file_size, page_count
     if raw_bytes is not None and _is_docx(lower_name, lower_type):
         extracted_text = extract_docx_text(raw_bytes)
         if len(extracted_text) > MAX_EXTRACTED_CHARS:
@@ -176,8 +233,8 @@ def extract_document_text(
         page_count = min(MAX_PAGES, max(1, len(extracted_text) // 3000 + (1 if len(extracted_text) % 3000 else 0)))
         return extracted_text, file_size, page_count
     if raw_bytes is not None and (b"\x00" in raw_bytes[:8192] or raw_bytes[:4] == b"PK\x03\x04"):
-        raise DocumentParsingError("This binary file type is not supported; only text, Markdown, JSON, CSV and DOCX "
-                                   "documents can be parsed. Nothing was stored.")
+        raise DocumentParsingError("This binary file type is not supported; only text, Markdown, JSON, CSV, DOCX "
+                                   "and PDF documents can be parsed. Nothing was stored.")
 
     try:
         if "json" in lower_type or lower_name.endswith(".json"):

@@ -115,8 +115,9 @@ def test_docx_text_is_extracted_and_fenced():
 
 
 @pytest.mark.parametrize("raw, filename, error, message", [
-    (b"%PDF-1.7 ...", "report.pdf", DocumentParsingError, "PDF parsing is not available"),
-    (b"%PDF-1.7 ...", "report.txt", DocumentParsingError, "PDF parsing is not available"),
+    # v6.2: PDFs are parsed now; a damaged one (any name) is refused cleanly instead of stored as garbage.
+    (b"%PDF-1.7 ...", "report.pdf", DocumentParsingError, "PDF could not be read"),
+    (b"%PDF-1.7 ...", "report.txt", DocumentParsingError, "PDF could not be read"),
     (b"\x00\x01\x02binary", "blob.bin", DocumentParsingError, "binary file type is not supported"),
     (b"PK\x03\x04not-a-real-zip", "archive.zip", DocumentParsingError, "binary file type is not supported"),
     (b"PK\x03\x04broken", "broken.docx", DocumentParsingError, "not a valid DOCX"),
@@ -167,7 +168,7 @@ def test_research_refusals_are_422_not_500():
         pdf = client.post("/research/documents/parse", json={
             "filename": "a.pdf", "data_base64": base64.b64encode(b"%PDF-1.4 x").decode()})
     assert bad_base64.status_code == 422 and pdf.status_code == 422
-    assert "approved as a dependency" in pdf.json()["detail"]
+    assert "PDF could not be read" in pdf.json()["detail"]  # v6.2: a damaged PDF is refused, never stored
 
 
 # ------------------------------------------------------------- review fixes

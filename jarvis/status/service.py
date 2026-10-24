@@ -64,6 +64,12 @@ def _storage(service: Any) -> Storage:
     return "none"
 
 
+def _pypdf_available() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("pypdf") is not None
+
+
 class StatusService:
     def __init__(self, app_state: Any, *, database_timeout_seconds: int = 2):
         self.state = app_state
@@ -187,7 +193,9 @@ class StatusService:
                                          "reliable across restarts (v4.6).",)),
             SubsystemReport(key="research", name="Research and documents (v3.4)", state="limited",
                             storage=_storage(getattr(state, "research_service", None)),
-                            limitations=("Parses text, JSON and CSV only (no PDF/DOCX).", "Web URLs are not fetched.")),
+                            checks=(f"PDF extraction {'available' if _pypdf_available() else 'not installed'}",),
+                            limitations=("Parses text, Markdown, JSON, CSV, DOCX and PDF; scanned PDFs need OCR, "
+                                         "which is not supported.", "Web URLs are not fetched.")),
             self._scheduler(),
             self._telemetry(),
             SubsystemReport(key="finance", name="Finance (v3.7)", state="limited",
