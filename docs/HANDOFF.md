@@ -611,7 +611,7 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - **Live PostgreSQL:** a fresh install of all 18 migrations now succeeds. `integration_tests/test_v41_postgres_stores.py` exercises every v3.1–v3.7 store.
 - **Details and deferred items:** `docs/V41_V50_PROGRAM.md`.
 
-## v4.2 — Correlation, audit consistency and truthful status (awaiting owner acceptance)
+## v4.2 — Correlation, audit consistency and truthful status (accepted by the project lead on 2026-10-24)
 
 - **New code:**
   - `jarvis/core/correlation.py` and `jarvis/core/failure_audit.py`, both pure ASGI middleware;
@@ -619,4 +619,5 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - **Migrations:** 0060 (audit categories, keeping all earlier categories) and 0061 (nullable telemetry).
 - **New capability:** `status.read`.
 - **Removed fakes:** constant CPU and memory values, the fixed "operational" labels, the always-healthy scheduled check, and the overview's marketing claims.
+- **Review fixes before acceptance:** 500 errors keep their correlation ID, the audit write runs off the event loop, the unmeasured-disk crash, the Linux probe errors, and PostgreSQL-backed subsystems shown as unavailable when the database is.
 - **Details:** `docs/V41_V50_PROGRAM.md`.

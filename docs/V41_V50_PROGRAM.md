@@ -59,7 +59,7 @@ Results are always labelled as real, mock or unavailable.
 | Version | Status | Evidence | Commit |
 |---|---|---|---|
 | v4.1 | ACCEPTED by the owner on 2026-10-24; pushed | Python 1071 passed; live PostgreSQL 51 passed | `64fb86d` |
-| v4.2 | IMPLEMENTED, TESTED; awaiting owner acceptance | See the v4.2 section | recorded in the acceptance report |
+| v4.2 | ACCEPTED by Claude as project lead on 2026-10-24 (acceptance delegated by the owner), after an independent review and fixes | Python 1093 passed; live PostgreSQL 54 passed; Vitest 131; E2E 11 | branch head at push |
 | v4.3–v5.0 | NOT STARTED | — | — |
 
 ---
@@ -154,7 +154,7 @@ Three existing quarantine tests used to quarantine files from the system temp fo
    - Forward migration **0060** replaces the category check with the union of every earlier category plus these eight. 0006, 0058 and 0059 are unchanged, and a test checks that every category in the model is allowed by the migration.
    - All services use the standard vocabulary `decision="allowed"`, `status="succeeded"`.
 3. **Failure auditing** (`jarvis/core/failure_audit.py`).
-   - **What is recorded:** a failed POST, PUT, PATCH or DELETE on a v3.x route by an authenticated owner is audited as `request_failed`, or as `request_denied` for HTTP 403. Each record has `status="failed"`, `details.mutated=false` and the HTTP status.
+   - **What is recorded:** a failed POST, PUT, PATCH or DELETE on a v3.x route by an authenticated owner is audited as `request_failed`, or as `request_denied` for HTTP 403. Each record has `status="failed"` and `details.http_status`; it does not claim whether state changed, because that is not observed. The write runs in a worker thread, off the event loop.
    - **What is never recorded:** request bodies, query strings and error messages. The subject is the method plus the path with IDs replaced by `{id}`.
    - **Not covered:**
      - Unauthenticated requests (401) cannot be attributed to an owner, so they are not audited.
@@ -188,3 +188,19 @@ Three existing quarantine tests used to quarantine files from the system temp fo
   - the assistant audit test now expects category `assistant`;
   - the scheduler test now expects an unconnected health check to fail;
   - the v4.1 migration test now allows new migrations numbered 0060 and above.
+
+### Independent review and acceptance
+An independent reviewer read the full v4.2 diff and found no blocking issues. It confirmed header validation, per-request context isolation, middleware order, owner attribution, no double auditing, that 0060 keeps every earlier category, that 0061 is safe, and that `/status` leaks no secrets. Six of its seven findings were fixed before acceptance, each with a test:
+
+1. The autonomous `diagnostic.run` step crashed when disk space could not be measured. It now reports "not measured".
+2. The failure-audit database write ran on the event loop. It now runs in a worker thread.
+3. Unhandled 500 errors lost the correlation ID, because Starlette's error handler runs outside the middleware. The handler now reads the ID from request state, logs it and returns it in `X-Request-ID`.
+4. `details.mutated=false` was asserted, not observed. It was removed.
+5. Linux telemetry could raise an uncaught `IndexError` on a malformed `/proc/meminfo` line, and counted guest CPU time twice. Both are fixed.
+6. `/status` reported PostgreSQL-backed subsystems as operational while the database was unreachable. They are now `unavailable`, with the reason.
+
+**Accepted as a known limitation:** a failed read-style POST, such as `/knowledge/search`, is audited as a failed request. This is extra audit volume, not a false claim.
+
+**Also noted:** `chat` still reports `operational` without a live probe, and `provider` reports `operational` without contacting the provider (the limitation says so). v4.7 revisits both when chat is connected to the services.
+
+**Tests after the fixes:** 5 new tests (22 in `tests/test_v42_observability.py`). Python: 1093 passed, 0 failed, 17 skipped (symlink privileges). Live PostgreSQL: 54 passed. Live Uvicorn smoke: correlation header echoed, a failed mutation audited with its ID, real telemetry, and the token absent from the log. The frontend was not changed by the fixes (Vitest 131, E2E 11 from the v4.2 run).

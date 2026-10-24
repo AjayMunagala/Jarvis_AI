@@ -289,13 +289,13 @@ The long-term vision includes natural conversation and voice; desktop and suppor
 
 The scope was derived from the repository, because no earlier document defined these versions. See `docs/V41_V50_PROGRAM.md` for the version map, dependencies, acceptance gates and status ledger.
 
-- **v4.1 Foundation and safety repair: implemented, awaiting acceptance.**
+- **v4.1 Foundation and safety repair: accepted by the owner on 2026-10-24.**
   - Migrations 0008–0013 can be installed (the reference to a non-existent users table was removed).
   - Quarantine is confined to the repository, and self-improvement targets are allowlisted.
   - Knowledge chunk reads are owner-scoped.
   - Workflows report honest failures instead of placeholder successes, and the `knowledge.search` step no longer crashes.
   - Research citations no longer claim that URLs were verified.
-- **v4.2 Correlation, audit consistency and truthful status: implemented, awaiting acceptance.**
+- **v4.2 Correlation, audit consistency and truthful status: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
   - `X-Request-ID` correlation flows through logs and audit.
   - Each v3.x subsystem has its own audit category (migration 0060), and failed or denied mutations are audited.
   - `GET /status` reports each subsystem's real state with real checks and limitations.
