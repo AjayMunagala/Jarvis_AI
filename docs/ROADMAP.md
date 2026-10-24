@@ -295,3 +295,8 @@ The scope was derived from the repository, because no earlier document defined t
   - Knowledge chunk reads are owner-scoped.
   - Workflows report honest failures instead of placeholder successes, and the `knowledge.search` step no longer crashes.
   - Research citations no longer claim that URLs were verified.
+- **v4.2 Correlation, audit consistency and truthful status: implemented, awaiting acceptance.**
+  - `X-Request-ID` correlation flows through logs and audit.
+  - Each v3.x subsystem has its own audit category (migration 0060), and failed or denied mutations are audited.
+  - `GET /status` reports each subsystem's real state with real checks and limitations.
+  - CPU and memory are measured, or reported as null (migration 0061).

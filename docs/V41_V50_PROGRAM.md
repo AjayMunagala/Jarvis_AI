@@ -58,8 +58,9 @@ Results are always labelled as real, mock or unavailable.
 
 | Version | Status | Evidence | Commit |
 |---|---|---|---|
-| v4.1 | IMPLEMENTED, TESTED; awaiting owner acceptance | See below | recorded in the acceptance report |
-| v4.2–v5.0 | NOT STARTED | — | — |
+| v4.1 | ACCEPTED by the owner on 2026-10-24; pushed | Python 1071 passed; live PostgreSQL 51 passed | `64fb86d` |
+| v4.2 | IMPLEMENTED, TESTED; awaiting owner acceptance | See the v4.2 section | recorded in the acceptance report |
+| v4.3–v5.0 | NOT STARTED | — | — |
 
 ---
 
@@ -124,3 +125,66 @@ Three existing quarantine tests used to quarantine files from the system temp fo
   - the scheduler has no background runner (v4.5);
   - `hash()` embeddings (v4.6).
 - Fake CPU and memory values and the always-healthy scheduler `health_check` remain until v4.2.
+
+---
+
+## v4.2 — Correlation, audit consistency and truthful status
+
+### Why it was needed
+- **No tracing.** A request could not be followed across logs, audit, tools and workflow steps.
+- **Indistinguishable audit records.** Every v3.x service audited as `category="tool", decision="allow", status="success"`, so the trail could not be filtered by subsystem. Failures were never audited.
+- **Invented status reports.** Several reported values were never measured:
+  - CPU 15% and memory 42% in every health snapshot;
+  - a "database: operational" label, without any check;
+  - a scheduled `health_check` that always answered "all healthy";
+  - an autonomous overview built from fixed feature claims.
+
+### Changes
+
+1. **Correlation IDs** (`jarvis/core/correlation.py`).
+   - **Where the ID comes from:** a pure ASGI middleware gives every request an `X-Request-ID`. A client-supplied value is accepted only if it matches `[A-Za-z0-9._-]{1,64}`; anything else is replaced with a generated `req-<16 hex>`, so clients cannot inject header or log content.
+   - **How code reads it:** the ID lives in a context variable. The thread pools that run blocking work copy that context, so services read it with `get_correlation_id()` without extra parameters.
+   - **Where it is recorded:**
+     - it is returned in the response header;
+     - it is added to every JSON log line;
+     - `AuditService.record` uses it whenever a caller gives no correlation ID, so every v3.x audit record now carries it automatically;
+     - the tools route uses it instead of reading the raw header.
+2. **Audit categories and vocabulary.**
+   - Each v3.x subsystem audits under its own category: `assistant`, `workflow`, `knowledge`, `research`, `scheduler`, `health`, `finance` and `improvement` (self-improvement previously used `approval`).
+   - Forward migration **0060** replaces the category check with the union of every earlier category plus these eight. 0006, 0058 and 0059 are unchanged, and a test checks that every category in the model is allowed by the migration.
+   - All services use the standard vocabulary `decision="allowed"`, `status="succeeded"`.
+3. **Failure auditing** (`jarvis/core/failure_audit.py`).
+   - **What is recorded:** a failed POST, PUT, PATCH or DELETE on a v3.x route by an authenticated owner is audited as `request_failed`, or as `request_denied` for HTTP 403. Each record has `status="failed"`, `details.mutated=false` and the HTTP status.
+   - **What is never recorded:** request bodies, query strings and error messages. The subject is the method plus the path with IDs replaced by `{id}`.
+   - **Not covered:**
+     - Unauthenticated requests (401) cannot be attributed to an owner, so they are not audited.
+     - Subsystems that already audit their own failures (tools, browser, approvals, intelligence) are excluded, so nothing is counted twice.
+4. **Truthful status** (`jarvis/status/service.py`, `GET /status`, capability `status.read`).
+   - **States:** each subsystem reports `operational`, `limited`, `mock`, `disabled` or `unavailable`.
+   - **Evidence:** each report lists the checks that actually ran for this request, such as a real `SELECT 1` with a timeout, and the documented limitations.
+   - **Overall status:** only `unavailable` degrades the overall status.
+   - **Safety:** database errors are sanitized and the URL is never reported.
+   - **Unchanged:** the public `/health` and `/ready` endpoints.
+5. **Real telemetry.** CPU usage is sampled for 0.2 seconds and memory is read from the operating system, through the Windows API via `ctypes` or `/proc` on Linux. No new dependency was added. A value that cannot be measured is `null`, never an invented number. Forward migration **0061** makes the three snapshot columns nullable.
+6. **Status reuse.**
+   - Health snapshots record the real `{subsystem: state}` map instead of fixed labels.
+   - A scheduled `health_check` reports the real states. It fails if no status source is connected.
+   - A scheduled `workflow` job now fails as "not connected" (planned for v4.5) instead of claiming it was triggered.
+   - The autonomous overview keeps its per-owner counts. Its fixed claims ("Hybrid BM25 + Vector RRF", "operational" text) are replaced with each subsystem's state and limitations.
+
+### API and database changes
+- **New:** `GET /status` (authenticated, `status.read`), the `X-Request-ID` header on every response, and audit categories (migration 0060).
+- **Changed fields:**
+  - Telemetry fields can be `null` (migration 0061).
+  - Audit records from v3.x services use their own categories and the standard vocabulary.
+  - Health snapshot `services_status` holds the real state map.
+- **Changed scheduler behaviour:** a `workflow` job fails honestly.
+
+### Tests
+- **New:**
+  - `tests/test_v42_observability.py`: 17 tests.
+  - `integration_tests/test_v42_postgres.py`: 3 live tests. They cover a real `SELECT 1` status check, durable storage of the new categories and failure records with their correlation IDs, and nullable telemetry.
+- **Updated to the truthful behaviour:**
+  - the assistant audit test now expects category `assistant`;
+  - the scheduler test now expects an unconnected health check to fail;
+  - the v4.1 migration test now allows new migrations numbered 0060 and above.
