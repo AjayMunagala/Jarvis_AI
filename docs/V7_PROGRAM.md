@@ -7,7 +7,7 @@ Owner decision (2026-10-24): Claude leads JARVIS and proceeds without asking for
 | Version | Phase | What | Why |
 |---|---|---|---|
 | v7.1 | 12 | Import transactions from bank CSV files, with data-quality checks and duplicate detection | Phase 12 asks for data ingestion and quality checks; today transactions can only be typed in one at a time |
-| v7.2 | 12 | Store each forecast with its date and measure its accuracy once the months arrive | Phase 12's gate asks for timestamped forecasts and monitoring |
+| v7.2 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (drift warnings counted repeated daily snapshots as separate months), since fixed with six other findings | Committed state tested alone from a clean copy (see the v7.2 section) |
 | v7.3 | 11 | Opt-in event sources: RSS/Atom feeds and a watched local folder, isolated from each other | Phase 11 asks for opt-in sources whose failures stay isolated |
 | v7.4 | 13 | Travel and decision planning: compare options, itineraries, cost estimates (no booking) | Master reference 3.15 |
 | v7.5 | 13 | Life administration: documents with expiry dates, bills and renewals, with reminders | Phase 13 life administration |
@@ -89,4 +89,28 @@ Ten more findings, all fixed with tests:
 8. **Low:** failure counts and the turn-off notice were not safe across processes.
 9. **Low:** the URL check treated deprecated site-local IPv6 addresses as public.
 10. **Low:** the status report now shows failing, truncated and stuck sources.
+
+## v7.2 — Forecast snapshots and accuracy tracking
+
+### What it does
+- **Snapshots** (`POST /finance/forecast/snapshots`, `finance.write`): the forecast recomputed at save time with the same code and data read as `GET /finance/forecast`, stored with its date, model version, notes, every target (series, month, horizon, method, point, band, the naive value it saw) and a fingerprint of the history it used. Snapshots cannot be changed (a database trigger refuses updates). One per UTC day unless forced, at most 5 a day in total, at most 500 kept; eviction removes repeats within a month first.
+- **Accuracy** (`GET /finance/forecast/accuracy`): scores targets whose month has finished against actuals from current data — MAE, bias, MAPE (income and spending only), 80% band coverage, and the naive "same as last month" baseline as it stood at save time — per series, horizon and method. Repeated snapshots of the same forecast are counted once; raw counts are reported too.
+- **Drift warning:** over the last 6 distinct target months (each scored once at its shortest horizon), warns when the band caught fewer than half or every error had the same sign.
+- **Data changes:** flags snapshots whose history changed afterwards (for example an older bank file imported later), including transactions moved between months.
+- **Storage:** migration 0071 (snapshots and a child table of targets).
+
+### Known limits
+- Accuracy reads the newest 5000 transactions; if that read is cut off, data changes cannot be checked.
+- Snapshots are taken on request; a monthly scheduled snapshot can come later.
+
+### v7.2 independent review and acceptance
+The reviewer found one blocking defect, fixed before acceptance: daily snapshots of the same forecast were counted as separate evaluations, so one unusual month produced five false drift warnings stated as fact.
+
+Six more findings, all fixed with tests:
+1. **Medium:** forced snapshots plus the cap could evict the whole history.
+2. **Medium:** the naive baseline used data imported after the forecast was made.
+3. **Low:** moving a transaction between months went undetected.
+4. **Low:** net-cash-flow MAPE exploded near zero; it is no longer reported for net.
+5. **Low:** the memory store returned mutable stored objects.
+6. **Low:** wording now says a snapshot is a recomputation at save time.
 

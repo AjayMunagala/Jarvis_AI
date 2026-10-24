@@ -20,7 +20,7 @@ from jarvis.finance.models import (
     ForecastSnapshotSummary,
     ForecastSnapshotTarget,
 )
-from jarvis.finance.tracking import ForecastTargetRows, month_start, parse_month
+from jarvis.finance.tracking import ForecastTargetRows, choose_evictions, month_start, parse_month
 
 
 class FinanceStore(ABC):
@@ -118,11 +118,13 @@ class FinanceStore(ABC):
 
     @abstractmethod
     def save_forecast_snapshot(
-        self, snapshot: ForecastSnapshot, *, day_start: datetime, day_end: datetime, force: bool, cap: int
+        self, snapshot: ForecastSnapshot, *, day_start: datetime, day_end: datetime, force: bool, cap: int,
+        day_max: int,
     ) -> "SnapshotSaveOutcome":
-        """Atomically: unless ``force``, refuse when the owner already has a snapshot created in
-        [day_start, day_end); store the snapshot and its targets; then delete the owner's oldest snapshots
-        (by created_at, then id) beyond ``cap``. Snapshots are immutable: there is no update method."""
+        """Atomically: refuse when the owner already has a snapshot created in [day_start, day_end) and ``force``
+        is false, or already has ``day_max`` there; store the snapshot and its targets; then delete snapshots
+        beyond ``cap`` as chosen by ``choose_evictions`` (repeats within an as_of month first, never the new one).
+        Snapshots are immutable: there is no update method."""
         raise NotImplementedError
 
     @abstractmethod
@@ -149,13 +151,14 @@ class FinanceStore(ABC):
 
 @dataclass(frozen=True)
 class SnapshotSaveOutcome:
-    snapshot: ForecastSnapshot | None  # None when refused by the one-per-day guard
+    snapshot: ForecastSnapshot | None  # None when refused by the daily guard
     existing_id: UUID | None
     evicted: int
+    limit_reached: bool = False  # refused because the daily maximum was reached even with force
 
 
 def _summary(snapshot: ForecastSnapshot) -> ForecastSnapshotSummary:
-    return ForecastSnapshotSummary(**snapshot.model_dump(exclude={"targets", "disclaimer"}))
+    return ForecastSnapshotSummary(**snapshot.model_dump(exclude={"targets", "notes", "disclaimer"}))
 
 
 @dataclass(frozen=True)
@@ -407,27 +410,30 @@ class MemoryFinanceStore(FinanceStore):
             return UndoOutcome(batch, len(removed), -float(total))
 
     # ---------------------------------------------------------------- v7.2 forecast snapshots
+    # Stored and returned objects are deep copies, so a caller can never change a stored snapshot.
 
     def _owned_snapshots(self, owner_id: UUID) -> list[ForecastSnapshot]:
         return [s for s in self._forecast_snapshots.values() if s.owner_id == owner_id]
 
     def save_forecast_snapshot(
-        self, snapshot: ForecastSnapshot, *, day_start: datetime, day_end: datetime, force: bool, cap: int
+        self, snapshot: ForecastSnapshot, *, day_start: datetime, day_end: datetime, force: bool, cap: int,
+        day_max: int,
     ) -> SnapshotSaveOutcome:
         with self._lock:
             owned = self._owned_snapshots(snapshot.owner_id)
-            if not force:
-                today = sorted((s for s in owned if day_start <= _aware(s.created_at) < day_end),
-                               key=lambda s: (s.created_at, s.id))
-                if today:
-                    return SnapshotSaveOutcome(None, today[0].id, 0)
-            self._forecast_snapshots[snapshot.id] = snapshot
-            # The new snapshot always stays; the oldest others beyond cap - 1 are deleted.
-            owned.sort(key=lambda s: (_aware(s.created_at), s.id), reverse=True)
-            evicted = owned[max(cap - 1, 0):]
-            for old in evicted:
-                del self._forecast_snapshots[old.id]
-            return SnapshotSaveOutcome(snapshot, None, len(evicted))
+            today = sorted((s for s in owned if day_start <= _aware(s.created_at) < day_end),
+                           key=lambda s: (_aware(s.created_at), s.id))
+            if today and not force:
+                return SnapshotSaveOutcome(None, today[0].id, 0)
+            if len(today) >= day_max:
+                return SnapshotSaveOutcome(None, today[0].id, 0, limit_reached=True)
+            stored = snapshot.model_copy(deep=True)
+            self._forecast_snapshots[stored.id] = stored
+            owned.append(stored)
+            victims = choose_evictions([(s.id, s.created_at, s.as_of) for s in owned], stored.id, cap)
+            for victim in victims:
+                del self._forecast_snapshots[victim]
+            return SnapshotSaveOutcome(stored.model_copy(deep=True), None, len(victims))
 
     def list_forecast_snapshots(
         self, owner_id: UUID, limit: int = 50, offset: int = 0
@@ -440,7 +446,9 @@ class MemoryFinanceStore(FinanceStore):
     def get_forecast_snapshot(self, owner_id: UUID, snapshot_id: UUID) -> ForecastSnapshot | None:
         with self._lock:
             snapshot = self._forecast_snapshots.get(snapshot_id)
-        return snapshot if snapshot is not None and snapshot.owner_id == owner_id else None
+            if snapshot is None or snapshot.owner_id != owner_id:
+                return None
+            return snapshot.model_copy(deep=True)
 
     def delete_forecast_snapshot(self, owner_id: UUID, snapshot_id: UUID) -> bool:
         with self._lock:
@@ -452,7 +460,7 @@ class MemoryFinanceStore(FinanceStore):
 
     def forecast_targets_for_evaluation(self, owner_id: UUID, before: date) -> ForecastTargetRows:
         with self._lock:
-            owned = [s for s in self._owned_snapshots(owner_id) if s.status == "ok"]
+            owned = [s.model_copy(deep=True) for s in self._owned_snapshots(owner_id) if s.status == "ok"]
         rows = ForecastTargetRows()
         for snapshot in sorted(owned, key=lambda s: (_aware(s.created_at), s.id)):
             header = _summary(snapshot)
@@ -951,74 +959,73 @@ class PostgresFinanceStore(FinanceStore):
 
     # ---------------------------------------------------------------- v7.2 forecast snapshots
 
-    _SNAPSHOT_COLUMNS = """id, owner_id, created_at, as_of, horizon, min_train, status, model_version, months_available,
-        transactions_considered, history_transaction_count, history_latest_transaction_date, history_net_total,
-        truncated, accounts_truncated, target_count"""
+    _SNAPSHOT_COLUMNS = """id, owner_id, created_at, generated_at, as_of, horizon, min_train, status, model_version,
+        months_available, transactions_considered, history_transaction_count, history_latest_transaction_date,
+        history_net_total, history_digest, truncated, accounts_truncated, target_count"""
+    _SNAPSHOT_WIDTH = 18
+    _TARGET_COLUMNS = "series, target_month, horizon, method, point, lower_bound, upper_bound, interval_basis, naive_point"
 
     @staticmethod
     def _snapshot_summary(r: Any) -> ForecastSnapshotSummary:
         return ForecastSnapshotSummary(
-            id=r[0], owner_id=r[1], created_at=r[2], as_of=r[3], horizon=r[4], min_train=r[5], status=r[6],
-            model_version=r[7], months_available=r[8], transactions_considered=r[9], history_transaction_count=r[10],
-            history_latest_transaction_date=r[11], history_net_total=float(r[12]), truncated=r[13],
-            accounts_truncated=r[14], target_count=r[15],
+            id=r[0], owner_id=r[1], created_at=r[2], generated_at=r[3], as_of=r[4], horizon=r[5], min_train=r[6],
+            status=r[7], model_version=r[8], months_available=r[9], transactions_considered=r[10],
+            history_transaction_count=r[11], history_latest_transaction_date=r[12], history_net_total=float(r[13]),
+            history_digest=r[14], truncated=r[15], accounts_truncated=r[16], target_count=r[17],
         )
 
     @staticmethod
     def _target(r: Any) -> ForecastSnapshotTarget:
         return ForecastSnapshotTarget(
             series=r[0], target_month=f"{r[1].year:04d}-{r[1].month:02d}", horizon=r[2], method=r[3], point=r[4],
-            lower=r[5], upper=r[6], interval_basis=r[7],
+            lower=r[5], upper=r[6], interval_basis=r[7], naive_point=r[8],
         )
 
     def save_forecast_snapshot(
-        self, snapshot: ForecastSnapshot, *, day_start: datetime, day_end: datetime, force: bool, cap: int
+        self, snapshot: ForecastSnapshot, *, day_start: datetime, day_end: datetime, force: bool, cap: int,
+        day_max: int,
     ) -> SnapshotSaveOutcome:
-        """One database transaction under a per-owner advisory lock, so two concurrent requests cannot both pass
-        the one-per-day guard or both miss an eviction."""
+        """One database transaction under a per-owner advisory lock, so concurrent requests cannot both pass the
+        daily guard or race an eviction."""
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                             (f"jarvis.forecast_snapshots:{snapshot.owner_id}",))
-                if not force:
-                    cur.execute(
-                        """SELECT id FROM jarvis_app.forecast_snapshots
-                           WHERE owner_id = %s AND created_at >= %s AND created_at < %s
-                           ORDER BY created_at, id LIMIT 1""",
-                        (snapshot.owner_id, day_start, day_end),
-                    )
-                    existing = cur.fetchone()
-                    if existing is not None:
-                        conn.rollback()
-                        return SnapshotSaveOutcome(None, existing[0], 0)
                 cur.execute(
-                    f"""INSERT INTO jarvis_app.forecast_snapshots ({self._SNAPSHOT_COLUMNS})
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (snapshot.id, snapshot.owner_id, snapshot.created_at, snapshot.as_of, snapshot.horizon,
-                     snapshot.min_train, snapshot.status, snapshot.model_version, snapshot.months_available,
-                     snapshot.transactions_considered, snapshot.history_transaction_count,
+                    """SELECT id FROM jarvis_app.forecast_snapshots
+                       WHERE owner_id = %s AND created_at >= %s AND created_at < %s ORDER BY created_at, id""",
+                    (snapshot.owner_id, day_start, day_end),
+                )
+                today = [r[0] for r in cur.fetchall()]
+                if today and (not force or len(today) >= day_max):
+                    conn.rollback()
+                    return SnapshotSaveOutcome(None, today[0], 0, limit_reached=force)
+                cur.execute(
+                    f"""INSERT INTO jarvis_app.forecast_snapshots ({self._SNAPSHOT_COLUMNS}, notes)
+                        VALUES ({", ".join(["%s"] * (self._SNAPSHOT_WIDTH + 1))})""",
+                    (snapshot.id, snapshot.owner_id, snapshot.created_at, snapshot.generated_at, snapshot.as_of,
+                     snapshot.horizon, snapshot.min_train, snapshot.status, snapshot.model_version,
+                     snapshot.months_available, snapshot.transactions_considered, snapshot.history_transaction_count,
                      snapshot.history_latest_transaction_date, Decimal(str(snapshot.history_net_total)),
-                     snapshot.truncated, snapshot.accounts_truncated, snapshot.target_count),
+                     snapshot.history_digest, snapshot.truncated, snapshot.accounts_truncated, snapshot.target_count,
+                     list(snapshot.notes)),
                 )
                 if snapshot.targets:
                     cur.executemany(
-                        """INSERT INTO jarvis_app.forecast_snapshot_targets (
-                               snapshot_id, owner_id, series, target_month, horizon, method, point, lower_bound,
-                               upper_bound, interval_basis
-                           ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        f"""INSERT INTO jarvis_app.forecast_snapshot_targets (snapshot_id, owner_id, {self._TARGET_COLUMNS})
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                         [(snapshot.id, snapshot.owner_id, t.series, month_start(parse_month(t.target_month)),
-                          t.horizon, t.method, t.point, t.lower, t.upper, t.interval_basis) for t in snapshot.targets],
+                          t.horizon, t.method, t.point, t.lower, t.upper, t.interval_basis, t.naive_point)
+                         for t in snapshot.targets],
                     )
-                # The new snapshot always stays; the oldest others beyond cap - 1 are deleted (targets cascade).
-                cur.execute(
-                    """DELETE FROM jarvis_app.forecast_snapshots WHERE owner_id = %s AND id IN (
-                           SELECT id FROM jarvis_app.forecast_snapshots WHERE owner_id = %s AND id <> %s
-                           ORDER BY created_at DESC, id DESC OFFSET %s)""",
-                    (snapshot.owner_id, snapshot.owner_id, snapshot.id, max(cap - 1, 0)),
-                )
-                evicted = cur.rowcount
+                cur.execute("SELECT id, created_at, as_of FROM jarvis_app.forecast_snapshots WHERE owner_id = %s",
+                            (snapshot.owner_id,))
+                victims = choose_evictions([(r[0], r[1], r[2]) for r in cur.fetchall()], snapshot.id, cap)
+                if victims:  # targets cascade
+                    cur.execute("DELETE FROM jarvis_app.forecast_snapshots WHERE owner_id = %s AND id = ANY(%s)",
+                                (snapshot.owner_id, victims))
             conn.commit()
-        return SnapshotSaveOutcome(snapshot, None, evicted)
+        return SnapshotSaveOutcome(snapshot, None, len(victims))
 
     def list_forecast_snapshots(
         self, owner_id: UUID, limit: int = 50, offset: int = 0
@@ -1038,7 +1045,7 @@ class PostgresFinanceStore(FinanceStore):
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"""SELECT {self._SNAPSHOT_COLUMNS} FROM jarvis_app.forecast_snapshots
+                    f"""SELECT {self._SNAPSHOT_COLUMNS}, notes FROM jarvis_app.forecast_snapshots
                         WHERE id = %s AND owner_id = %s""",
                     (snapshot_id, owner_id),
                 )
@@ -1046,14 +1053,15 @@ class PostgresFinanceStore(FinanceStore):
                 if row is None:
                     return None
                 cur.execute(
-                    """SELECT series, target_month, horizon, method, point, lower_bound, upper_bound, interval_basis
-                       FROM jarvis_app.forecast_snapshot_targets WHERE snapshot_id = %s AND owner_id = %s
-                       ORDER BY CASE series WHEN 'net' THEN 0 WHEN 'income' THEN 1 ELSE 2 END, horizon""",
+                    f"""SELECT {self._TARGET_COLUMNS}
+                        FROM jarvis_app.forecast_snapshot_targets WHERE snapshot_id = %s AND owner_id = %s
+                        ORDER BY CASE series WHEN 'net' THEN 0 WHEN 'income' THEN 1 ELSE 2 END, horizon""",
                     (snapshot_id, owner_id),
                 )
                 targets = [self._target(r) for r in cur.fetchall()]
-        summary = self._snapshot_summary(row)
-        return ForecastSnapshot(**summary.model_dump(), targets=targets, disclaimer=DISCLAIMER)
+        summary = self._snapshot_summary(row[: self._SNAPSHOT_WIDTH])
+        return ForecastSnapshot(**summary.model_dump(), targets=targets, notes=list(row[self._SNAPSHOT_WIDTH]),
+                                disclaimer=DISCLAIMER)
 
     def delete_forecast_snapshot(self, owner_id: UUID, snapshot_id: UUID) -> bool:
         with self._get_connection() as conn:
@@ -1067,12 +1075,13 @@ class PostgresFinanceStore(FinanceStore):
     def forecast_targets_for_evaluation(self, owner_id: UUID, before: date) -> ForecastTargetRows:
         """Completed targets are filtered in SQL on (owner_id, target_month); pending ones are only counted."""
         columns = ", ".join(f"s.{c.strip()}" for c in self._SNAPSHOT_COLUMNS.split(","))
+        target_columns = ", ".join(f"t.{c.strip()}" for c in self._TARGET_COLUMNS.split(","))
+        width = self._SNAPSHOT_WIDTH
         rows = ForecastTargetRows()
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"""SELECT {columns}, t.series, t.target_month, t.horizon, t.method, t.point, t.lower_bound,
-                               t.upper_bound, t.interval_basis
+                    f"""SELECT {columns}, {target_columns}
                         FROM jarvis_app.forecast_snapshot_targets t
                         JOIN jarvis_app.forecast_snapshots s ON s.id = t.snapshot_id AND s.owner_id = t.owner_id
                         WHERE t.owner_id = %s AND t.target_month < %s AND s.status = 'ok'
@@ -1083,8 +1092,8 @@ class PostgresFinanceStore(FinanceStore):
                 for r in cur.fetchall():
                     header = headers.get(r[0])
                     if header is None:
-                        header = headers[r[0]] = self._snapshot_summary(r[:16])
-                    rows.evaluable.append((header, self._target(r[16:])))
+                        header = headers[r[0]] = self._snapshot_summary(r[:width])
+                    rows.evaluable.append((header, self._target(r[width:])))
                 cur.execute(
                     """SELECT t.snapshot_id, COUNT(*), MIN(t.target_month)
                        FROM jarvis_app.forecast_snapshot_targets t

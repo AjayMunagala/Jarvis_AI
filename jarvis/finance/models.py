@@ -319,12 +319,13 @@ ForecastSeriesName = Literal["net", "income", "spending"]
 class ForecastSnapshotCreateRequest(StrictSchema):
     horizon: int = Field(default=3, ge=1, le=12)
     min_train: int = Field(default=6, ge=3, le=24)
-    # At most one snapshot per owner per UTC day unless force is true (avoids accidental floods).
+    # At most one snapshot per owner per UTC day without force; with force at most
+    # FORECAST_SNAPSHOTS_PER_DAY_MAX (5) per UTC day in total (avoids accidental floods).
     force: bool = False
 
 
 class ForecastSnapshotTarget(StrictSchema):
-    """One forecast month of one series, exactly as the live forecast reported it."""
+    """One forecast month of one series, as recomputed by the forecast code when the snapshot was saved."""
 
     series: ForecastSeriesName
     target_month: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -334,12 +335,15 @@ class ForecastSnapshotTarget(StrictSchema):
     lower: float | None = Field(default=None, allow_inf_nan=False)
     upper: float | None = Field(default=None, allow_inf_nan=False)
     interval_basis: str = Field(min_length=1, max_length=64)
+    # Naive baseline as known at save time: the series value of the last complete month of the history used.
+    naive_point: float | None = Field(default=None, allow_inf_nan=False)
 
 
 class ForecastSnapshotSummary(StrictSchema):
     id: UUID
     owner_id: UUID
-    created_at: datetime  # when the forecast was made (UTC)
+    created_at: datetime  # when the snapshot was saved (UTC)
+    generated_at: datetime  # when the forecast code ran for it (UTC)
     as_of: datetime
     horizon: int = Field(ge=1, le=12)
     min_train: int = Field(ge=3, le=24)
@@ -347,10 +351,12 @@ class ForecastSnapshotSummary(StrictSchema):
     model_version: str = Field(min_length=1, max_length=32)
     months_available: int = Field(ge=0)
     transactions_considered: int = Field(ge=0)
-    # Data fingerprint of the history the forecast used (transactions dated before the as_of month).
+    # Data fingerprint of the history the forecast used (transactions dated before the as_of month): count,
+    # latest date, net total, and an order-independent per-month digest (month, cents sum, count).
     history_transaction_count: int = Field(ge=0)
     history_latest_transaction_date: datetime | None = None
     history_net_total: float = Field(allow_inf_nan=False)
+    history_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     truncated: bool
     accounts_truncated: bool
     target_count: int = Field(ge=0)
@@ -358,6 +364,7 @@ class ForecastSnapshotSummary(StrictSchema):
 
 class ForecastSnapshot(ForecastSnapshotSummary):
     targets: list[ForecastSnapshotTarget] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)  # the forecast's notes at save time
     disclaimer: str
 
 
@@ -371,7 +378,8 @@ class ForecastAccuracyGroup(StrictSchema):
     series: ForecastSeriesName
     horizon: int | None = None  # set in by_horizon
     method: str | None = None  # set in by_method
-    evaluated: int = Field(ge=0)
+    evaluated: int = Field(ge=0)  # distinct forecasts scored (repeats of the same forecast collapsed)
+    raw_evaluations: int = Field(ge=0)  # before collapsing repeats
     mae: float
     mean_error: float  # bias: mean of (actual - forecast)
     mape: float | None = None
@@ -390,11 +398,12 @@ class ForecastSnapshotEvaluation(StrictSchema):
     created_at: datetime
     as_of: datetime
     model_version: str
-    targets_evaluated: int = Field(ge=0)
+    targets_evaluated: int = Field(ge=0)  # completed targets with actuals (raw)
+    targets_counted: int = Field(ge=0)  # of those, not a repeat of an earlier snapshot's identical forecast
     targets_pending: int = Field(ge=0)
     targets_without_actuals: int = Field(ge=0)
-    # True when transactions in the months before as_of were added, removed or imported after the snapshot;
-    # None when it cannot be told because a transaction read was truncated.
+    # True when transactions in the months before as_of were added, removed, moved or imported after the
+    # snapshot; None when it cannot be told because a transaction read was truncated.
     data_changed_since_snapshot: bool | None = None
 
 
@@ -406,7 +415,9 @@ class ForecastAccuracyReport(StrictSchema):
     model_version: str
     interval_level: float
     snapshots_considered: int = Field(ge=0)
-    targets_evaluated: int = Field(ge=0)
+    targets_evaluated: int = Field(ge=0)  # distinct forecasts scored
+    raw_evaluations: int = Field(default=0, ge=0)  # before collapsing repeats of the same forecast
+    duplicate_evaluations_collapsed: int = Field(default=0, ge=0)
     targets_pending: int = Field(ge=0)
     targets_without_actuals: int = Field(ge=0)
     first_pending_month: str | None = None

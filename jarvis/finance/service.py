@@ -80,6 +80,8 @@ FORECAST_MAX_TRANSACTIONS = 5000
 FORECAST_MAX_ACCOUNTS = 1000
 # v7.2: stored forecast snapshots per owner; the oldest are deleted first beyond this.
 FORECAST_SNAPSHOT_CAP = 500
+# v7.2: snapshots per owner per UTC day: one without force, at most this many in total with force.
+FORECAST_SNAPSHOTS_PER_DAY_MAX = 5
 
 
 class FinanceService:
@@ -335,9 +337,11 @@ class FinanceService:
         now: datetime | None = None,
         as_of: datetime | None = None,
     ) -> ForecastSnapshot:
-        """Compute the forecast exactly like GET /finance/forecast and store it immutably with its timestamp.
+        """Recompute the forecast at save time with the same code and read as GET /finance/forecast, and store
+        it immutably with its timestamps (created_at, generated_at) and notes.
 
-        Raises ForecastSnapshotExists when one was already taken this UTC day and ``req.force`` is false.
+        Raises ForecastSnapshotExists when one was already taken this UTC day and ``req.force`` is false, or
+        when FORECAST_SNAPSHOTS_PER_DAY_MAX were already taken this UTC day.
         """
         now = _utc(now or datetime.now(timezone.utc))
         as_of = _utc(as_of or now)
@@ -350,9 +354,10 @@ class FinanceService:
         day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
         outcome = self.store.save_forecast_snapshot(snapshot, day_start=day_start,
                                                     day_end=day_start + timedelta(days=1), force=req.force,
-                                                    cap=FORECAST_SNAPSHOT_CAP)
+                                                    cap=FORECAST_SNAPSHOT_CAP,
+                                                    day_max=FORECAST_SNAPSHOTS_PER_DAY_MAX)
         if outcome.snapshot is None:
-            raise ForecastSnapshotExists(outcome.existing_id)
+            raise ForecastSnapshotExists(outcome.existing_id, limit_reached=outcome.limit_reached)
         self._audit(owner_id, "finance.forecast_snapshot.create", f"finance:forecast_snapshot:{snapshot.id}",
                     {"status": snapshot.status, "horizon": snapshot.horizon, "targets": snapshot.target_count,
                      "forced": req.force, "evicted": outcome.evicted})

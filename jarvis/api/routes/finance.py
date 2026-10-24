@@ -257,7 +257,7 @@ async def get_forecast(
 
 # ============================================================= Forecast snapshots and accuracy (v7.2)
 # A monthly snapshot is not scheduled automatically in this version: the owner calls POST /forecast/snapshots
-# (at most one per UTC day unless force=true). TODO: a scheduler job type could call it later.
+# (one per UTC day without force=true; at most 5 per UTC day with it). TODO: a scheduler job type could call it.
 
 _SNAPSHOT_ERRORS = {code: {"model": ErrorResponse} for code in (401, 403, 404, 409, 422, 503)}
 
@@ -269,17 +269,19 @@ async def create_forecast_snapshot(
     body: ForecastSnapshotCreateRequest,
     owner_id: UUID | None = Depends(authenticated_owner),
 ) -> ForecastSnapshot:
-    """Compute the forecast exactly like GET /forecast and store it, timestamped and immutable. Analysis only."""
+    """Recompute the forecast now with the same code as GET /forecast and store it, timestamped and immutable.
+
+    Analysis only. The stored snapshot carries generated_at and the forecast's notes."""
     owner = _owner(owner_id)
     enforce_capability(request, owner, Capability.FINANCE_WRITE)
     try:
         return await run_in_threadpool(_service(request).create_forecast_snapshot, owner, body)
     except ForecastSnapshotExists as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"A forecast snapshot was already taken today (UTC): {exc.existing_id}. "
-                   "Send force=true to take another.",
-        ) from exc
+        detail = (f"The daily maximum of forecast snapshots was reached (UTC day); the first today is "
+                  f"{exc.existing_id}." if exc.limit_reached else
+                  f"A forecast snapshot was already taken today (UTC): {exc.existing_id}. "
+                  "Send force=true to take another.")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail) from exc
 
 
 @router.get("/forecast/snapshots", response_model=ForecastSnapshotPage, responses=_ERRORS)

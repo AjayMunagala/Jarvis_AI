@@ -54,24 +54,30 @@ def months(start, count):
     return [fc._shift(start, i) for i in range(count)]
 
 
-def target(series, month, horizon, point, lower, upper, method="trailing_mean_3"):
+def target(series, month, horizon, point, lower, upper, method="trailing_mean_3", naive_point=None):
     return ForecastSnapshotTarget(series=series, target_month=month, horizon=horizon, method=method, point=point,
-                                  lower=lower, upper=upper, interval_basis="empirical")
+                                  lower=lower, upper=upper, interval_basis="empirical", naive_point=naive_point)
 
 
 def crafted(store, as_of, targets, owner=OWNER, created_at=None, truncated=False):
-    """A stored snapshot with known targets and the fingerprint of the store's current history."""
+    """A stored snapshot with known targets, the fingerprint of the store's current history and, where a target
+    has none, the naive value known now (the last complete month before as_of)."""
     transactions, _ = store.list_transactions(owner, limit=100000)
     fingerprint = tracking.history_fingerprint(transactions, as_of)
+    series = fc.build_monthly_series(transactions, as_of)
+    last = {name: getattr(series, name)[-1] for name in ("net", "income", "spending")} if series.months else {}
+    targets = [t if t.naive_point is not None or t.series not in last
+               else t.model_copy(update={"naive_point": last[t.series]}) for t in targets]
     snapshot = ForecastSnapshot(
-        id=uuid4(), owner_id=owner, created_at=created_at or as_of, as_of=as_of, horizon=3, min_train=6,
-        status="ok", model_version=fc.FORECAST_MODEL_VERSION, months_available=12, transactions_considered=12,
-        history_transaction_count=fingerprint.count, history_latest_transaction_date=fingerprint.latest,
-        history_net_total=fingerprint.net_total, truncated=truncated, accounts_truncated=False,
+        id=uuid4(), owner_id=owner, created_at=created_at or as_of, generated_at=created_at or as_of, as_of=as_of,
+        horizon=3, min_train=6, status="ok", model_version=fc.FORECAST_MODEL_VERSION, months_available=12,
+        transactions_considered=12, history_transaction_count=fingerprint.count,
+        history_latest_transaction_date=fingerprint.latest, history_net_total=fingerprint.net_total,
+        history_digest=fingerprint.digest, truncated=truncated, accounts_truncated=False,
         target_count=len(targets), targets=targets, disclaimer=fc.DISCLAIMER,
     )
     start = datetime(2000, 1, 1, tzinfo=timezone.utc)
-    store.save_forecast_snapshot(snapshot, day_start=start, day_end=start, force=True, cap=500)
+    store.save_forecast_snapshot(snapshot, day_start=start, day_end=start, force=True, cap=500, day_max=5)
     return snapshot
 
 
@@ -87,7 +93,7 @@ def history(count=14, end=(2026, 9), owner=OWNER):
 # ============================================================= Snapshots
 
 
-def test_snapshot_stores_exactly_what_the_live_forecast_returns():
+def test_snapshot_is_the_live_forecast_recomputed_at_save_time():
     service, store = setup()
     for t in history():
         store.save_transaction(t)
@@ -109,6 +115,9 @@ def test_snapshot_stores_exactly_what_the_live_forecast_returns():
         assert [(t.target_month, t.horizon, t.point, t.lower, t.upper, t.interval_basis) for t in stored] == [
             (p.month, p.horizon, p.point, p.lower, p.upper, p.interval_basis) for p in series.points]
         assert {t.method for t in stored} == {series.chosen_method}
+        assert {t.naive_point for t in stored} == {getattr(live.data.history[-1], name)}  # known at save time
+    assert snap.notes == live.notes and snap.generated_at >= live.generated_at
+    assert len(snap.history_digest) == 64
     assert service.get_forecast_snapshot(OWNER, snap.id) == snap
 
 
@@ -136,6 +145,20 @@ def test_one_snapshot_per_utc_day_unless_forced():
     assert [s.id for s in service.list_forecast_snapshots(OTHER).items] == [other.id]
 
 
+def test_forced_snapshots_are_limited_per_utc_day():
+    service, _ = setup()
+    forced = ForecastSnapshotCreateRequest(force=True)
+    first = service.create_forecast_snapshot(OWNER, ForecastSnapshotCreateRequest(), now=utc(2026, 10, 1, 1))
+    for minute in range(4):
+        service.create_forecast_snapshot(OWNER, forced, now=utc(2026, 10, 1, 2, minute))
+    with pytest.raises(ForecastSnapshotExists) as caught:
+        service.create_forecast_snapshot(OWNER, forced, now=utc(2026, 10, 1, 3))
+    assert caught.value.limit_reached is True and caught.value.existing_id == first.id
+    assert service.list_forecast_snapshots(OWNER).total == finance_service_module.FORECAST_SNAPSHOTS_PER_DAY_MAX == 5
+    service.create_forecast_snapshot(OWNER, forced, now=utc(2026, 10, 2, 0, 1))  # a new UTC day
+    assert service.list_forecast_snapshots(OWNER).total == 6
+
+
 def test_future_as_of_is_refused():
     service, _ = setup()
     with pytest.raises(ValueError):
@@ -143,16 +166,40 @@ def test_future_as_of_is_refused():
                                          as_of=utc(2026, 10, 2))
 
 
-def test_cap_deletes_the_oldest_first(monkeypatch):
+def test_cap_removes_repeats_within_an_as_of_month_first(monkeypatch):
     monkeypatch.setattr(finance_service_module, "FORECAST_SNAPSHOT_CAP", 3)
     service, _ = setup()
     made = [service.create_forecast_snapshot(OWNER, ForecastSnapshotCreateRequest(), now=utc(2026, 10, day))
-            for day in range(1, 6)]
+            for day in range(1, 6)]  # all in the October as_of month
     other = service.create_forecast_snapshot(OTHER, ForecastSnapshotCreateRequest(), now=utc(2026, 9, 1))
     page = service.list_forecast_snapshots(OWNER)
-    assert page.total == 3 and [s.id for s in page.items] == [made[4].id, made[3].id, made[2].id]
-    assert service.get_forecast_snapshot(OWNER, made[0].id) is None
+    # The first of the month (the one accuracy scores) and the new one stay; the newest repeats go first.
+    assert page.total == 3 and [s.id for s in page.items] == [made[4].id, made[1].id, made[0].id]
     assert service.get_forecast_snapshot(OTHER, other.id) is not None  # other owners are untouched
+
+
+def test_cap_removes_the_oldest_when_every_month_has_one_snapshot(monkeypatch):
+    monkeypatch.setattr(finance_service_module, "FORECAST_SNAPSHOT_CAP", 3)
+    service, _ = setup()
+    req = ForecastSnapshotCreateRequest()
+    jan, feb, feb_repeat, mar = (service.create_forecast_snapshot(OWNER, req, now=when) for when in (
+        utc(2026, 1, 5), utc(2026, 2, 5), utc(2026, 2, 6), utc(2026, 3, 5)))
+    assert [s.id for s in service.list_forecast_snapshots(OWNER).items] == [mar.id, feb.id, jan.id]
+    apr = service.create_forecast_snapshot(OWNER, req, now=utc(2026, 4, 5))
+    assert [s.id for s in service.list_forecast_snapshots(OWNER).items] == [apr.id, mar.id, feb.id]
+    assert service.get_forecast_snapshot(OWNER, feb_repeat.id) is None
+
+
+def test_choose_evictions_order():
+    a, b, b2, b3, c = (uuid4() for _ in range(5))
+    rows = [(a, utc(2026, 1, 1), utc(2026, 1, 1)), (b, utc(2026, 2, 1), utc(2026, 2, 1)),
+            (b2, utc(2026, 2, 2), utc(2026, 2, 2)), (b3, utc(2026, 2, 3), utc(2026, 2, 3)),
+            (c, utc(2026, 3, 1), utc(2026, 3, 1))]
+    assert tracking.choose_evictions(rows, c, 4) == [b3]
+    assert tracking.choose_evictions(rows, c, 3) == [b3, b2]
+    assert tracking.choose_evictions(rows, c, 2) == [b3, b2, a]
+    assert tracking.choose_evictions(rows, b3, 4) == [b2]  # the new snapshot is never removed
+    assert tracking.choose_evictions(rows, c, 5) == []
 
 
 def test_snapshots_are_immutable_and_owner_scoped():
@@ -167,6 +214,15 @@ def test_snapshots_are_immutable_and_owner_scoped():
     assert not any(name.startswith("update_forecast") for name in dir(store))
     store.save_transaction(tx(99999.0, utc(2026, 9, 20)))  # later data never rewrites a stored forecast
     assert service.get_forecast_snapshot(OWNER, snap.id) == snap
+    returned = service.get_forecast_snapshot(OWNER, snap.id)
+    returned.targets.clear()  # mutating a returned copy never changes the stored snapshot
+    returned.notes.append("x")
+    snap.targets.pop()  # nor does mutating the object returned by create
+    stored = service.get_forecast_snapshot(OWNER, snap.id)
+    assert len(stored.targets) == stored.target_count == 9 and "x" not in stored.notes
+    rows = store.forecast_targets_for_evaluation(OWNER, datetime(2030, 1, 1).date())
+    rows.evaluable.clear()
+    assert len(store.forecast_targets_for_evaluation(OWNER, datetime(2030, 1, 1).date()).evaluable) == 9
     assert service.get_forecast_snapshot(OTHER, snap.id) is None
     assert service.delete_forecast_snapshot(OTHER, snap.id) is False
     assert service.delete_forecast_snapshot(OWNER, snap.id) is True
@@ -215,7 +271,8 @@ def test_accuracy_matches_hand_computed_mae_bias_coverage_and_naive():
     # errors (actual - forecast): +5, +30, 0 (s1, naive 95) and +10 (s2, naive 130)
     assert net.evaluated == 4 and net.mae == 11.25 and net.mean_error == 11.25
     assert net.interval_coverage == 0.5 and net.coverage_targets == 4
-    assert net.mape == round(100 * (5 / 105 + 30 / 130 + 0 + 10 / 100) / 4, 2) == 9.46
+    assert net.mape is None and net.mape_note == tracking.NET_MAPE_NOTE  # net can be near zero
+    assert (net.raw_evaluations, report.raw_evaluations, report.duplicate_evaluations_collapsed) == (4, 5, 0)
     assert net.naive_mae == 20.0 and net.naive_mean_error == 5.0 and net.beats_naive is True
 
     h1, h2, h3 = (group(report.by_horizon, "net", horizon=h) for h in (1, 2, 3))
@@ -223,7 +280,7 @@ def test_accuracy_matches_hand_computed_mae_bias_coverage_and_naive():
     assert (h1.naive_mae, h1.naive_mean_error) == (20.0, -10.0)
     assert (h2.evaluated, h2.mae, h2.interval_coverage, h2.naive_mae) == (1, 30.0, 0.0, 35.0)
     assert (h3.evaluated, h3.mae, h3.interval_coverage, h3.naive_mae) == (1, 0.0, 1.0, 5.0)
-    assert h3.mape == 0.0
+    assert h3.mape is None
 
     trailing = group(report.by_method, "net", method="trailing_mean_3")
     naive_method = group(report.by_method, "net", method="naive")
@@ -338,6 +395,114 @@ def test_no_drift_warning_when_recent_targets_look_fine_or_are_too_few():
     assert drift_setup([(10.0, 5.0, 15.0)] * 3 + [(95.0, 80.0, 120.0), (105.0, 80.0, 120.0)] * 3).warnings == []
 
 
+# ============================================================= v7.2 review fixes
+
+
+def test_naive_baseline_is_the_value_known_at_save_time():
+    service, store, s1, _ = hand_computed()
+    before = group(service.get_forecast_accuracy(OWNER, now=NOW).by_horizon, "net", horizon=1)
+    store.save_transaction(tx(50.0, utc(2026, 2, 20)))  # February imported after both snapshots
+    after = service.get_forecast_accuracy(OWNER, now=NOW)
+    h1 = group(after.by_horizon, "net", horizon=1)
+    assert (h1.naive_mae, h1.naive_mean_error) == (before.naive_mae, before.naive_mean_error) == (20.0, -10.0)
+    assert {t.naive_point for t in s1.targets if t.series == "net"} == {95.0}  # not today's 145
+    assert all(s.data_changed_since_snapshot for s in after.snapshots)
+
+
+def test_moving_a_transaction_between_months_is_a_data_change():
+    service, store = setup({(2026, 1): 80.0, (2026, 2): 95.0, (2026, 3): 105.0, (2026, 4): 130.0})
+    moving = tx(-30.0, utc(2026, 1, 15))
+    store.save_transaction(moving)
+    snap = crafted(store, utc(2026, 4, 10), [target("net", "2026-04", 1, 120.0, 100.0, 140.0)])
+    store.delete_transaction(OWNER, moving.id)
+    store.save_transaction(tx(-30.0, utc(2026, 2, 15)))  # same amount, count and latest date; another month
+    transactions, _ = store.list_transactions(OWNER, limit=1000)
+    moved = tracking.history_fingerprint(transactions, snap.as_of)
+    assert (moved.count, moved.net_total, moved.latest) == (
+        snap.history_transaction_count, snap.history_net_total, snap.history_latest_transaction_date)
+    assert moved.digest != snap.history_digest
+    report = service.get_forecast_accuracy(OWNER, now=utc(2026, 5, 2))
+    assert report.snapshots[0].data_changed_since_snapshot is True
+
+
+def daily_october(store, extra=None):
+    """31 daily snapshots in October 2025 with the same targets (October h1, November h2, December h3)."""
+    made = []
+    for day in range(1, 32):
+        if extra is not None and day == 16:
+            extra()
+        made.append(crafted(store, utc(2025, 10, day), [
+            target("net", "2025-10", 1, 100.0, 90.0, 110.0),
+            target("net", "2025-11", 2, 100.0, 85.0, 115.0),
+            target("net", "2025-12", 3, 100.0, 80.0, 120.0),
+        ], created_at=utc(2025, 10, day, 6)))
+    return made
+
+
+def test_daily_snapshots_in_one_month_count_as_one_forecast():
+    values = {ym: 100.0 for ym in months((2025, 1), 15)}
+    values[(2025, 10)] = 140.0  # one unusual month: a 40-unit miss at horizon 1
+    service, store = setup(values)
+    made = daily_october(store)
+    report = service.get_forecast_accuracy(OWNER, now=utc(2026, 1, 15))
+    assert report.status == "ok" and report.warnings == []
+    assert (report.targets_evaluated, report.raw_evaluations, report.duplicate_evaluations_collapsed) == (3, 93, 90)
+    net = group(report.overall, "net")
+    assert (net.evaluated, net.raw_evaluations, net.mae, net.mean_error) == (3, 93, 13.33, 13.33)
+    h1 = group(report.by_horizon, "net", horizon=1)
+    assert (h1.evaluated, h1.raw_evaluations, h1.mae, h1.interval_coverage) == (1, 31, 40.0, 0.0)
+    counted = {s.snapshot_id: s.targets_counted for s in report.snapshots}
+    assert counted[made[0].id] == 3 and sum(counted.values()) == 3  # the earliest snapshot of the month
+    assert all(s.targets_evaluated == 3 for s in report.snapshots)
+    assert any("collapsed" in note for note in report.notes)
+
+
+def test_a_history_change_within_the_month_keeps_a_second_distinct_forecast():
+    service, store = setup({ym: 100.0 for ym in months((2025, 1), 15)})
+    made = daily_october(store, extra=lambda: store.save_transaction(tx(5.0, utc(2025, 9, 25))))
+    report = service.get_forecast_accuracy(OWNER, now=utc(2026, 1, 15))
+    assert (report.targets_evaluated, report.raw_evaluations) == (6, 93)
+    counted = {s.snapshot_id: s.targets_counted for s in report.snapshots}
+    assert counted[made[0].id] == 3 and counted[made[15].id] == 3 and sum(counted.values()) == 6
+    assert any("history changed between snapshots" in note for note in report.notes)
+
+
+def overlap(h1_points, later_point=80.0):
+    """Monthly snapshots as_of 2025-03 .. 2025-10, each with h1, h2 and h3 net targets; actuals are 100."""
+    service, store = setup({ym: 100.0 for ym in months((2025, 1), 15)})
+    for (y, m), h1 in zip(months((2025, 3), 8), h1_points):
+        crafted(store, utc(y, m, 3), [
+            target("net", fc.month_label((y, m)), 1, h1, 90.0, 110.0),
+            target("net", fc.month_label(fc._shift((y, m), 1)), 2, later_point, 75.0, 85.0),
+            target("net", fc.month_label(fc._shift((y, m), 2)), 3, later_point, 75.0, 85.0),
+        ])
+    return service.get_forecast_accuracy(OWNER, now=utc(2026, 2, 1))
+
+
+def test_horizon_overlap_drift_uses_each_target_month_once_at_its_shortest_horizon():
+    # h2/h3 forecasts are 20 low every time; h1 forecasts alternate +-2. The last 6 distinct target months are
+    # Jul..Oct at h1 (+2, -2, +2, -2) and Nov at h2, Dec at h3 (+20 each): mixed signs, 4 of 6 inside the band.
+    report = overlap([98.0, 102.0] * 4)
+    assert report.warnings == []
+    assert (report.targets_evaluated, report.raw_evaluations) == (24, 24)
+    assert [(g.horizon, g.evaluated, g.interval_coverage) for g in report.by_horizon] == [
+        (1, 8, 1.0), (2, 8, 0.0), (3, 8, 0.0)]
+
+
+def test_horizon_overlap_drift_still_warns_on_real_bias():
+    report = overlap([95.0] * 8)  # every distinct target month is under-forecast
+    assert len(report.warnings) == 1
+    assert "each of the last 6 distinct target months (each scored once, at its shortest stored horizon)" in \
+        report.warnings[0] and "under-forecasting" in report.warnings[0]
+
+
+def test_memory_store_save_keeps_its_own_copy():
+    service, store = setup({ym: 100.0 for ym in months((2025, 1), 6)})
+    snap = crafted(store, utc(2025, 6, 3), [target("net", "2025-06", 1, 100.0, 90.0, 110.0)])
+    snap.targets.clear()  # the caller's object; the stored copy is unaffected
+    assert len(store.get_forecast_snapshot(OWNER, snap.id).targets) == 1
+
+
 # ============================================================= API
 
 
@@ -416,6 +581,17 @@ def test_api_snapshot_lifecycle_and_disclaimer(client):
     assert client.get("/finance/forecast/snapshots/not-a-uuid").status_code == 422
 
 
+def test_api_daily_maximum_with_force(client):
+    assert client.post("/finance/forecast/snapshots", json={}).status_code == 201
+    for _ in range(4):
+        assert client.post("/finance/forecast/snapshots", json={"force": True}).status_code == 201
+    refused = client.post("/finance/forecast/snapshots", json={"force": True})
+    assert refused.status_code == 409 and "daily maximum" in refused.json()["detail"]
+    assert client.get("/finance/forecast/snapshots").json()["total"] == 5
+    created = client.get(f"/finance/forecast/snapshots/{client.get('/finance/forecast/snapshots').json()['items'][0]['id']}")
+    assert created.json()["generated_at"] and isinstance(created.json()["notes"], list)
+
+
 def test_api_other_owner_snapshots_are_invisible(client):
     service = client.app_ref.state.finance_service
     foreign = service.create_forecast_snapshot(OTHER, ForecastSnapshotCreateRequest())
@@ -435,5 +611,5 @@ def test_tracking_module_has_no_trading_or_network_imports():
             imported.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module if node.module.startswith("jarvis") else node.module.split(".")[0])
-    assert imported <= {"__future__", "bisect", "dataclasses", "datetime", "math", "typing", "uuid",
+    assert imported <= {"__future__", "bisect", "dataclasses", "datetime", "hashlib", "math", "typing", "uuid",
                         "jarvis.finance.forecasting", "jarvis.finance.models"}
