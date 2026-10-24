@@ -192,7 +192,8 @@ class StatusService:
                                          "Balance updates are atomic with their transaction (v4.4).")),
             SubsystemReport(key="improvement", name="Controlled improvement (v3.9)", state="limited",
                             storage=_storage(getattr(state, "improvement_service", None)),
-                            limitations=("Evaluation uses offline static checks; no model is run.",
+                            limitations=("Evaluation uses offline static checks (a fixed override-phrase list and "
+                                         "rule-line comparison); no model is run and meaning is not checked.",
                                          "A proposal that regresses any check cannot be approved (v4.9).",
                                          "Apply and restore wait for an approved request (v4.3).")),
             SubsystemReport(key="integrations", name="Integrations and devices (v4.8)", state="mock",

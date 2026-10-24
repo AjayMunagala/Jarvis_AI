@@ -4,7 +4,12 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+
+# v4.9: prompt content is stored exactly; whitespace (for example a trailing newline) is never stripped.
+ExactText = Annotated[str, StringConstraints(strip_whitespace=False)]
 
 
 class StrictSchema(BaseModel):
@@ -15,9 +20,9 @@ class PromptMutationProposal(StrictSchema):
     id: UUID
     owner_id: UUID
     target_name: str = Field(min_length=1, max_length=200)
-    original_content: str
-    proposed_content: str
-    diff: str
+    original_content: ExactText
+    proposed_content: ExactText
+    diff: ExactText
     rationale: str = Field(min_length=1, max_length=1000)
     status: str = Field(default="pending", pattern=r"^(pending|approved|rejected|restored)$")
     snapshot_id: UUID | None = None
@@ -29,13 +34,16 @@ class PromptMutationProposal(StrictSchema):
 
 class ProposalCreateRequest(StrictSchema):
     target_name: str = Field(min_length=1, max_length=200)
-    proposed_content: str = Field(min_length=1)
+    proposed_content: ExactText = Field(min_length=1)
     rationale: str = Field(min_length=1, max_length=1000)
 
 
 class ProposalDecisionRequest(StrictSchema):
     decision: str = Field(pattern=r"^(approved|rejected)$")
     comment: str | None = Field(default=None, max_length=500)
+    # v4.9: rewording or removing a rule line is refused unless the owner acknowledges it; the approval request
+    # then lists the changed rule lines. Other regressions can never be acknowledged.
+    acknowledge_rule_changes: bool = False
 
 
 class BenchmarkMetric(StrictSchema):

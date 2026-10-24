@@ -3,6 +3,13 @@
 v4.9: proposals, restore snapshots and the content of virtual prompt targets
 are durable in PostgreSQL (migration 0066) when persistence is enabled.
 Snapshots are owner-scoped: an owner can only read or restore their own.
+The content of virtual prompt targets is deliberately global, like the
+file-backed prompts: a deployment has one configured owner.
+
+Applying and restoring change two things, the target content and the
+proposal status. Both use conditional writes (compare-and-set on the content,
+and on the proposal's current status), so two workers can never both apply
+competing changes to the same content.
 """
 
 from abc import ABC, abstractmethod
@@ -52,6 +59,16 @@ class ImprovementStore(ABC):
     def set_target_content(self, target_name: str, content: str) -> None:
         raise NotImplementedError
 
+    @abstractmethod
+    def replace_target_content(self, target_name: str, expected: str, content: str, *, default: str) -> bool:
+        """Set the content only if it currently equals ``expected`` (``default`` when no row is stored)."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_proposal_status(self, proposal: PromptMutationProposal, *, from_status: str) -> bool:
+        """Store ``proposal``'s status, snapshot, decision time and evaluation only if it is still ``from_status``."""
+        raise NotImplementedError
+
 
 class MemoryImprovementStore(ImprovementStore):
     def __init__(self) -> None:
@@ -99,6 +116,21 @@ class MemoryImprovementStore(ImprovementStore):
     def set_target_content(self, target_name: str, content: str) -> None:
         with self._lock:
             self._targets[target_name] = content
+
+    def replace_target_content(self, target_name: str, expected: str, content: str, *, default: str) -> bool:
+        with self._lock:
+            if self._targets.get(target_name, default) != expected:
+                return False
+            self._targets[target_name] = content
+            return True
+
+    def update_proposal_status(self, proposal: PromptMutationProposal, *, from_status: str) -> bool:
+        with self._lock:
+            current = self._proposals.get(proposal.id)
+            if current is None or current.owner_id != proposal.owner_id or current.status != from_status:
+                return False
+            self._proposals[proposal.id] = proposal
+            return True
 
 
 _PROPOSAL_COLUMNS = ("id, owner_id, target_name, original_content, proposed_content, diff, rationale, status, "
@@ -176,6 +208,32 @@ class PostgresImprovementStore(ImprovementStore):
             "SELECT content FROM jarvis_app.improvement_target_contents WHERE target_name = %s",
             (target_name,)).fetchone())
         return row[0] if row else None
+
+    def replace_target_content(self, target_name: str, expected: str, content: str, *, default: str) -> bool:
+        now = datetime.now(timezone.utc)
+        if expected == default:  # no stored row also means "default"
+            row = self._run(lambda conn: conn.execute(
+                """INSERT INTO jarvis_app.improvement_target_contents (target_name, content, updated_at)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (target_name) DO UPDATE SET content = EXCLUDED.content, updated_at = EXCLUDED.updated_at
+                   WHERE jarvis_app.improvement_target_contents.content = %s
+                   RETURNING target_name""", (target_name, content, now, expected)).fetchone())
+        else:
+            row = self._run(lambda conn: conn.execute(
+                """UPDATE jarvis_app.improvement_target_contents SET content = %s, updated_at = %s
+                   WHERE target_name = %s AND content = %s RETURNING target_name""",
+                (content, now, target_name, expected)).fetchone())
+        return row is not None
+
+    def update_proposal_status(self, proposal: PromptMutationProposal, *, from_status: str) -> bool:
+        row = self._run(lambda conn: conn.execute(
+            """UPDATE jarvis_app.improvement_proposals
+               SET status = %s, snapshot_id = %s, decided_at = %s, evaluation = %s
+               WHERE id = %s AND owner_id = %s AND status = %s RETURNING id""",
+            (proposal.status, proposal.snapshot_id, proposal.decided_at,
+             json.dumps(proposal.evaluation) if proposal.evaluation is not None else None,
+             proposal.id, proposal.owner_id, from_status)).fetchone())
+        return row is not None
 
     def set_target_content(self, target_name: str, content: str) -> None:
         self._run(lambda conn: conn.execute(

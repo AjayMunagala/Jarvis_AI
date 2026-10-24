@@ -53,7 +53,7 @@ from jarvis.health.stores import MemoryHealthStore, PostgresHealthStore
 from jarvis.finance.service import FinanceService
 from jarvis.finance.stores import MemoryFinanceStore, PostgresFinanceStore
 from jarvis.improvement.service import ImprovementService
-from jarvis.improvement.stores import MemoryImprovementStore, PostgresImprovementStore
+from jarvis.improvement.stores import ImprovementStorageError, MemoryImprovementStore, PostgresImprovementStore
 from jarvis.audit.service import ApprovalError, ApprovalRequired, ApprovalService, AuditService
 from jarvis.audit.models import ApprovalRequiredResponse
 from jarvis.tools.handlers import build_tool_context
@@ -367,6 +367,11 @@ def create_app(
             },
             headers=exc.headers,
         )
+
+    @app.exception_handler(ImprovementStorageError)
+    async def improvement_storage_handler(request: Request, exc: ImprovementStorageError) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"error": "storage_unavailable",
+                                                      "detail": "Improvement storage is unavailable."})
 
     @app.exception_handler(ScheduleError)
     async def schedule_error_handler(request: Request, exc: ScheduleError) -> JSONResponse:

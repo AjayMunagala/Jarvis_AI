@@ -86,6 +86,18 @@ class ImprovementService:
             return file_path.read_text(encoding="utf-8")
         return ""
 
+    def _replace_target(self, target_name: str, expected: str, content: str) -> bool:
+        """Compare-and-set the target content (v4.9). Virtual targets are atomic in the store; file targets are
+        compared and written under the process lock (one process writes prompt files)."""
+        file_path = resolve_improvement_target(self.repo_root, target_name, self._target_storage)
+        if file_path is None:
+            return self.store.replace_target_content(target_name, expected, content,
+                                                     default=self._target_storage[target_name])
+        if self.get_target_content(target_name) != expected:
+            return False
+        self.set_target_content(target_name, content)
+        return True
+
     def set_target_content(self, target_name: str, content: str) -> None:
         """Saves target content to virtual storage or local filesystem."""
         file_path = resolve_improvement_target(self.repo_root, target_name, self._target_storage)
@@ -125,7 +137,7 @@ class ImprovementService:
             "improvement.mutation.propose",
             f"improvement:proposal:{proposal.id}",
             {"target": proposal.target_name, "acceptable": evaluation["acceptable"],
-             "regressions": len(evaluation["regressions"])},
+             "regressions": len(evaluation["regressions"]), "changed_rules": len(evaluation["changed_rules"])},
         )
         return proposal
 
@@ -156,17 +168,24 @@ class ImprovementService:
         if self.get_target_content(proposal.target_name) != proposal.original_content:
             raise ValueError("The target has changed since this proposal was made; nothing was applied. "
                              "Create a new proposal.")
-        # v4.9: re-evaluated at decision time; a change that regresses or fails a check cannot be approved.
+        # v4.9: re-evaluated at decision time. Regressions block approval; a rule-line change alone can be
+        # acknowledged explicitly by the owner, and the approval request then names the changed rule lines.
         evaluation = compare_with_baseline(proposal.original_content, proposal.proposed_content)
-        if not evaluation["acceptable"]:
-            problems = "; ".join(evaluation["regressions"]) or "a check failed"
-            raise ValueError(f"The proposal fails its evaluation ({problems}); nothing was applied.")
+        acknowledged = bool(evaluation["rule_changes_only"] and req.acknowledge_rule_changes)
+        if not evaluation["acceptable"] and not acknowledged:
+            problems = "; ".join(evaluation["regressions"])
+            hint = (" It only changes rule lines; to apply it anyway, decide again with acknowledge_rule_changes "
+                    "set to true." if evaluation["rule_changes_only"] else "")
+            raise ValueError(f"The proposal fails its evaluation ({problems}); nothing was applied.{hint}")
+        reason = proposal.rationale
+        if acknowledged:
+            reason = "RULE CHANGES ACKNOWLEDGED: " + " | ".join(evaluation["changed_rules"]) + ". " + reason
         approval = ApprovalProposal(
             category="improvement", action="improvement.apply", target=proposal.target_name,
-            reason=proposal.rationale[:500], risk="high",
+            reason=reason[:500], risk="high",
             expected_side_effects=f"Replaces the content of {proposal.target_name}; a restore snapshot is saved first."[:300],
             scope_material=f"{proposal.id}|{proposal.target_name}|{_sha(proposal.original_content)}|"
-                           f"{_sha(proposal.proposed_content)}",
+                           f"{_sha(proposal.proposed_content)}|ack={acknowledged}",
         )
         return run_approved(self.approval_service, owner_id, approval, approval_id,
                             lambda: self._apply_if_still_pending(owner_id, proposal, req))
@@ -193,8 +212,6 @@ class ImprovementService:
             # Save 1-click restore snapshot before mutating target
             snapshot_id = uuid4()
             self.store.save_snapshot(owner_id, snapshot_id, proposal.target_name, proposal.original_content)
-            # Apply mutation
-            self.set_target_content(proposal.target_name, proposal.proposed_content)
 
         updated = PromptMutationProposal(
             id=proposal.id,
@@ -210,12 +227,19 @@ class ImprovementService:
             decided_at=now,
             evaluation=proposal.evaluation,  # v4.9: the evaluation stays with the proposal
         )
-        self.store.save_proposal(updated)
+        # v4.9: the status changes only from "pending" (another worker cannot decide it too) ...
+        if not self.store.update_proposal_status(updated, from_status="pending"):
+            raise ValueError(f"Proposal {proposal.id} is no longer pending; nothing was applied.")
+        # ... and the content only from the content the proposal was made against.
+        if req.decision == "approved" and not self._replace_target(proposal.target_name, proposal.original_content,
+                                                                   proposal.proposed_content):
+            self.store.update_proposal_status(proposal, from_status="approved")  # back to pending
+            raise ValueError("The target changed while the proposal was being applied; nothing was applied.")
         self._audit(
             owner_id,
             f"improvement.mutation.{req.decision}",
             f"improvement:proposal:{proposal.id}",
-            {"decision": req.decision, "comment": req.comment},
+            {"decision": req.decision, "rule_changes_acknowledged": req.acknowledge_rule_changes},
         )
         return updated
 
@@ -234,6 +258,10 @@ class ImprovementService:
 
         target_name, original_content = snapshot
         current = self.get_target_content(target_name)
+        if current != proposal.proposed_content:
+            # v4.9: restoring across later changes would silently undo them without any evaluation.
+            raise ValueError("The target has changed since this proposal was applied (a later change exists); "
+                             "nothing was restored. Create a new proposal instead.")
         approval = ApprovalProposal(
             category="improvement", action="improvement.restore", target=target_name,
             reason=f"Restore {target_name} to its content before proposal {proposal.id}"[:500], risk="high",
@@ -254,8 +282,9 @@ class ImprovementService:
 
     def _restore(self, owner_id: UUID, proposal: PromptMutationProposal, target_name: str,
                  original_content: str) -> PromptMutationProposal:
-        # 1-click rollback: restore original content
-        self.set_target_content(target_name, original_content)
+        # 1-click rollback: restore original content, only from the content this proposal applied
+        if not self._replace_target(target_name, proposal.proposed_content, original_content):
+            raise ValueError("The target changed while it was being restored; nothing was restored.")
 
         now = datetime.now(timezone.utc)
         restored = PromptMutationProposal(
@@ -272,7 +301,8 @@ class ImprovementService:
             decided_at=now,
             evaluation=proposal.evaluation,  # v4.9: the evaluation stays with the proposal
         )
-        self.store.save_proposal(restored)
+        if not self.store.update_proposal_status(restored, from_status="approved"):
+            raise ValueError(f"Proposal {proposal.id} was restored concurrently.")
         self._audit(
             owner_id,
             "improvement.mutation.restore",
