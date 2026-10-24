@@ -15,7 +15,7 @@ CREATE TABLE jarvis_app.usage_events (
     correlation_id text,
     CONSTRAINT usage_events_id_format CHECK (id ~ '^UE-[a-f0-9]{16}$'),
     CONSTRAINT usage_events_role_allowed CHECK (role IN ('primary', 'fallback')),
-    CONSTRAINT usage_events_outcome_allowed CHECK (outcome IN ('succeeded', 'failed', 'timeout')),
+    CONSTRAINT usage_events_outcome_allowed CHECK (outcome IN ('succeeded', 'failed', 'timeout', 'cancelled')),
     CONSTRAINT usage_events_tokens_non_negative CHECK (coalesce(prompt_tokens, 0) >= 0 AND coalesce(completion_tokens, 0) >= 0),
     CONSTRAINT usage_events_duration_non_negative CHECK (duration_ms >= 0)
 );

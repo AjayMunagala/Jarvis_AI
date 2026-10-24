@@ -76,7 +76,9 @@ def build_intelligence(settings, provider, audit_service=None) -> IntelligenceLa
     registry = ModelRegistry.load(openai_model=getattr(settings, "openai_model", None))
     adapters = {"mock": MockProvider()}
     if provider is not None and getattr(provider, "name", None):
-        adapters[provider.name] = provider
+        # v6.1: the router and the evaluation harness measure the registered model itself, never a hidden fallback,
+        # so their results are attributed to the model that actually answered.
+        adapters[provider.name] = getattr(provider, "primary", provider)
     router = ModelRouter(registry, load_policies(), adapters)
     if settings.persistence_enabled:
         url = settings.persistence_database_url.get_secret_value()

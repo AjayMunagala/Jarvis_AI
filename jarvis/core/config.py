@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     openai_price_input_per_million: float | None = Field(default=None, ge=0)
     openai_price_output_per_million: float | None = Field(default=None, ge=0)
     openai_price_source: str | None = Field(default=None, min_length=1, max_length=300)
+    openai_fallback_price_input_per_million: float | None = Field(default=None, ge=0)
+    openai_fallback_price_output_per_million: float | None = Field(default=None, ge=0)
     provider_connect_timeout_seconds: float = Field(default=2.0, gt=0, le=15)
     provider_read_timeout_seconds: float = Field(default=30.0, gt=0, le=60)
     request_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
@@ -99,6 +101,21 @@ class Settings(BaseSettings):
     # Voice (v3.0): offer optional browser-native voice controls. The owner must still opt in
     # per page session; the server never receives audio.
     voice_enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_usage_settings(self) -> "Settings":
+        if self.openai_fallback_model is not None and self.openai_fallback_model == self.openai_model:
+            raise ValueError("JARVIS_OPENAI_FALLBACK_MODEL must differ from JARVIS_OPENAI_MODEL.")
+        primary = (self.openai_price_input_per_million, self.openai_price_output_per_million)
+        fallback = (self.openai_fallback_price_input_per_million, self.openai_fallback_price_output_per_million)
+        for label, pair in (("JARVIS_OPENAI_PRICE_*", primary), ("JARVIS_OPENAI_FALLBACK_PRICE_*", fallback)):
+            if (pair[0] is None) != (pair[1] is None):
+                raise ValueError(f"{label}: set both the input and the output price, or neither.")
+        if (primary[0] is not None or fallback[0] is not None) and not self.openai_price_source:
+            raise ValueError("JARVIS_OPENAI_PRICE_SOURCE is required when a price is declared.")
+        if fallback[0] is not None and self.openai_fallback_model is None:
+            raise ValueError("A fallback price needs JARVIS_OPENAI_FALLBACK_MODEL.")
+        return self
 
     @field_validator("scheduler_quiet_hours")
     @classmethod

@@ -1,9 +1,9 @@
 """Minimal asynchronous adapter for the OpenAI Chat Completions endpoint."""
 
+import asyncio
 from time import perf_counter
 from typing import Any, Callable
 
-import anyio.to_thread
 import httpx
 from pydantic import AnyHttpUrl, BaseModel, SecretStr, ValidationError
 
@@ -152,7 +152,8 @@ class OpenAIProvider:
         self._api_key = api_key.get_secret_value()
         self.model = model
         self.role = role
-        # v6.1: set by the application to UsageService.record; called once per request, off the event loop.
+        # v6.1: set by the application to UsageService.record, which only enqueues (never blocks); called once per
+        # request, including when the request is cancelled by a deadline.
         self.usage_recorder: Callable[..., Any] | None = None
         self._endpoint = f"{str(base_url).rstrip('/')}/chat/completions"
         self._model = model
@@ -206,16 +207,19 @@ class OpenAIProvider:
         except TransientProviderError as exc:
             outcome = "timeout" if isinstance(exc.__cause__, httpx.TimeoutException) else "failed"
             raise
+        except asyncio.CancelledError:
+            outcome = "cancelled"  # usually a request deadline; the provider may still bill the call
+            raise
         finally:
-            await self._record(outcome, (perf_counter() - started) * 1000, usage)
+            self._record(outcome, (perf_counter() - started) * 1000, usage)  # never awaited: cannot delay or block
 
-    async def _record(self, outcome: str, duration_ms: float, usage: dict[str, int | None]) -> None:
+    def _record(self, outcome: str, duration_ms: float, usage: dict[str, int | None]) -> None:
         if self.usage_recorder is None:
             return
         try:
-            await anyio.to_thread.run_sync(lambda: self.usage_recorder(
-                provider=self.name, model=self.model, outcome=outcome, duration_ms=duration_ms, role=self.role,
-                prompt_tokens=usage.get("prompt_tokens"), completion_tokens=usage.get("completion_tokens")))
+            self.usage_recorder(provider=self.name, model=self.model, outcome=outcome, duration_ms=duration_ms,
+                                role=self.role, prompt_tokens=usage.get("prompt_tokens"),
+                                completion_tokens=usage.get("completion_tokens"))
         except Exception:  # noqa: BLE001 - usage tracking never affects the reply
             pass
 
@@ -265,7 +269,8 @@ class FallbackProvider:
 
     Only transient failures (timeouts, network errors, HTTP 429 and 5xx) fall back; a request the provider
     rejects (for example invalid input) is not sent again. Both calls are recorded in the usage log, so it shows
-    which model answered.
+    which model answered. When the fallback fails too, the error is final (not retryable), so the orchestrator's
+    own retries do not multiply the calls.
     """
 
     name = "openai"
@@ -274,6 +279,10 @@ class FallbackProvider:
     def __init__(self, primary: OpenAIProvider, fallback: OpenAIProvider):
         self.primary = primary
         self.fallback = fallback
+
+    @property
+    def model(self) -> str:
+        return self.primary.model
 
     @property
     def usage_recorder(self):
@@ -290,6 +299,9 @@ class FallbackProvider:
             return await self.primary.generate_reply(message, system_instruction=system_instruction,
                                                      response_model=response_model)
         except TransientProviderError:
-            return await self.fallback.generate_reply(message, system_instruction=system_instruction,
-                                                      response_model=response_model)
+            try:
+                return await self.fallback.generate_reply(message, system_instruction=system_instruction,
+                                                          response_model=response_model)
+            except TransientProviderError as exc:
+                raise ProviderError("Both the configured model and its fallback are temporarily unavailable.") from exc
 

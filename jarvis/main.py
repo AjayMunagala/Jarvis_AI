@@ -130,6 +130,7 @@ def create_app(
         if resolved_settings.scheduler_runner_enabled:
             app.state.scheduler_runner.start()
         yield
+        app.state.usage_service.close()  # stores queued usage events (bounded wait)
         app.state.scheduler_runner.stop()
         app.state.workflow_service.close()
         # Browser contexts hold page state; close every session on shutdown.
@@ -147,12 +148,14 @@ def create_app(
     app.state.provider = resolved_provider
     # v6.1: usage and cost tracking for real providers (durable when persistence is enabled).
     prices = {}
-    if (resolved_settings.openai_price_input_per_million is not None
-            and resolved_settings.openai_price_output_per_million is not None
-            and resolved_settings.openai_price_source):
+    if resolved_settings.openai_price_input_per_million is not None:  # validated: both prices and a source
         prices[resolved_settings.openai_model] = Price(resolved_settings.openai_price_input_per_million,
                                                        resolved_settings.openai_price_output_per_million,
                                                        resolved_settings.openai_price_source)
+    if resolved_settings.openai_fallback_price_input_per_million is not None:
+        prices[resolved_settings.openai_fallback_model] = Price(
+            resolved_settings.openai_fallback_price_input_per_million,
+            resolved_settings.openai_fallback_price_output_per_million, resolved_settings.openai_price_source)
     usage_store = (PostgresUsageStore(
         resolved_settings.persistence_database_url.get_secret_value(),
         connect_timeout_seconds=resolved_settings.persistence_connect_timeout_seconds,
