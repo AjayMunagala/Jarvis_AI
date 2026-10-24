@@ -473,3 +473,92 @@ def test_status_migration_and_audit_wiring():
     sql = (runner.MIGRATIONS_DIR / "0068_tutor.sql").read_text(encoding="utf-8")
     assert "ON DELETE CASCADE" in sql and "'tutor'" in sql and "tutor_exercises_owner_goal_review" in sql
     assert g["id"]
+
+
+# ------------------------------------------------------------------ v6.5 review fixes
+
+
+@pytest.mark.parametrize("subtopics, weekly, days", [(["A"], 60, 7), (["A", "B", "C"], 1200, 0), (["A", "B"], 59, 13)])
+def test_an_infeasible_plan_always_asks_for_more_than_the_weekly_minutes_given(subtopics, weekly, days):
+    plan = build_study_plan(goal(subtopics=subtopics, weekly=weekly, target=START + timedelta(days=days)), START)
+    assert plan.feasible is False
+    assert plan.weekly_minutes_needed > plan.weekly_minutes
+    assert f"needs about {plan.weekly_minutes_needed} minutes a week" in plan.note
+
+
+def test_a_plan_past_the_last_date_is_a_422_not_a_crash():
+    _, client = make_client()
+    with client:
+        g = create_goal(client)
+        response = client.get(f"/tutor/goals/{g['id']}/plan", params={"start": "9999-12-31"})
+    assert response.status_code == 422 and "last supported date" in response.text
+
+
+def test_grading_edge_cases_from_the_review():
+    assert normalize_answer("4. !") == "4" and short_answer_matches("4. !", ["4"])
+    with pytest.raises(ValidationError):
+        ExerciseCreateRequest(subtopic="A", prompt="p", kind="short_answer", accepted_answers=["..."])
+
+
+def test_the_caps_hold_under_concurrency():
+    from concurrent.futures import ThreadPoolExecutor
+    from jarvis.tutor import service as module
+
+    store = MemoryTutorStore()
+    service = TutorService(store)
+    original = module.MAX_GOALS_PER_OWNER
+    module.MAX_GOALS_PER_OWNER = 5
+    request = GoalCreateRequest(topic="T", level="beginner", weekly_minutes=60, subtopics=["A"])
+    try:
+        with ThreadPoolExecutor(8) as pool:
+            results = list(pool.map(lambda _: _try(lambda: service.create_goal(OWNER, request)), range(20)))
+    finally:
+        module.MAX_GOALS_PER_OWNER = original
+    assert results.count("ok") == 5 and len(store.list_goals(OWNER, limit=100)[0]) == 5
+    assert all(item in ("ok", "TutorConflict") for item in results)
+
+
+def _try(action):
+    try:
+        action()
+        return "ok"
+    except Exception as exc:  # noqa: BLE001
+        return type(exc).__name__
+
+
+def test_generation_checks_the_exercise_cap_before_calling_the_model():
+    from jarvis.tutor import service as module
+
+    provider = FakeProvider(reply=mc_batch(2))
+    _, client = make_client(provider)
+    original = module.MAX_EXERCISES_PER_GOAL
+    module.MAX_EXERCISES_PER_GOAL = 1
+    try:
+        with client:
+            g = create_goal(client)
+            response = client.post(f"/tutor/goals/{g['id']}/exercises/generate",
+                                   json={"subtopic": "Adding", "count": 2, "kind": "multiple_choice"})
+    finally:
+        module.MAX_EXERCISES_PER_GOAL = original
+    assert response.status_code == 409 and provider.calls == []
+
+
+def test_a_provider_timeout_is_reported_as_a_timeout():
+    import httpx
+
+    error = ProviderError()
+    error.__cause__ = httpx.ReadTimeout("slow")
+    _, client = make_client(FakeProvider(error=error))
+    with client:
+        response = client.post("/tutor/explain", json={"topic": "Fractions", "question": "Why?", "level": "beginner"})
+    assert response.status_code == 504
+
+
+def test_another_owner_cannot_update_a_goal():
+    service = TutorService(MemoryTutorStore())
+    created = service.create_goal(OWNER, GoalCreateRequest(topic="T", level="beginner", weekly_minutes=60, subtopics=["A"]))
+    from jarvis.tutor.models import GoalUpdateRequest
+
+    with pytest.raises(TutorNotFound):
+        service.update_goal(OTHER, created.id, GoalUpdateRequest(topic="Stolen"))
+    assert service.get_goal(OWNER, created.id).topic == "T"

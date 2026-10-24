@@ -93,6 +93,19 @@ def _model_name(provider: Any) -> str:
     return str(value or "unknown")[:200]
 
 
+def _caused_by_timeout(exc: BaseException) -> bool:
+    """True when a provider error was caused by a timeout (the real provider wraps httpx timeouts)."""
+    seen = 0
+    current: BaseException | None = exc
+    while current is not None and seen < 10:
+        if isinstance(current, (TimeoutError, asyncio.TimeoutError)) or type(current).__name__.endswith("TimeoutException") \
+                or "Timeout" in type(current).__name__:
+            return True
+        current = current.__cause__ or current.__context__
+        seen += 1
+    return False
+
+
 class TutorService:
     def __init__(self, store: TutorStore, audit_service: Any = None, *,
                  model_timeout_seconds: float = DEFAULT_MODEL_TIMEOUT_SECONDS) -> None:
@@ -112,13 +125,13 @@ class TutorService:
     # ================================================================ goals
 
     def create_goal(self, owner_id: UUID, req: GoalCreateRequest) -> LearningGoal:
-        if self.store.count_goals(owner_id) >= MAX_GOALS_PER_OWNER:
-            raise TutorConflict(f"At most {MAX_GOALS_PER_OWNER} learning goals can be kept; delete or archive some.")
         now = _now()
         goal = LearningGoal(id=uuid4(), owner_id=owner_id, topic=req.topic, level=req.level,
                             weekly_minutes=req.weekly_minutes, target_date=req.target_date,
                             subtopics=list(req.subtopics), status="active", created_at=now, updated_at=now)
-        self.store.save_goal(goal)
+        if not self.store.save_goal(goal, max_goals=MAX_GOALS_PER_OWNER):
+            raise TutorConflict(f"At most {MAX_GOALS_PER_OWNER} learning goals can be kept (archived ones count); "
+                                "delete some first.")
         self._audit(owner_id, "tutor.goal.create", f"tutor:goal:{goal.id}", {"subtopics": len(goal.subtopics)})
         return goal
 
@@ -151,7 +164,11 @@ class TutorService:
         self._audit(owner_id, "tutor.goal.delete", f"tutor:goal:{goal_id}", {"deleted": True})
 
     def study_plan(self, owner_id: UUID, goal_id: UUID, start: date | None = None) -> StudyPlan:
-        return build_study_plan(self.get_goal(owner_id, goal_id), start or _now().date())
+        goal = self.get_goal(owner_id, goal_id)
+        try:
+            return build_study_plan(goal, start or _now().date())
+        except ValueError as exc:
+            raise TutorInvalid(str(exc)) from exc
 
     # ================================================================ exercises
 
@@ -173,9 +190,10 @@ class TutorService:
                 for req in requests]
 
     def _store_exercises(self, owner_id: UUID, goal: LearningGoal, exercises: list[Exercise]) -> list[ExerciseView]:
-        if self.store.count_exercises(owner_id, goal.id) + len(exercises) > MAX_EXERCISES_PER_GOAL:
+        outcome = self.store.save_exercises(owner_id, goal.id, exercises, max_total=MAX_EXERCISES_PER_GOAL)
+        if outcome == "full":
             raise TutorConflict(f"A goal can hold at most {MAX_EXERCISES_PER_GOAL} exercises.")
-        if not self.store.save_exercises(owner_id, goal.id, exercises):
+        if outcome == "missing":
             raise TutorNotFound("The requested learning goal was not found.")
         return [item.view() for item in exercises]
 
@@ -253,6 +271,8 @@ class TutorService:
         except (asyncio.TimeoutError, TimeoutError) as exc:
             raise TutorProviderTimeout("The configured provider timed out.") from exc
         except ProviderError as exc:
+            if _caused_by_timeout(exc):
+                raise TutorProviderTimeout("The configured provider timed out.") from exc
             raise TutorProviderUnavailable("The configured provider failed.") from exc
 
     async def explain(self, provider: Any, req: ExplainRequest) -> ExplainResponse:
@@ -274,6 +294,9 @@ class TutorService:
         if provider is None or getattr(provider, "is_demo", True) is not False:
             raise TutorConflict("Exercise generation needs a real model provider; the demo provider cannot write "
                                 "exercises, so none were created. Add exercises yourself or configure a provider.")
+        current = await anyio.to_thread.run_sync(partial(self.store.count_exercises, owner_id, goal.id))
+        if current + req.count > MAX_EXERCISES_PER_GOAL:
+            raise TutorConflict(f"A goal can hold at most {MAX_EXERCISES_PER_GOAL} exercises; none were generated.")
         message = (f"Topic (data): {goal.topic}\nSubtopic (data): {subtopic}\nLearner level: {goal.level}\n"
                    f"Write exactly {req.count} {req.kind} exercise(s).")
         raw = await self._ask(provider, message, _GENERATE_INSTRUCTION, GeneratedExerciseBatch)

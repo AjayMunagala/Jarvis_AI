@@ -21,7 +21,7 @@ _NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$")
 def normalize_answer(text: str) -> str:
     value = unicodedata.normalize("NFKC", text).casefold().strip()
     value = _WHITESPACE.sub(" ", value)
-    return value.rstrip(".!?").rstrip()
+    return value.rstrip(".!? ")
 
 
 def _as_number(text: str) -> float | None:

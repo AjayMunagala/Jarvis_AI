@@ -10,7 +10,7 @@ from collections import deque
 from datetime import datetime
 from time import monotonic
 import threading
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Literal, Protocol
 from uuid import UUID
 
 from jarvis.persistence.operation_timeout import (
@@ -32,14 +32,16 @@ class TutorStorageError(Exception):
 class TutorStore(Protocol):
     durable: bool
 
-    def save_goal(self, goal: LearningGoal) -> None: ...
+    # v6.5 review: the caps are checked in the same lock or transaction as the insert.
+    def save_goal(self, goal: LearningGoal, *, max_goals: int) -> bool: ...
     def get_goal(self, owner_id: UUID, goal_id: UUID) -> LearningGoal | None: ...
     def list_goals(self, owner_id: UUID, *, status: GoalStatus | None = None, limit: int = 50,
                    offset: int = 0) -> tuple[list[LearningGoal], int]: ...
     def update_goal(self, goal: LearningGoal) -> bool: ...
     def delete_goal(self, owner_id: UUID, goal_id: UUID) -> bool: ...
     def count_goals(self, owner_id: UUID) -> int: ...
-    def save_exercises(self, owner_id: UUID, goal_id: UUID, exercises: list[Exercise]) -> bool: ...
+    def save_exercises(self, owner_id: UUID, goal_id: UUID, exercises: list[Exercise], *,
+                       max_total: int) -> Literal["saved", "missing", "full"]: ...
     def get_exercise(self, owner_id: UUID, exercise_id: UUID) -> Exercise | None: ...
     def list_exercises(self, owner_id: UUID, goal_id: UUID, *, limit: int = 50,
                        offset: int = 0) -> tuple[list[Exercise], int]: ...
@@ -93,9 +95,12 @@ class MemoryTutorStore:
         self._attempts: deque[Attempt] = deque(maxlen=max_attempts)
         self.evicted_attempts = 0
 
-    def save_goal(self, goal: LearningGoal) -> None:
+    def save_goal(self, goal: LearningGoal, *, max_goals: int) -> bool:
         with self._lock:
+            if sum(1 for item in self._goals.values() if item.owner_id == goal.owner_id) >= max_goals:
+                return False
             self._goals[goal.id] = goal
+            return True
 
     def get_goal(self, owner_id: UUID, goal_id: UUID) -> LearningGoal | None:
         with self._lock:
@@ -134,14 +139,17 @@ class MemoryTutorStore:
         with self._lock:
             return sum(1 for goal in self._goals.values() if goal.owner_id == owner_id)
 
-    def save_exercises(self, owner_id: UUID, goal_id: UUID, exercises: list[Exercise]) -> bool:
+    def save_exercises(self, owner_id: UUID, goal_id: UUID, exercises: list[Exercise], *, max_total: int):
         with self._lock:
             goal = self._goals.get(goal_id)
             if goal is None or goal.owner_id != owner_id:
-                return False
+                return "missing"
+            existing = sum(1 for item in self._exercises.values() if item.owner_id == owner_id and item.goal_id == goal_id)
+            if existing + len(exercises) > max_total:
+                return "full"
             for exercise in exercises:
                 self._exercises[exercise.id] = exercise
-            return True
+            return "saved"
 
     def get_exercise(self, owner_id: UUID, exercise_id: UUID) -> Exercise | None:
         with self._lock:
@@ -265,12 +273,21 @@ class PostgresTutorStore:
 
     # ---------------------------------------------------------------- goals
 
-    def save_goal(self, goal: LearningGoal) -> None:
-        self._run(lambda execute: execute(
-            f"INSERT INTO jarvis_app.tutor_goals ({_GOAL_COLUMNS}) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (goal.id, goal.owner_id, goal.topic, goal.level, goal.weekly_minutes, goal.target_date,
-             list(goal.subtopics), goal.status, goal.created_at, goal.updated_at)),
-            "Failed to store the learning goal.")
+    def save_goal(self, goal: LearningGoal, *, max_goals: int) -> bool:
+        def work(execute):
+            # Serialize goal creation per owner so the count and the insert cannot interleave.
+            execute("SELECT pg_advisory_xact_lock(hashtextextended('jarvis.tutor_goals:' || %s::text, 0))",
+                    (goal.owner_id,))
+            if execute("SELECT count(*) FROM jarvis_app.tutor_goals WHERE owner_id = %s",
+                       (goal.owner_id,)).fetchone()[0] >= max_goals:
+                return False
+            execute(
+                f"INSERT INTO jarvis_app.tutor_goals ({_GOAL_COLUMNS}) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (goal.id, goal.owner_id, goal.topic, goal.level, goal.weekly_minutes, goal.target_date,
+                 list(goal.subtopics), goal.status, goal.created_at, goal.updated_at))
+            return True
+
+        return self._run(work, "Failed to store the learning goal.")
 
     def get_goal(self, owner_id: UUID, goal_id: UUID) -> LearningGoal | None:
         row = self._run(lambda execute: execute(
@@ -311,14 +328,19 @@ class PostgresTutorStore:
 
     # ---------------------------------------------------------------- exercises
 
-    def save_exercises(self, owner_id: UUID, goal_id: UUID, exercises: list[Exercise]) -> bool:
-        """Insert all exercises in one transaction, or none; False when the goal does not exist for the owner."""
+    def save_exercises(self, owner_id: UUID, goal_id: UUID, exercises: list[Exercise], *, max_total: int):
+        """Insert all exercises in one transaction, or none: "missing" (no such goal), "full" (cap) or "saved"."""
 
         def work(execute):
-            # Lock the goal row so a concurrent goal delete cannot interleave with the inserts.
-            if execute("SELECT 1 FROM jarvis_app.tutor_goals WHERE id = %s AND owner_id = %s FOR SHARE",
+            # Lock the goal row exclusively: a concurrent delete or a concurrent insert for the same goal waits,
+            # so the cap check and the inserts cannot interleave (v6.5 review).
+            if execute("SELECT 1 FROM jarvis_app.tutor_goals WHERE id = %s AND owner_id = %s FOR UPDATE",
                        (goal_id, owner_id)).fetchone() is None:
-                return False
+                return "missing"
+            existing = execute("SELECT count(*) FROM jarvis_app.tutor_exercises WHERE owner_id = %s AND goal_id = %s",
+                               (owner_id, goal_id)).fetchone()[0]
+            if existing + len(exercises) > max_total:
+                return "full"
             for item in exercises:
                 execute(
                     f"INSERT INTO jarvis_app.tutor_exercises ({_EXERCISE_COLUMNS}) "
@@ -327,7 +349,7 @@ class PostgresTutorStore:
                      list(item.choices) if item.choices is not None else None, item.answer_index,
                      list(item.accepted_answers) if item.accepted_answers is not None else None,
                      item.explanation, item.source, item.box, item.next_review_at, item.created_at))
-            return True
+            return "saved"
 
         return self._run(work, "Failed to store exercises.")
 

@@ -163,6 +163,10 @@ class ExerciseCreateRequest(StrictSchema):
                 raise ValueError("Short-answer exercises take accepted_answers, not choices or answer_index.")
             if self.accepted_answers is None:
                 raise ValueError("Short-answer exercises need 1 to 10 accepted answers.")
+            from jarvis.tutor.grading import normalize_answer
+
+            if any(not normalize_answer(item) for item in self.accepted_answers):
+                raise ValueError("An accepted answer must contain more than punctuation.")
         return self
 
 

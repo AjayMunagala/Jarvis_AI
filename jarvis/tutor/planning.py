@@ -19,6 +19,15 @@ SESSION_MINUTES = 30
 MAX_PLAN_SESSIONS = 200
 
 
+def _minutes_needed(required: int, session_minutes: int, span_days: int) -> int:
+    """Whole sessions a week needed to fit ``required`` sessions into ``span_days``, in minutes.
+
+    Uses the same basis as the feasibility check (sessions per 7 days), so for an infeasible plan this is always
+    more than the weekly minutes given (v6.5 review).
+    """
+    return ceil(required * 7 / max(1, span_days)) * session_minutes
+
+
 def build_study_plan(goal: LearningGoal, start_date: date, *, max_sessions: int = MAX_PLAN_SESSIONS) -> StudyPlan:
     session_minutes = min(SESSION_MINUTES, goal.weekly_minutes)
     per_week = max(1, goal.weekly_minutes // session_minutes)
@@ -44,13 +53,14 @@ def build_study_plan(goal: LearningGoal, start_date: date, *, max_sessions: int 
         capacity = span_days * per_week // 7
         if capacity < required:
             feasible = False
-            weeks = max(1, ceil(span_days / 7))
-            needed = ceil(required * session_minutes / weeks)
+            needed = _minutes_needed(required, session_minutes, span_days)
             note = (f"{required} sessions of {session_minutes} minutes do not fit before {target.isoformat()} at "
                     f"{goal.weekly_minutes} minutes a week. This plan squeezes them in anyway and needs about "
                     f"{needed} minutes a week; choose a later target date or more weekly minutes to make it "
                     f"realistic.")
 
+    if (date.max - start_date).days < span_days:
+        raise ValueError("The plan would run past the last supported date; choose an earlier start date.")
     sessions = [
         StudySession(date=start_date + timedelta(days=(index * span_days) // required), subtopic=subtopic,
                      minutes=session_minutes, kind=kind)
@@ -58,12 +68,11 @@ def build_study_plan(goal: LearningGoal, start_date: date, *, max_sessions: int 
     ]
     truncated = len(sessions) > max_sessions
     sessions = sessions[:max(0, max_sessions)]
-    plan_weeks = max(1, ceil(span_days / 7))
     return StudyPlan(
         goal_id=goal.id, start_date=start_date, end_date=sessions[-1].date if sessions else start_date,
         target_date=target, session_minutes=session_minutes, sessions_per_week=per_week,
         weekly_minutes=goal.weekly_minutes,
-        weekly_minutes_needed=ceil(required * session_minutes / plan_weeks),
+        weekly_minutes_needed=_minutes_needed(required, session_minutes, span_days),
         total_minutes=sum(item.minutes for item in sessions), feasible=feasible, note=note,
         truncated=truncated, sessions=sessions,
     )
