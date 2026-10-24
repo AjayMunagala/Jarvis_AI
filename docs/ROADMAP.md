@@ -316,3 +316,6 @@ The scope was derived from the repository, because no earlier document defined t
   - Stable embeddings (survive restarts), one token estimator, the knowledge budget on the shared packer.
   - Research documents can be indexed in knowledge and the graph, with every chunk marked untrusted (migration 0064).
   - DOCX parsing; PDF is refused until the owner approves a PDF library.
+- **v4.7 Integrated assistant experience in chat: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
+  - Opt-in workspace context (`JARVIS_CHAT_WORKSPACE_CONTEXT_ENABLED`): cited, read-only knowledge excerpts and summaries of tasks, reminders and calendar.
+  - Default chat is unchanged; chat never writes.

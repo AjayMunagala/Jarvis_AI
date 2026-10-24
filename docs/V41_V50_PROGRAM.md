@@ -64,7 +64,8 @@ Results are always labelled as real, mock or unavailable.
 | v4.4 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review (no bypass found; 8 status-reporting and robustness findings, all fixed) | Python 1135 passed; live PostgreSQL 59 passed; Vitest 132; E2E 11 | branch head at push |
 | v4.5 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review found one blocking defect (a run could resurrect a deleted job or rewind the schedule), since fixed with nine other findings | Python 1160 passed; live PostgreSQL 61 passed; frontend unchanged | branch head at push |
 | v4.6 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review found three blocking defects in research indexing (fence lost on chunking, filename breaking the fence, a chunker that crawled), since fixed with eight other findings | Python 1182 passed; live PostgreSQL 63 passed; frontend unchanged | branch head at push |
-| v4.7–v5.0 | NOT STARTED | — | — |
+| v4.7 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review (no blocking issues; 7 findings, all fixed) | Python 1194 passed; live PostgreSQL 63 passed; Vitest 132; E2E 11 | branch head at push |
+| v4.8–v5.0 | NOT STARTED | — | — |
 
 ---
 
@@ -524,4 +525,60 @@ These were run on the v4.6 commit in a separate clean checkout.
 - The context budget selects at most 30 chunks.
 - Uploads of PDF or other binary files now return 422 instead of storing garbage.
 - Chat context assembly (v2.2) keeps its character budget. v4.7 adds knowledge to chat through the shared records.
+
+## v4.7 — Integrated assistant experience in chat
+
+### Why it was needed
+Chat used none of the v3.1–v4.6 services. The model could not see the owner's tasks, reminders, calendar or knowledge store, even though all of them exist in JARVIS. The Assistant view was already reachable in this branch, so v4.7 did not need to change it.
+
+### Changes
+- **Workspace context, opt-in.** It is controlled by `JARVIS_CHAT_WORKSPACE_CONTEXT_ENABLED`, which is off by default, so default chat is unchanged. When it is on, chat adds two kinds of record to the model's context:
+  - **Knowledge records (`K` refs):** the best-matching knowledge-store chunks. Chunks from untrusted documents are labelled `untrusted document: …`.
+  - **Workspace records (`W` refs):** one-line summaries of open tasks, reminders due in the next 48 hours, and calendar events in the next 48 hours.
+- **Read-only.** Chat creates, changes or deletes nothing, and building the context writes no audit records.
+- **Capabilities.** Each source is used only with its read capability (`knowledge.read`, `assistant.read`).
+- **Bounded and safe.**
+  - Gathering uses at most half of the remaining request time and stops between queries once that is spent.
+  - A failing or slow source is skipped and reported (`workspace_status`); it never fails the chat request.
+  - Stateless chat without an owner is unchanged.
+- **Untrusted data.**
+  - Records are rendered with the rest of the context as untrusted JSON data.
+  - The system instruction explains K and W refs, including that W titles may have been created by automations.
+  - Citations accept K and W refs only when such records were supplied.
+- **Budget order.**
+  1. memories;
+  2. conversation history;
+  3. documents;
+  4. knowledge;
+  5. workspace summaries, last, with at most 8 slots.
+- **Visibility.** The chat UI and `/status` show whether workspace context is on, and the UI says when it was unavailable.
+
+### Independent review and acceptance
+The review found no blocking issues. It confirmed:
+- owner isolation;
+- correct capability checks, which fail closed;
+- that untrusted text cannot escape the JSON data block;
+- that workspace text is never stored in conversations or memory;
+- additive API contracts.
+
+It found seven issues, all fixed with tests before acceptance:
+1. Workspace summaries could crowd out relevant documents.
+2. A timed-out gathering kept a worker thread busy.
+3. Stateless chat returned an empty context object when the flag was on.
+4. Each chat turn wrote a search audit row.
+5. Literal "[K1]" text counted as an unknown citation when the feature was off.
+6. W records were not described as possibly coming from automations.
+7. Test gaps.
+
+Pre-existing, outside v4.7: `MemoryAssistantStore.list_tasks` can fail when stored due dates mix naive and timezone-aware values. Chat now treats naive dates as UTC; the store fix is left for v5.0.
+
+**Tests:**
+- `tests/test_v47_chat_workspace.py`: 12 tests.
+- Python: 1194 passed, 0 failed, 17 skipped.
+- Live PostgreSQL: 63 passed.
+- Vitest: 132. E2E: 11.
+
+These were run on the v4.7 commit in a separate clean checkout.
+
+**Not covered:** chat still uses the configured provider, not the v5.1 model router.
 

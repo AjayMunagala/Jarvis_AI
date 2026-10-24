@@ -662,3 +662,12 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - **Parsing:** DOCX is parsed safely, and PDF is refused.
 - **Open decision:** the owner must approve a PDF library before PDF support can be added.
 - **Details:** `docs/V41_V50_PROGRAM.md`.
+
+## v4.7 — Integrated assistant experience in chat (accepted by the project lead on 2026-10-24)
+
+- **What it adds:** `JARVIS_CHAT_WORKSPACE_CONTEXT_ENABLED` (off by default) gives chat read-only, cited context:
+  - knowledge excerpts (K refs);
+  - summaries of open tasks, reminders and calendar events (W refs).
+- **Read-only:** chat never writes.
+- **Failure handling:** each source needs its read capability, and a failing source degrades the chat instead of failing it.
+- **Details:** `docs/V41_V50_PROGRAM.md`.
