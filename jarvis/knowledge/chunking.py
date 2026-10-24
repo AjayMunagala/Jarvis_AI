@@ -1,16 +1,22 @@
-"""Text chunking, deterministic embeddings, and Reciprocal Rank Fusion (RRF) (v3.3)."""
+"""Text chunking, deterministic embeddings, and Reciprocal Rank Fusion (RRF) (v3.3).
 
+v4.6: the hashed embedding uses BLAKE2b instead of Python's ``hash()``,
+which is randomized per process, so stored vectors stay valid across
+restarts (model name ``stable-hash-64-v2``). Vectors stored under the old
+model name are ignored and recomputed. Token counts use the single shared
+estimator from ``jarvis.routing.requirements``.
+"""
+
+import hashlib
 import math
 import re
 from typing import Any
 from uuid import UUID
 
 from jarvis.knowledge.models import KnowledgeChunk, ScoredChunk
+from jarvis.routing.requirements import estimate_tokens  # noqa: F401 - the one shared token estimator (v4.6)
 
-
-def estimate_tokens(text: str) -> int:
-    """Heuristic token count based on standard ~4 characters per token."""
-    return max(1, math.ceil(len(text) / 4))
+EMBEDDING_MODEL = "stable-hash-64-v2"
 
 
 def chunk_text(
@@ -52,13 +58,12 @@ def chunk_text(
 
 
 def compute_deterministic_embedding(text: str, dim: int = 64) -> list[float]:
-    """Deterministic, normalized pseudo-semantic vector representation for offline environments."""
+    """Deterministic, normalized hashed bag-of-words vector; identical in every process (v4.6)."""
     words = re.findall(r"\w+", text.lower())
     vector = [0.0] * dim
     for word in words:
-        h = hash(word)
-        idx = abs(h) % dim
-        vector[idx] += 1.0
+        digest = hashlib.blake2b(word.encode("utf-8"), digest_size=8).digest()
+        vector[int.from_bytes(digest, "big") % dim] += 1.0
 
     magnitude = math.sqrt(sum(v * v for v in vector))
     if magnitude > 0.0:

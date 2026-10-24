@@ -1,6 +1,7 @@
 """Research service coordinating multi-format parsing, structural injection fencing, and synthesis (v3.4)."""
 
 import base64
+import binascii
 from datetime import datetime, timezone
 import logging
 from typing import Any
@@ -15,7 +16,7 @@ from jarvis.research.models import (
     ResearchSynthesisPage,
     ResearchSynthesizeRequest,
 )
-from jarvis.research.parsers import parse_document_content
+from jarvis.research.parsers import DocumentParsingError, parse_document_content
 from jarvis.research.stores import ResearchStore
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,8 @@ class ResearchService:
     def __init__(self, store: ResearchStore, audit_service: Any = None) -> None:
         self.store = store
         self.audit_service = audit_service
+        self.knowledge_service: Any = None  # v4.6: set by the application for index_in_knowledge
+        self.graph_service: Any = None
 
     def _audit(self, owner_id: UUID, event_type: str, subject: str, details: dict[str, Any]) -> None:
         if self.audit_service is not None:
@@ -46,7 +49,10 @@ class ResearchService:
     ) -> ParsedDocument:
         raw_bytes = None
         if req.data_base64:
-            raw_bytes = base64.b64decode(req.data_base64)
+            try:
+                raw_bytes = base64.b64decode(req.data_base64, validate=True)
+            except (binascii.Error, ValueError) as exc:  # v4.6: was an unhandled 500
+                raise DocumentParsingError("data_base64 is not valid base64.") from exc
 
         fenced_text, file_size, page_count = parse_document_content(
             filename=req.filename,
@@ -56,15 +62,19 @@ class ResearchService:
         )
 
         now = datetime.now(timezone.utc)
+        doc_id = uuid4()
+        metadata: dict[str, Any] = {"fenced": True, "encoding": "utf-8"}
+        if req.index_in_knowledge:
+            metadata.update(self._index(owner_id, doc_id, req, fenced_text))
         doc = ParsedDocument(
-            id=uuid4(),
+            id=doc_id,
             owner_id=owner_id,
             filename=req.filename,
             content_type=req.content_type,
             file_size_bytes=file_size,
             page_count=page_count,
             extracted_text=fenced_text,
-            metadata={"fenced": True, "encoding": "utf-8"},
+            metadata=metadata,
             created_at=now,
         )
 
@@ -76,6 +86,39 @@ class ResearchService:
             {"filename": doc.filename, "size": file_size, "pages": page_count},
         )
         return doc
+
+    def _index(self, owner_id: UUID, doc_id: UUID, req: DocumentParseRequest, fenced_text: str) -> dict[str, Any]:
+        """v4.6: index the parsed document in the knowledge store and the knowledge graph; failures are reported."""
+        result: dict[str, Any] = {}
+        if self.knowledge_service is None:
+            return {"knowledge_index": "unavailable"}
+        try:
+            from jarvis.knowledge.models import KnowledgeDocumentCreateRequest, SourceType
+
+            detail = self.knowledge_service.ingest_document(owner_id, KnowledgeDocumentCreateRequest(
+                title=req.filename[:200], content=fenced_text, source_type=SourceType.FILE,
+                source_uri=f"research:{doc_id}", metadata={"research_document_id": str(doc_id), "untrusted": True}))
+            result.update(knowledge_index="indexed", knowledge_document_id=str(detail.document.id),
+                          knowledge_chunks=len(detail.chunks))
+        except Exception as exc:  # noqa: BLE001 - the parsed document is still stored; the failure is visible
+            logger.warning("Research document %s could not be indexed: %s", doc_id, type(exc).__name__)
+            return {"knowledge_index": f"failed ({type(exc).__name__})"}
+        if self.graph_service is None:
+            result["graph"] = "unavailable"
+            return result
+        try:
+            from jarvis.knowledge_graph.models import EntityInput, Provenance
+
+            entity = self.graph_service.upsert_entity(owner_id, EntityInput(
+                entity_type="document", name=req.filename[:200], key=f"research:{doc_id}",
+                attributes={"knowledge_document_id": result["knowledge_document_id"],
+                            "content_type": req.content_type[:100]},
+                provenance=Provenance(source_kind="document", source_ref=f"research:{doc_id}", extractor="rule")))
+            result.update(graph="recorded", graph_entity_id=str(getattr(entity, "entity_id", getattr(entity, "id", ""))))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Research document %s could not be added to the graph: %s", doc_id, type(exc).__name__)
+            result["graph"] = f"failed ({type(exc).__name__})"
+        return result
 
     def get_document(self, owner_id: UUID, doc_id: UUID) -> ParsedDocument | None:
         return self.store.get_document(owner_id, doc_id)
@@ -89,7 +132,12 @@ class ResearchService:
         return ParsedDocumentPage(items=items, total=total)
 
     def delete_document(self, owner_id: UUID, doc_id: UUID) -> bool:
+        existing = self.store.get_document(owner_id, doc_id)
         deleted = self.store.delete_document(owner_id, doc_id)
+        linked = (existing.metadata or {}).get("knowledge_document_id") if existing else None
+        if deleted and linked and self.knowledge_service is not None:
+            # v4.6: the knowledge copy goes with it, so deleting (or compensating) a document leaves nothing behind.
+            self.knowledge_service.delete_document(owner_id, UUID(linked))
         if deleted:
             self._audit(
                 owner_id,

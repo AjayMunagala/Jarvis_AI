@@ -115,7 +115,7 @@ class ContextPackage(Frozen):
     contradictions: tuple[Contradiction, ...]
     budget_tokens: int = Field(ge=0)
     used_tokens: int = Field(ge=0)
-    budget_source: Literal["model_context", "conservative_default"]
+    budget_source: Literal["model_context", "conservative_default", "request"]
     model_key: StrictStr | None = None
     similarity: StrictStr
     note: StrictStr

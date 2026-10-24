@@ -47,6 +47,9 @@ class DocumentParseRequest(StrictSchema):
     content_type: str = Field(default="text/plain", max_length=100)
     text_content: str | None = None
     data_base64: str | None = None
+    # v4.6: also index the parsed text in the knowledge store (searchable, usable as context) and record the
+    # document in the knowledge graph. The text stays fenced as untrusted content.
+    index_in_knowledge: bool = False
 
 
 class ResearchSynthesizeRequest(StrictSchema):

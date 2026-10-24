@@ -119,7 +119,8 @@ def _excerpt(content: str, tokens: int) -> tuple[str, bool]:
 
 def assemble(request: ContextRequest, candidates: Iterable[MemoryCandidate], *, model: ModelDescriptor | None = None,
              weights: RelevanceWeights = RelevanceWeights(), similarity: SimilarityScorer | None = None,
-             now: datetime | None = None, outdated_refs: frozenset[str] = frozenset()) -> ContextPackage:
+             now: datetime | None = None, outdated_refs: frozenset[str] = frozenset(),
+             budget_override: int | None = None) -> ContextPackage:
     similarity = similarity or LexicalSimilarity()
     # External scorers (for example a future semantic scorer) are validated: invalid scores count as no match.
     from jarvis.contextual.sources import checked_similarity  # noqa: PLC0415 - avoids an import cycle
@@ -182,7 +183,10 @@ def assemble(request: ContextRequest, candidates: Iterable[MemoryCandidate], *, 
         scored.append((round(total, 6), item, components, tuple(reasons)))
     scored.sort(key=lambda entry: (-entry[0], entry[1].candidate_id))
 
-    budget, source = budget_for(model, request)
+    if budget_override is not None:  # v4.6: a caller with its own budget (for example the knowledge store)
+        budget, source = max(0, budget_override), "request"
+    else:
+        budget, source = budget_for(model, request)
     used = 0
     items: list[PackagedItem] = []
     counters: dict[str, int] = {}

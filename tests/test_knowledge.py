@@ -56,8 +56,9 @@ def test_chunk_text_boundary_and_overlap():
 
 
 def test_token_estimation():
+    # v4.6: one shared, conservative estimator (about 3 characters per token) for every context budget.
     assert estimate_tokens("hello") == 2
-    assert estimate_tokens("a" * 100) == 25
+    assert estimate_tokens("a" * 100) == 34
 
 
 def test_deterministic_embedding_and_cosine_similarity():

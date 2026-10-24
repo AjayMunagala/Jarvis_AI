@@ -7,7 +7,10 @@ from time import monotonic
 from typing import Any, Callable, Protocol
 from uuid import UUID
 
-from jarvis.knowledge.chunking import compute_deterministic_embedding, cosine_similarity
+from jarvis.knowledge.chunking import EMBEDDING_MODEL, compute_deterministic_embedding, cosine_similarity
+
+SEMANTIC_SCAN_LIMIT = 5000  # most recent chunks scanned per semantic search (v4.6; was an unordered 500)
+EMBEDDING_BACKFILL_LIMIT = 200  # stale vectors replaced per search
 from jarvis.knowledge.models import KnowledgeChunk, KnowledgeDocument, SourceType
 from jarvis.persistence.operation_timeout import (
     bounded_connect_timeout, execute_with_deadline, operation_deadline,
@@ -212,7 +215,7 @@ class PostgresKnowledgeStore:
                     emb = compute_deterministic_embedding(chunk.content)
                     execute_with_deadline(
                         conn, deadline, emb_sql,
-                        (chunk.id, chunk.owner_id, "deterministic-hash-64", json.dumps(emb), chunk.created_at),
+                        (chunk.id, chunk.owner_id, EMBEDDING_MODEL, json.dumps(emb), chunk.created_at),
                         clock=monotonic,
                     )
         except Exception as exc:
@@ -355,20 +358,38 @@ class PostgresKnowledgeStore:
     ) -> list[tuple[KnowledgeChunk, str]]:
         # Fetch embeddings and compute cosine similarity in application memory for maximum portable compatibility
         deadline = operation_deadline(self._operation_timeout, clock=monotonic)
+        # v4.6: the most recent chunks, ordered; a vector stored under another model (for example the old
+        # process-specific hash) is recomputed from the chunk text and replaced.
         sql = """
-            SELECT c.id, c.document_id, c.owner_id, c.chunk_index, c.content, c.token_count, c.created_at, d.title, e.embedding
+            SELECT c.id, c.document_id, c.owner_id, c.chunk_index, c.content, c.token_count, c.created_at, d.title,
+                   e.embedding, e.model_name
             FROM jarvis_app.knowledge_chunks c
-            JOIN jarvis_app.knowledge_documents d ON c.document_id = d.id
-            JOIN jarvis_app.knowledge_embeddings e ON c.id = e.chunk_id
+            JOIN jarvis_app.knowledge_documents d ON c.document_id = d.id AND d.owner_id = c.owner_id
+            LEFT JOIN jarvis_app.knowledge_embeddings e ON c.id = e.chunk_id
             WHERE c.owner_id = %s
-            LIMIT 500
+            ORDER BY c.created_at DESC, c.id
+            LIMIT %s
+        """
+        upsert_sql = """
+            INSERT INTO jarvis_app.knowledge_embeddings (chunk_id, owner_id, model_name, embedding, created_at)
+            VALUES (%s, %s, %s, %s, now())
+            ON CONFLICT (chunk_id) DO UPDATE SET model_name = EXCLUDED.model_name, embedding = EXCLUDED.embedding
         """
         try:
             with self._open(deadline) as conn:
-                rows = execute_with_deadline(conn, deadline, sql, (owner_id,), clock=monotonic).fetchall()
+                rows = execute_with_deadline(conn, deadline, sql, (owner_id, SEMANTIC_SCAN_LIMIT),
+                                             clock=monotonic).fetchall()
                 scored: list[tuple[float, KnowledgeChunk, str]] = []
+                refreshed = 0
                 for r in rows:
-                    vec = json.loads(r[8]) if isinstance(r[8], str) else r[8]
+                    if r[9] == EMBEDDING_MODEL and r[8] is not None:
+                        vec = json.loads(r[8]) if isinstance(r[8], str) else r[8]
+                    else:
+                        vec = compute_deterministic_embedding(r[4])
+                        if refreshed < EMBEDDING_BACKFILL_LIMIT:
+                            execute_with_deadline(conn, deadline, upsert_sql,
+                                                  (r[0], owner_id, EMBEDDING_MODEL, json.dumps(vec)), clock=monotonic)
+                            refreshed += 1
                     sim = cosine_similarity(query_vector, vec)
                     if sim > 0.05:
                         chunk = KnowledgeChunk(

@@ -134,11 +134,11 @@ class KnowledgeService:
             lexical_matches, semantic_matches, k=60, top_k=req.top_k
         )
 
-        self._audit(
+        self._audit(  # v4.6: metadata only; the query text is never stored in the audit trail
             owner_id,
             "knowledge.search",
-            f"knowledge:query:{req.query[:50]}",
-            {"query": req.query, "matched": len(scored_results)},
+            "knowledge:search",
+            {"query_chars": len(req.query), "matched": len(scored_results)},
         )
 
         return KnowledgeSearchResponse(
@@ -152,6 +152,10 @@ class KnowledgeService:
     def allocate_context_budget(
         self, owner_id: UUID, req: ContextBudgetRequest
     ) -> ContextBudgetAllocation:
+        """Pack knowledge chunks with the shared v5.3 context packer (v4.6: one context contract)."""
+        from jarvis.contextual.models import ContextRequest, MemoryCandidate
+        from jarvis.contextual.selection import assemble
+
         prompt_tokens = estimate_tokens(req.prompt)
         system_reserve = 300
         budget_for_chunks = max(0, req.max_context_tokens - prompt_tokens - system_reserve)
@@ -167,13 +171,22 @@ class KnowledgeService:
             )
             candidates = [r.chunk for r in search_res.results]
 
-        selected: list[KnowledgeChunk] = []
-        accumulated_tokens = 0
-
-        for chunk in candidates:
-            if accumulated_tokens + chunk.token_count <= budget_for_chunks:
-                selected.append(chunk)
-                accumulated_tokens += chunk.token_count
+        by_id = {f"knowledge:{chunk.id}": chunk for chunk in candidates}
+        # Explicitly chosen documents and search results are already relevant, so they are pinned: the packer
+        # then applies deduplication, the token budget and excerpting, in candidate order of its own scoring.
+        package = assemble(
+            ContextRequest(owner_id=owner_id, query=req.prompt[:20_000], categories=("retrieved_knowledge",),
+                           max_items=30, min_score=0.0),
+            [MemoryCandidate(candidate_id=key, owner_id=chunk.owner_id, category="retrieved_knowledge",
+                             content=chunk.content[:4000], source_ref=f"knowledge:{chunk.document_id}#{chunk.chunk_index}",
+                             reliability="document", pinned=True, updated_at=chunk.created_at)
+             for key, chunk in by_id.items()],
+            budget_override=budget_for_chunks,
+        )
+        selected = [by_id[item.candidate_id].model_copy(update={"content": item.excerpt,
+                                                                "token_count": estimate_tokens(item.excerpt)})
+                    for item in package.items]
+        accumulated_tokens = package.used_tokens
 
         total_used = prompt_tokens + system_reserve + accumulated_tokens
         remaining = max(0, req.max_context_tokens - total_used)
@@ -188,4 +201,6 @@ class KnowledgeService:
                 "knowledge_context": accumulated_tokens,
             },
             selected_chunks=selected,
+            omitted_count=len(package.omitted),
+            truncated_count=sum(1 for item in package.items if item.truncated),
         )

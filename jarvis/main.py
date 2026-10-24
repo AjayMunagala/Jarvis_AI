@@ -202,6 +202,9 @@ def create_app(
         research_store,
         audit_service=app.state.audit_service,
     )
+    # v4.6: parsed research documents can be indexed in the knowledge store and recorded in the knowledge graph.
+    app.state.research_service.knowledge_service = app.state.knowledge_service
+    app.state.research_service.graph_service = getattr(app.state.intelligence, "graph", None)
     app.state.scheduler_service = SchedulerService(
         scheduler_store,
         audit_service=app.state.audit_service,

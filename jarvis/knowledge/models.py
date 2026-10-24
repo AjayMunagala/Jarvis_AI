@@ -87,6 +87,9 @@ class ContextBudgetAllocation(StrictSchema):
     remaining_tokens: int
     sections: dict[str, int]
     selected_chunks: list[KnowledgeChunk]
+    # v4.6: chunks left out (budget, duplicates) and chunks shortened to fit; selected_chunks carry the excerpt.
+    omitted_count: int = 0
+    truncated_count: int = 0
 
 
 class KnowledgeDocumentPage(StrictSchema):
