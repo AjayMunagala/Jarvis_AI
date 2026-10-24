@@ -37,6 +37,7 @@ PREFIX_CATEGORY = (
     ("/health/security", "health"), ("/finance/", "finance"), ("/improvement/", "improvement"),
     ("/autonomous/", "orchestration"), ("/integrations/", "integration"), ("/tutor/", "tutor"),
     ("/travel/", "travel"),
+    ("/lifeadmin/", "assistant"),  # v7.5 life administration audits under the assistant category
     ("/sources", "scheduler"),  # v7.3 event sources belong to the scheduler/notification subsystem
 )
 _ID = re.compile(r"/(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Z]{2}-[0-9a-f]{16})(?=/|$)")

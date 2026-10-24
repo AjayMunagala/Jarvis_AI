@@ -72,6 +72,9 @@ class Capability(StrEnum):
     # Travel and decision planning (v7.4): no booking, purchasing or account access.
     TRAVEL_READ = "travel.read"
     TRAVEL_WRITE = "travel.write"
+    # Life administration (v7.5): owner-entered documents, bills and reminders; no payments or bank access.
+    LIFEADMIN_READ = "lifeadmin.read"
+    LIFEADMIN_WRITE = "lifeadmin.write"
 
 
 _OWNER_CAPABILITIES = frozenset({
@@ -121,6 +124,8 @@ _OWNER_CAPABILITIES = frozenset({
     Capability.TUTOR_WRITE,
     Capability.TRAVEL_READ,
     Capability.TRAVEL_WRITE,
+    Capability.LIFEADMIN_READ,
+    Capability.LIFEADMIN_WRITE,
 })
 
 

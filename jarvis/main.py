@@ -43,6 +43,9 @@ from jarvis.sources.stores import MemorySourceStore, PostgresSourceStore
 from jarvis.tutor.service import TutorService
 from jarvis.tutor.stores import MemoryTutorStore, PostgresTutorStore
 from jarvis.api.routes.travel import router as travel_router
+from jarvis.api.routes.lifeadmin import router as lifeadmin_router
+from jarvis.lifeadmin.service import LifeAdminService
+from jarvis.lifeadmin.stores import MemoryLifeAdminStore, PostgresLifeAdminStore
 from jarvis.travel.service import TravelService
 from jarvis.travel.stores import MemoryTravelStore, PostgresTravelStore
 from jarvis.integrations.service import IntegrationService
@@ -223,6 +226,7 @@ def create_app(
         finance_store = PostgresFinanceStore(url, **timeouts)
         tutor_store = PostgresTutorStore(url, **timeouts)
         travel_store = PostgresTravelStore(url, **timeouts)
+        lifeadmin_store = PostgresLifeAdminStore(url, **timeouts)
     else:
         assistant_store = MemoryAssistantStore()
         workflow_store = MemoryWorkflowStore()
@@ -233,6 +237,7 @@ def create_app(
         finance_store = MemoryFinanceStore()
         tutor_store = MemoryTutorStore()
         travel_store = MemoryTravelStore()
+        lifeadmin_store = MemoryLifeAdminStore()
     app.state.assistant_service = AssistantService(assistant_store, audit_service=app.state.audit_service)
     app.state.knowledge_service = KnowledgeService(
         knowledge_store,
@@ -269,6 +274,13 @@ def create_app(
         travel_store, audit_service=app.state.audit_service, assistant_service=app.state.assistant_service,
         model_timeout_seconds=resolved_settings.provider_connect_timeout_seconds
         + resolved_settings.provider_read_timeout_seconds * 2 + 5,
+    )
+    # v7.5 life administration: owner-entered documents and bills; reminders go through the assistant service;
+    # a bill's finance account is only checked for ownership (read-only). Nothing is paid or looked up.
+    app.state.lifeadmin_service = LifeAdminService(
+        lifeadmin_store, audit_service=app.state.audit_service, assistant_service=app.state.assistant_service,
+        finance_service=app.state.finance_service,
+        utc_offset_minutes=resolved_settings.scheduler_utc_offset_minutes,
     )
     # v4.9: proposals, snapshots and virtual prompt changes are durable when persistence is enabled.
     improvement_store = (PostgresImprovementStore(
@@ -390,6 +402,7 @@ def create_app(
     app.include_router(integrations_router)
     app.include_router(tutor_router)
     app.include_router(travel_router)
+    app.include_router(lifeadmin_router)
     app.include_router(sources_router)
 
     @app.exception_handler(RequestValidationError)

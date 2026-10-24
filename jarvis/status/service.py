@@ -257,6 +257,16 @@ class StatusService:
                                          "Options, prices and times are owner-entered and unverified.",
                                          "No currency conversion: segment costs must use the trip currency.",
                                          "Model suggestions are unverified and labeled demo with the demo provider.")),
+            SubsystemReport(key="lifeadmin", name="Life administration (v7.5)", state="limited",
+                            storage=_storage(getattr(state, "lifeadmin_service", None)),
+                            limitations=("Owner-entered data only; nothing is looked up or verified.",
+                                         "No payments or bank access: marking a bill paid only records it.",
+                                         "No document storage: metadata only, and at most the last 4 characters "
+                                         "of an identifier.",
+                                         "No currency conversion: totals are per currency.",
+                                         "Reminders depend on the scheduler runner being on "
+                                         "(JARVIS_SCHEDULER_RUNNER_ENABLED); local days use the fixed "
+                                         "scheduler UTC offset, not daylight-saving rules.")),
             self._sources(),
             SubsystemReport(key="autonomous", name="Autonomous coordinator (v4.0)", state="limited",
                             limitations=("Keyword intent routing.",
