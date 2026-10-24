@@ -23,6 +23,8 @@ class PromptMutationProposal(StrictSchema):
     snapshot_id: UUID | None = None
     created_at: datetime
     decided_at: datetime | None = None
+    # v4.9: the evaluation run when the proposal was made (baseline vs candidate scores and regressions).
+    evaluation: dict[str, Any] | None = None
 
 
 class ProposalCreateRequest(StrictSchema):

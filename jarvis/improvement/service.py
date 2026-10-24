@@ -19,7 +19,7 @@ from jarvis.improvement.models import (
     ProposalDecisionRequest,
     ProposalPage,
 )
-from jarvis.improvement.sandbox import run_offline_benchmarks
+from jarvis.improvement.sandbox import compare_with_baseline, run_offline_benchmarks
 from jarvis.improvement.stores import ImprovementStore
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,8 @@ class ImprovementService:
         self.audit_service = audit_service
         self.approval_service: Any = None  # v4.3: apply and restore run only under an approved request
         self._apply_lock = threading.Lock()  # one apply/restore at a time, re-checked after the approval is used
-        # In-memory registry for mock/virtual target contents (e.g. prompt templates)
+        # Built-in defaults of the virtual targets (prompt templates without a file). v4.9: changes to them are
+        # kept in the store, so they survive restarts when persistence is enabled.
         self._target_storage: dict[str, str] = {
             "prompts/assistant_persona.md": "You are JARVIS, a helpful, secure AI personal assistant.",
             "prompts/summarizer.md": "Summarize the given text concisely and accurately.",
@@ -79,7 +80,8 @@ class ImprovementService:
         """Retrieves target content from virtual storage or local filesystem."""
         file_path = resolve_improvement_target(self.repo_root, target_name, self._target_storage)
         if file_path is None:
-            return self._target_storage[target_name]
+            stored = self.store.get_target_content(target_name)
+            return stored if stored is not None else self._target_storage[target_name]
         if file_path.is_file():
             return file_path.read_text(encoding="utf-8")
         return ""
@@ -88,7 +90,7 @@ class ImprovementService:
         """Saves target content to virtual storage or local filesystem."""
         file_path = resolve_improvement_target(self.repo_root, target_name, self._target_storage)
         if file_path is None:
-            self._target_storage[target_name] = content
+            self.store.set_target_content(target_name, content)
             return
         if file_path.is_file():  # only existing allowlisted prompt files are rewritten; nothing is created
             file_path.write_text(content, encoding="utf-8")
@@ -99,6 +101,8 @@ class ImprovementService:
         resolve_improvement_target(self.repo_root, req.target_name, self._target_storage)
         original = self.get_target_content(req.target_name)
         diff = generate_unified_diff(original, req.proposed_content, req.target_name)
+        # v4.9: every proposal is evaluated against the content it would replace; approval needs a clean result.
+        evaluation = compare_with_baseline(original, req.proposed_content)
 
         now = datetime.now(timezone.utc)
         proposal = PromptMutationProposal(
@@ -113,13 +117,15 @@ class ImprovementService:
             snapshot_id=None,
             created_at=now,
             decided_at=None,
+            evaluation=evaluation,
         )
         self.store.save_proposal(proposal)
         self._audit(
             owner_id,
             "improvement.mutation.propose",
             f"improvement:proposal:{proposal.id}",
-            {"target": proposal.target_name, "rationale": proposal.rationale},
+            {"target": proposal.target_name, "acceptable": evaluation["acceptable"],
+             "regressions": len(evaluation["regressions"])},
         )
         return proposal
 
@@ -150,6 +156,11 @@ class ImprovementService:
         if self.get_target_content(proposal.target_name) != proposal.original_content:
             raise ValueError("The target has changed since this proposal was made; nothing was applied. "
                              "Create a new proposal.")
+        # v4.9: re-evaluated at decision time; a change that regresses or fails a check cannot be approved.
+        evaluation = compare_with_baseline(proposal.original_content, proposal.proposed_content)
+        if not evaluation["acceptable"]:
+            problems = "; ".join(evaluation["regressions"]) or "a check failed"
+            raise ValueError(f"The proposal fails its evaluation ({problems}); nothing was applied.")
         approval = ApprovalProposal(
             category="improvement", action="improvement.apply", target=proposal.target_name,
             reason=proposal.rationale[:500], risk="high",
@@ -181,7 +192,7 @@ class ImprovementService:
         if req.decision == "approved":
             # Save 1-click restore snapshot before mutating target
             snapshot_id = uuid4()
-            self.store.save_snapshot(snapshot_id, proposal.target_name, proposal.original_content)
+            self.store.save_snapshot(owner_id, snapshot_id, proposal.target_name, proposal.original_content)
             # Apply mutation
             self.set_target_content(proposal.target_name, proposal.proposed_content)
 
@@ -197,6 +208,7 @@ class ImprovementService:
             snapshot_id=snapshot_id,
             created_at=proposal.created_at,
             decided_at=now,
+            evaluation=proposal.evaluation,  # v4.9: the evaluation stays with the proposal
         )
         self.store.save_proposal(updated)
         self._audit(
@@ -216,7 +228,7 @@ class ImprovementService:
         if proposal.status != "approved" or not proposal.snapshot_id:
             raise ValueError(f"Proposal {proposal_id} does not have an active approved snapshot to restore.")
 
-        snapshot = self.store.get_snapshot(proposal.snapshot_id)
+        snapshot = self.store.get_snapshot(owner_id, proposal.snapshot_id)  # v4.9: owner-scoped
         if not snapshot:
             raise ValueError(f"Snapshot data for {proposal.snapshot_id} not found.")
 
@@ -258,6 +270,7 @@ class ImprovementService:
             snapshot_id=proposal.snapshot_id,
             created_at=proposal.created_at,
             decided_at=now,
+            evaluation=proposal.evaluation,  # v4.9: the evaluation stays with the proposal
         )
         self.store.save_proposal(restored)
         self._audit(

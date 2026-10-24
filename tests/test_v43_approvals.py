@@ -368,7 +368,7 @@ def test_a_second_approval_for_the_same_proposal_applies_nothing():
     app, client = make_client()
     with client:
         created = client.post("/improvement/proposals", json={
-            "target_name": "prompts/summarizer.md", "proposed_content": "Once.", "rationale": "r"}).json()
+            "target_name": "prompts/summarizer.md", "proposed_content": "Summarize once, briefly.", "rationale": "r"}).json()
         decide = f"/improvement/proposals/{created['id']}/decide"
         first = client.post(decide, json={"decision": "approved"}).json()["approval"]["approval_id"]
         client.post(f"/approvals/{first}/approve", json={})

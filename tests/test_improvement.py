@@ -102,7 +102,8 @@ def test_approval_and_one_click_snapshot_restore():
 
     target = "prompts/assistant_persona.md"
     original_content = service.get_target_content(target)
-    new_content = "You are JARVIS, an autonomous intelligence runtime."
+    # v4.9: a change must keep the current prompt's rule lines (here "secure"), or it cannot be approved.
+    new_content = "You are JARVIS, a helpful, secure AI personal assistant.\nYou also act as an intelligence runtime."
 
     # 1. Propose mutation
     proposal = service.propose_mutation(

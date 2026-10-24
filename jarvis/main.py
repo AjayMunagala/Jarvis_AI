@@ -53,7 +53,7 @@ from jarvis.health.stores import MemoryHealthStore, PostgresHealthStore
 from jarvis.finance.service import FinanceService
 from jarvis.finance.stores import MemoryFinanceStore, PostgresFinanceStore
 from jarvis.improvement.service import ImprovementService
-from jarvis.improvement.stores import MemoryImprovementStore
+from jarvis.improvement.stores import MemoryImprovementStore, PostgresImprovementStore
 from jarvis.audit.service import ApprovalError, ApprovalRequired, ApprovalService, AuditService
 from jarvis.audit.models import ApprovalRequiredResponse
 from jarvis.tools.handlers import build_tool_context
@@ -221,8 +221,14 @@ def create_app(
         finance_store,
         audit_service=app.state.audit_service,
     )
+    # v4.9: proposals, snapshots and virtual prompt changes are durable when persistence is enabled.
+    improvement_store = (PostgresImprovementStore(
+        resolved_settings.persistence_database_url.get_secret_value(),
+        connect_timeout_seconds=resolved_settings.persistence_connect_timeout_seconds,
+        operation_timeout_seconds=resolved_settings.persistence_operation_timeout_seconds)
+        if resolved_settings.persistence_enabled else MemoryImprovementStore())
     app.state.improvement_service = ImprovementService(
-        MemoryImprovementStore(),
+        improvement_store,
         repo_root=repo_service.repo_root,
         audit_service=app.state.audit_service,
     )

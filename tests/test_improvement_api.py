@@ -110,7 +110,8 @@ def test_immutable_security_path_rejection_api(client):
 
 def test_proposal_lifecycle_and_restore_api(client):
     target = "prompts/assistant_persona.md"
-    proposed = "You are JARVIS, an elite AI personal assistant.\nAlways prioritize user security."
+    # v4.9: the current rule line ("secure") must be kept for the proposal to pass its evaluation.
+    proposed = "You are JARVIS, a helpful, secure AI personal assistant.\nAlways prioritize user security."
 
     # Propose mutation
     payload = {
