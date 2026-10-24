@@ -14,8 +14,10 @@ from jarvis.finance.analytics import (
     compute_cash_flow_and_runway,
     compute_net_worth,
 )
+from jarvis.finance.forecasting import build_forecast
 from jarvis.finance.models import (
     AccountCreateRequest,
+    FinanceForecast,
     FinancialAccount,
     FinancialAccountPage,
     FinancialAnalyticsReport,
@@ -27,6 +29,12 @@ from jarvis.finance.models import (
 from jarvis.finance.stores import FinanceStore
 
 logger = logging.getLogger(__name__)
+
+
+# v6.6: bounded reads for on-demand forecasts (newest first; the rest is reported as truncated).
+FORECAST_PAGE_SIZE = 200
+FORECAST_MAX_TRANSACTIONS = 5000
+FORECAST_MAX_ACCOUNTS = 1000
 
 
 class FinanceService:
@@ -227,4 +235,40 @@ class FinanceService:
             transactions_count=total_txs,
             summary=summary,
             insights=insights,
+        )
+
+    # ========================================================= Forecasts (v6.6, analysis only)
+
+    def _read_bounded(self, reader: Any, owner_id: UUID, cap: int) -> tuple[list[Any], bool]:
+        items: dict[UUID, Any] = {}
+        offset = 0
+        total = 0
+        while offset < cap:
+            page, total = reader(owner_id, limit=min(FORECAST_PAGE_SIZE, cap - offset), offset=offset)
+            for item in page:
+                items.setdefault(item.id, item)
+            if len(page) < FORECAST_PAGE_SIZE or offset + len(page) >= total:
+                break
+            offset += len(page)
+        return list(items.values()), total > cap
+
+    def get_forecast(
+        self,
+        owner_id: UUID,
+        horizon: int = 3,
+        min_train: int = 6,
+        as_of: datetime | None = None,
+    ) -> FinanceForecast:
+        """Computed on demand from the owner's stored data; nothing is written or audited (a read)."""
+        transactions, truncated = self._read_bounded(
+            self.store.list_transactions, owner_id, FORECAST_MAX_TRANSACTIONS
+        )
+        accounts, _ = self._read_bounded(self.store.list_accounts, owner_id, FORECAST_MAX_ACCOUNTS)
+        return build_forecast(
+            accounts,
+            transactions,
+            horizon=horizon,
+            min_train=min_train,
+            truncated=truncated,
+            as_of=as_of,
         )
