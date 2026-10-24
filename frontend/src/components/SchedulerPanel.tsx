@@ -54,7 +54,7 @@ export default function SchedulerPanel({ auth, onUnlock }: { auth: ApiAuth; onUn
   async function refresh(version = generation.current) {
     try {
       // The run history comes from the audit trail; if it is unavailable the jobs are still shown.
-      const [page, activity] = await Promise.all([listJobs(50, 0, auth), getActivity(50, auth, 'scheduler').catch(() => null)])
+      const [page, activity] = await Promise.all([listJobs(50, 0, auth), getActivity(200, auth, 'scheduler').catch(() => null)])
       if (version !== generation.current) return
       setJobs(page.items)
       setHistory(activity ? activity.events.filter((event) => event.event_type === 'scheduler.job.execute') : null)

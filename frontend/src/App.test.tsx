@@ -631,13 +631,33 @@ describe('JARVIS unified interface and voice (v3.0)', () => {
     await unlockWithToken()
     await userEvent.click(screen.getByRole('button', { name: 'Workflows' }))
     await userEvent.click(await screen.findByRole('button', { name: 'Run Weekly review' }))
-    expect(runWorkflow).toHaveBeenCalledWith('wf-1', { inputs: {} }, expect.objectContaining({ token: 'a'.repeat(32) }))
+    expect(runWorkflow).toHaveBeenCalledWith('wf-1', { inputs: {}, wait: false }, expect.objectContaining({ token: 'a'.repeat(32) }))
     await userEvent.click(await screen.findByRole('button', { name: 'Open approvals' }))
     expect(await screen.findByRole('heading', { name: 'Activity' })).toBeInTheDocument()
     expect(getApprovals).toHaveBeenCalled()
     await userEvent.click(screen.getByRole('button', { name: 'Workflows' }))
     expect(await screen.findByRole('button', { name: 'Run with approval' })).toBeInTheDocument()
     expect(screen.getByText('AR-0123456789abcdef')).toBeInTheDocument()
+  })
+
+  it('forgets requested approval IDs when the workspace is locked and unlocked again', async () => {
+    const approval = { approval_id: 'AR-0123456789abcdef', state: 'pending', execution: 'single_use' } as ApprovalRequest
+    vi.mocked(listWorkflows).mockResolvedValue({ total: 1, items: [{ id: 'wf-1', owner_id: 'o', name: 'Weekly review', description: null, created_at: '', updated_at: '',
+      dag_spec: { steps: [{ step_id: 'make', name: 'Create task', step_type: 'assistant', action: 'tasks.create', parameters: {}, depends_on: [] }] } }] })
+    vi.mocked(listWorkflowRuns).mockResolvedValue({ items: [], total: 0 })
+    vi.mocked(runWorkflow).mockResolvedValue({ status: 'approval_required', detail: 'Approval required.', approval })
+    render(<App />)
+    await unlockWithToken()
+    await userEvent.click(screen.getByRole('button', { name: 'Workflows' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Run Weekly review' }))
+    expect(await screen.findByRole('button', { name: 'Run with approval' })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Lock workspace' }))
+    await userEvent.type(await screen.findByLabelText('Local access token'), 'b'.repeat(32))
+    await userEvent.click(screen.getByRole('button', { name: 'Unlock' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Workflows' }))
+    expect(await screen.findByRole('button', { name: 'Run Weekly review' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Run with approval' })).toBeNull()
+    expect(screen.queryByText('AR-0123456789abcdef')).toBeNull()
   })
 
   it('polls unread notifications after unlock and shows only newly delivered ones on the desktop', async () => {

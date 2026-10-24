@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   activateEnrollment, cancelWorkflowRun, createEnrollment, createJob, createWorkflow, deleteJob, deleteWorkflow, getWorkflowRun,
   isApprovalRequired, listAdapters, listEnrollments, listJobs, listWorkflowRuns, listWorkflows, revokeEnrollment,
-  runIntegrationAction, runJob, runWorkflow, updateJob,
+  runIntegrationAction, runJob, runWorkflow, updateJob, validationSummary,
 } from './api'
 
 const auth = { token: 'fake-test-token' }
@@ -91,6 +91,29 @@ describe('scheduler API client', () => {
   it('shows the schedule validation detail', async () => {
     stub({ error: 'invalid_schedule', detail: 'A cron expression needs five fields: minute hour day-of-month month day-of-week.' }, 422)
     await expect(createJob({ name: 'x', schedule_type: 'cron', schedule_expr: '* *', action_type: 'reminder' }, auth)).rejects.toThrow('A cron expression needs five fields')
+  })
+})
+
+describe('422 validation details (v6.7)', () => {
+  it('shows the first Pydantic error as field path and message, without echoing the submitted value', async () => {
+    stub({ detail: [{ type: 'string_pattern_mismatch', loc: ['body', 'dag_spec', 'steps', 0, 'step_id'], msg: 'String should match pattern', input: 'secret-ish value' }] }, 422)
+    const failure = createWorkflow({ name: 'x', dag_spec: { steps: [{ step_id: 'a b', name: 'A' }] } }, auth)
+    await expect(failure).rejects.toThrow('dag_spec.steps.0.step_id: String should match pattern')
+    await expect(failure).rejects.not.toThrow('secret-ish value')
+  })
+
+  it('keeps the plain string detail the server normally sends, and the neutral fallback for odd lists', async () => {
+    stub({ error: 'invalid_request', detail: 'The request body is invalid.' }, 422)
+    await expect(createJob({ name: 'x', schedule_type: 'cron', schedule_expr: 'x', action_type: 'reminder' }, auth)).rejects.toThrow('The request body is invalid.')
+    stub({ detail: [{ input: 'value only' }] }, 422)
+    await expect(runIntegrationAction('EN-0123456789abcdef', { action: 'x', arguments: {} }, auth)).rejects.toThrow('JARVIS could not complete that request.')
+  })
+
+  it('summarizes only loc and msg', () => {
+    expect(validationSummary({ loc: ['query', 'limit'], msg: 'Input should be less than or equal to 200', input: 999, ctx: { le: 200 } })).toBe('limit: Input should be less than or equal to 200')
+    expect(validationSummary({ msg: 'Field required' })).toBe('Field required')
+    expect(validationSummary({ loc: ['body'] })).toBe('')
+    expect(validationSummary('text')).toBe('')
   })
 })
 

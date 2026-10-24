@@ -156,6 +156,40 @@ describe('IntegrationsPanel', () => {
     expect(await screen.findByText('read_state takes no arguments.')).toBeInTheDocument()
   })
 
+  it('does not let a pending approval be replaced silently', async () => {
+    load([view(), view({ enrollment_id: 'EN-2222222222222222', display_name: 'Hall lamp', state: 'pending' })])
+    const memo: ApprovalMemo = new Map([
+      ['integration-action:EN-0123456789abcdef', { approvalId: 'AR-fedcba9876543210', summary: 'set_power {"on":true} on "Desk lamp"', replay: { action: 'set_power', arguments: { on: true } } }],
+      ['integration-activate:EN-2222222222222222', { approvalId: 'AR-0123456789abcdef', summary: 'activating "Hall lamp"' }],
+    ])
+    render(<IntegrationsPanel auth={auth} onUnlock={() => undefined} approvalMemo={memo} />)
+    const form = await screen.findByRole('form', { name: 'Actions for Desk lamp' })
+    // read-only actions stay available; a second state-changing request is blocked until the pending one is used or forgotten
+    expect(within(form).getByRole('button', { name: 'Run action' })).toBeEnabled()
+    await userEvent.selectOptions(within(form).getByLabelText('Action'), 'set_power')
+    expect(within(form).getByRole('button', { name: 'Run action' })).toBeDisabled()
+    expect(within(form).getByText(/already pending below/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Activate Hall lamp' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Activate with approval' })).toBeEnabled()
+    await userEvent.click(within(screen.getByRole('group', { name: 'Approval AR-fedcba9876543210' })).getByRole('button', { name: 'Forget approval' }))
+    expect(within(form).getByRole('button', { name: 'Run action' })).toBeEnabled()
+    await userEvent.click(within(screen.getByRole('group', { name: 'Approval AR-0123456789abcdef' })).getByRole('button', { name: 'Forget approval' }))
+    expect(screen.getByRole('button', { name: 'Activate Hall lamp' })).toBeEnabled()
+  })
+
+  it('enforces the server limit of 10 argument keys', async () => {
+    load()
+    render(<IntegrationsPanel auth={auth} onUnlock={() => undefined} />)
+    const form = await screen.findByRole('form', { name: 'Actions for Desk lamp' })
+    const args = within(form).getByLabelText('Arguments (JSON)')
+    await userEvent.clear(args)
+    await userEvent.click(args)
+    await userEvent.paste(JSON.stringify(Object.fromEntries(Array.from({ length: 11 }, (_, index) => [`k${index}`, index]))))
+    await userEvent.click(within(form).getByRole('button', { name: 'Run action' }))
+    expect(await within(form).findByRole('alert')).toHaveTextContent('at most 10 keys')
+    expect(runIntegrationAction).not.toHaveBeenCalled()
+  })
+
   it('removes (revokes) an enrollment only after confirmation', async () => {
     load()
     vi.mocked(revokeEnrollment).mockResolvedValue(view({ state: 'revoked' }))

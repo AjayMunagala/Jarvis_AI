@@ -189,6 +189,10 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
     try {
       const data = await response.clone().json() as { detail?: unknown }
       if (typeof data.detail === 'string') detail = data.detail.slice(0, 300)
+      else if (response.status === 422 && Array.isArray(data.detail)
+        && (path.startsWith('/workflows') || path.startsWith('/scheduler') || path.startsWith('/integrations'))) {
+        detail = validationSummary(data.detail[0])
+      }
     } catch { /* fall through to the generic message */ }
     throw new Error(detail || (path.startsWith('/browser') ? 'The browser request failed.' : 'JARVIS could not complete that request. Check the fields and try again.'))
   }
@@ -254,6 +258,17 @@ async function request<T>(path: string, init?: RequestInit, allowChatValidation 
   } catch {
     throw new Error('JARVIS returned an unreadable response. Please try again.')
   }
+}
+
+/** v6.7: "field.path: message" from the first entry of a Pydantic 422 list. Only `loc` and `msg` are read, never
+ * `input` or `ctx`, so request values are not echoed. Returns '' when the entry does not have that shape. */
+export function validationSummary(entry: unknown): string {
+  if (!entry || typeof entry !== 'object') return ''
+  const { loc, msg } = entry as { loc?: unknown; msg?: unknown }
+  if (typeof msg !== 'string' || !msg) return ''
+  const parts = Array.isArray(loc) ? loc.filter((part) => typeof part === 'string' || typeof part === 'number').map(String) : []
+  const where = (parts[0] === 'body' || parts[0] === 'query' || parts[0] === 'path' ? parts.slice(1) : parts).join('.').slice(0, 100)
+  return `${where ? `${where}: ` : ''}${msg.slice(0, 200)}`
 }
 
 const json = (body: unknown): RequestInit => ({

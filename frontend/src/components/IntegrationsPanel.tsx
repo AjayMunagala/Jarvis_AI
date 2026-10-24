@@ -27,10 +27,15 @@ function message(cause: unknown, fallback: string) {
   return cause instanceof Error ? cause.message : fallback
 }
 
-function ActionForm({ view, adapter, disabled, onRun }: {
+/** The server accepts at most this many argument keys (ActionRequest.arguments, max_length=10). */
+export const MAX_ACTION_ARGUMENTS = 10
+
+function ActionForm({ view, adapter, disabled, approvalPending, onRun }: {
   view: EnrollmentView
   adapter: AdapterDescriptor | undefined
   disabled: boolean
+  /** A state-changing action already waits for approval: run that one (or forget it) before asking for another. */
+  approvalPending: boolean
   onRun: (replay: ActionReplay) => void
 }) {
   const actions = adapter?.actions ?? []
@@ -40,11 +45,13 @@ function ActionForm({ view, adapter, disabled, onRun }: {
   if (!actions.length) return <p className="activity-meta">The adapter for this enrollment is not available.</p>
   const spec = actions.find((item) => item.name === action)
   const label = view.enrollment.display_name
+  const gated = approvalPending && !!spec && !spec.read_only
   return <form className="ops-form" aria-label={`Actions for ${label}`} onSubmit={(event: FormEvent) => {
     event.preventDefault()
     let parsed: unknown
     try { parsed = JSON.parse(args || '{}') } catch { setProblem('Arguments must be a JSON object, for example {"on": true}.'); return }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) { setProblem('Arguments must be a JSON object, for example {"on": true}.'); return }
+    if (Object.keys(parsed).length > MAX_ACTION_ARGUMENTS) { setProblem(`Arguments can have at most ${MAX_ACTION_ARGUMENTS} keys.`); return }
     setProblem('')
     onRun({ action, arguments: parsed as Record<string, unknown> })
   }}>
@@ -52,7 +59,8 @@ function ActionForm({ view, adapter, disabled, onRun }: {
     {spec && <small className="activity-meta">{spec.description}</small>}
     <label>Arguments (JSON)<input value={args} onChange={(event) => setArgs(event.target.value)} spellCheck={false} /></label>
     {problem && <p role="alert">{problem}</p>}
-    <div><button type="submit" disabled={disabled}>Run action</button></div>
+    {gated && <small className="activity-meta">An approval for a state-changing action is already pending below. Run it with that approval or forget it first.</small>}
+    <div><button type="submit" disabled={disabled || gated}>Run action</button></div>
   </form>
 }
 
@@ -192,12 +200,12 @@ export default function IntegrationsPanel({ auth, onUnlock, onOpenApprovals, app
           <div><strong>{item.display_name}</strong> <span className={`ops-status ops-status-${item.state}`}>{item.state}</span> <span className={`ops-status ops-status-${view.secret_status}`}>{SECRET_LABELS[view.secret_status]}</span> <code>{item.enrollment_id}</code></div>
           <small>Adapter {byId.get(item.adapter_id)?.name ?? item.adapter_id}{item.secret_ref ? <> · secret reference <code>{item.secret_ref}</code></> : ''} · created {formatTime(item.created_at)}{item.last_action_at ? ` · last action ${formatTime(item.last_action_at)}` : ''}</small>
           <div className="activity-actions">
-            {item.state === 'pending' && <button type="button" onClick={() => activate(view)} disabled={busy !== null} aria-label={`Activate ${item.display_name}`}>Activate</button>}
+            {item.state === 'pending' && !activation && <button type="button" onClick={() => activate(view)} disabled={busy !== null} aria-label={`Activate ${item.display_name}`}>Activate</button>}
             <ConfirmButton label="Remove" question={`Remove "${item.display_name}"? It is revoked at once and permanently.`} confirmLabel="Remove integration" onConfirm={() => revoke(view)} disabled={busy !== null} />
           </div>
           {activation && <ApprovalRequested pending={activation} retryLabel="Activate with approval" disabled={busy !== null}
             onRetry={() => activate(view, activation.approvalId)} onForget={() => forget(`integration-activate:${item.enrollment_id}`)} onOpenApprovals={onOpenApprovals} />}
-          {item.state === 'active' && <ActionForm view={view} adapter={byId.get(item.adapter_id)} disabled={busy !== null} onRun={(replay) => runAction(view, replay)} />}
+          {item.state === 'active' && <ActionForm view={view} adapter={byId.get(item.adapter_id)} disabled={busy !== null} approvalPending={!!action} onRun={(replay) => runAction(view, replay)} />}
           {action && <ApprovalRequested pending={action} retryLabel="Run with approval" disabled={busy !== null}
             onRetry={() => runAction(view, action.replay as ActionReplay, action.approvalId)} onForget={() => forget(`integration-action:${item.enrollment_id}`)} onOpenApprovals={onOpenApprovals} />}
         </li>

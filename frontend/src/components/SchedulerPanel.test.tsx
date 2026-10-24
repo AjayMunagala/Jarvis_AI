@@ -46,7 +46,7 @@ describe('SchedulerPanel', () => {
     render(<SchedulerPanel auth={auth} onUnlock={() => undefined} />)
     const jobs = await screen.findByLabelText('Scheduled jobs')
     expect(listJobs).toHaveBeenCalledWith(50, 0, auth)
-    expect(getActivity).toHaveBeenCalledWith(50, auth, 'scheduler')
+    expect(getActivity).toHaveBeenCalledWith(200, auth, 'scheduler')
     expect(within(jobs).getByText('Morning briefing')).toBeInTheDocument()
     expect(within(jobs).getByText('daily_briefing')).toBeInTheDocument()
     expect(within(jobs).getByText('enabled')).toBeInTheDocument()

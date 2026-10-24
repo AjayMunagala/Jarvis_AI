@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import WorkflowsPanel from './WorkflowsPanel'
+import WorkflowsPanel, { RUN_POLL_MS, parseSteps } from './WorkflowsPanel'
 import type { ApprovalMemo } from './ApprovalGate'
 import {
   cancelWorkflowRun, createWorkflow, deleteWorkflow, getWorkflowRun, listWorkflowRuns, listWorkflows, runWorkflow,
@@ -47,7 +47,15 @@ function load(runs: WorkflowRun[] = [run()]) {
   vi.mocked(listWorkflowRuns).mockResolvedValue({ items: runs, total: runs.length })
 }
 
-afterEach(() => { cleanup(); vi.clearAllMocks() })
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers() })
+
+async function tick(ms = RUN_POLL_MS) {
+  await act(async () => { await vi.advanceTimersByTimeAsync(ms) })
+}
+function background() {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  return userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+}
 
 describe('WorkflowsPanel', () => {
   it('requires unlocking and makes no request without a token', async () => {
@@ -93,7 +101,7 @@ describe('WorkflowsPanel', () => {
     vi.mocked(runWorkflow).mockResolvedValue(detail())
     render(<WorkflowsPanel auth={auth} onUnlock={() => undefined} />)
     await userEvent.click(await screen.findByRole('button', { name: 'Run Weekly review' }))
-    expect(runWorkflow).toHaveBeenCalledWith('wf-1', { inputs: {} }, auth)
+    expect(runWorkflow).toHaveBeenCalledWith('wf-1', { inputs: {}, wait: false }, auth)
     expect(await screen.findByText('Run run-2 completed.')).toBeInTheDocument()
     const result = screen.getByLabelText('Run details')
     expect(within(result).getByText('{"total":3}')).toBeInTheDocument()
@@ -114,24 +122,28 @@ describe('WorkflowsPanel', () => {
     unmount()
     render(<WorkflowsPanel auth={auth} onUnlock={() => undefined} onOpenApprovals={openApprovals} approvalMemo={memo} />)
     await userEvent.click(await screen.findByRole('button', { name: 'Run with approval' }))
-    expect(runWorkflow).toHaveBeenLastCalledWith('wf-1', { inputs: {}, approval_id: 'AR-0123456789abcdef' }, auth)
+    expect(runWorkflow).toHaveBeenLastCalledWith('wf-1', { inputs: {}, approval_id: 'AR-0123456789abcdef', wait: false }, auth)
     expect(await screen.findByText('Run run-2 completed.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Run with approval' })).toBeNull()
     expect(memo.size).toBe(0)
   })
 
-  it('retries a failed run with the same inputs', async () => {
+  it('runs a failed run again from the start only after a confirmation that says completed steps run again', async () => {
     load()
     vi.mocked(runWorkflow).mockResolvedValue(detail())
     render(<WorkflowsPanel auth={auth} onUnlock={() => undefined} />)
-    await userEvent.click(await screen.findByRole('button', { name: 'Retry' }))
-    expect(runWorkflow).toHaveBeenCalledWith('wf-1', { inputs: { week: 43 } }, auth)
+    await userEvent.click(await screen.findByRole('button', { name: 'Run again from the start' }))
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(screen.getByRole('group', { name: /Steps that already completed will run again/ })).toBeInTheDocument()
+    expect(runWorkflow).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', { name: 'Run again' }))
+    expect(runWorkflow).toHaveBeenCalledWith('wf-1', { inputs: { week: 43 }, wait: false }, auth)
   })
 
   it('shows run steps and cancels a running run only after confirmation', async () => {
     load([run({ status: 'running', error_message: null, completed_at: null })])
-    vi.mocked(getWorkflowRun).mockResolvedValue(detail({ status: 'running' }))
-    vi.mocked(cancelWorkflowRun).mockResolvedValue(detail({ status: 'cancelled' }))
+    vi.mocked(getWorkflowRun).mockResolvedValue(detail({ id: 'run-1', status: 'running' }))
+    vi.mocked(cancelWorkflowRun).mockResolvedValue(detail({ id: 'run-1', status: 'cancelled' }))
     render(<WorkflowsPanel auth={auth} onUnlock={() => undefined} />)
     await userEvent.click(await screen.findByRole('button', { name: 'Show steps of run run-1' }))
     expect(getWorkflowRun).toHaveBeenCalledWith('run-1', auth)
@@ -151,7 +163,8 @@ describe('WorkflowsPanel', () => {
     vi.mocked(deleteWorkflow).mockResolvedValue(undefined)
     render(<WorkflowsPanel auth={auth} onUnlock={() => undefined} />)
     await userEvent.click(await screen.findByRole('button', { name: 'Delete' }))
-    expect(screen.getByRole('alertdialog')).toHaveAccessibleName(/Delete workflow "Weekly review"/)
+    expect(screen.getByRole('group', { name: /Delete workflow "Weekly review"/ })).toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(deleteWorkflow).not.toHaveBeenCalled()
     await userEvent.click(screen.getByRole('button', { name: 'Delete workflow' }))
     expect(deleteWorkflow).toHaveBeenCalledWith('wf-1', auth)
@@ -193,5 +206,117 @@ describe('WorkflowsPanel', () => {
     await act(async () => { resolve({ items: [definition()], total: 1 }) })
     await waitFor(() => expect(screen.getByText('Unlock the workspace to view and run workflows.')).toBeInTheDocument())
     expect(screen.queryByText('Weekly review')).toBeNull()
+  })
+
+  it('starts the run in the background, polls it every 2 s until it finishes, and keeps Cancel usable meanwhile', async () => {
+    const user = background()
+    const running = detail({ id: 'run-9', status: 'running', completed_at: null })
+    vi.mocked(listWorkflows).mockResolvedValue({ items: [definition()], total: 1 })
+    vi.mocked(listWorkflowRuns).mockResolvedValueOnce({ items: [], total: 0 }).mockResolvedValue({ items: [running.run], total: 1 })
+    vi.mocked(runWorkflow).mockResolvedValue(running)
+    vi.mocked(getWorkflowRun).mockResolvedValueOnce(running).mockResolvedValue(detail({ id: 'run-9', status: 'completed' }))
+    render(<WorkflowsPanel auth={auth} onUnlock={() => undefined} />)
+    await user.click(await screen.findByRole('button', { name: 'Run Weekly review' }))
+    expect(runWorkflow).toHaveBeenCalledWith('wf-1', { inputs: {}, wait: false }, auth)
+    expect(await screen.findByText('Run run-9 started; it is running.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Run Weekly review' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Cancel run' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Show steps of run run-9' })).toBeEnabled()
+    expect(getWorkflowRun).not.toHaveBeenCalled()
+    await tick()
+    expect(getWorkflowRun).toHaveBeenCalledTimes(1)
+    expect(getWorkflowRun).toHaveBeenCalledWith('run-9', auth)
+    expect(screen.getByRole('button', { name: 'Run Weekly review' })).toBeDisabled()
+    await tick()
+    expect(getWorkflowRun).toHaveBeenCalledTimes(2)
+    expect(await screen.findByText('Run run-9 completed.')).toBeInTheDocument()
+    expect(within(screen.getByLabelText('Workflow runs')).getByText('completed')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Run Weekly review' })).toBeEnabled()
+    await tick(RUN_POLL_MS * 3)
+    expect(getWorkflowRun).toHaveBeenCalledTimes(2)
+  })
+
+  it('cancels a run it started while that run is still running', async () => {
+    const user = background()
+    const running = detail({ id: 'run-9', status: 'running', completed_at: null })
+    vi.mocked(listWorkflows).mockResolvedValue({ items: [definition()], total: 1 })
+    vi.mocked(listWorkflowRuns).mockResolvedValue({ items: [running.run], total: 1 })
+    vi.mocked(runWorkflow).mockResolvedValue(running)
+    vi.mocked(cancelWorkflowRun).mockResolvedValue(detail({ id: 'run-9', status: 'cancelled' }))
+    render(<WorkflowsPanel auth={auth} onUnlock={() => undefined} />)
+    await user.click(await screen.findByRole('button', { name: 'Run Weekly review' }))
+    await screen.findByText('Run run-9 started; it is running.')
+    await user.click(screen.getByRole('button', { name: 'Cancel run' }))
+    await user.click(screen.getByRole('button', { name: 'Cancel the run' }))
+    expect(cancelWorkflowRun).toHaveBeenCalledWith('run-9', auth)
+    expect(await screen.findByText('Run run-9 is cancelled.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Run Weekly review' })).toBeEnabled()
+    await tick(RUN_POLL_MS * 3)
+    expect(getWorkflowRun).not.toHaveBeenCalled()
+  })
+
+  it('stops polling when the view is left or the workspace is locked', async () => {
+    const user = background()
+    const running = detail({ id: 'run-9', status: 'running', completed_at: null })
+    vi.mocked(listWorkflows).mockResolvedValue({ items: [definition()], total: 1 })
+    vi.mocked(listWorkflowRuns).mockResolvedValue({ items: [running.run], total: 1 })
+    vi.mocked(runWorkflow).mockResolvedValue(running)
+    vi.mocked(getWorkflowRun).mockResolvedValue(running)
+    const { rerender, unmount } = render(<WorkflowsPanel auth={auth} onUnlock={() => undefined} />)
+    await user.click(await screen.findByRole('button', { name: 'Run Weekly review' }))
+    await screen.findByText('Run run-9 started; it is running.')
+    rerender(<WorkflowsPanel auth={{}} onUnlock={() => undefined} />)
+    await tick(RUN_POLL_MS * 3)
+    expect(getWorkflowRun).not.toHaveBeenCalled()
+    unmount()
+
+    render(<WorkflowsPanel auth={auth} onUnlock={() => undefined} />)
+    await user.click(await screen.findByRole('button', { name: 'Run Weekly review' }))
+    await screen.findByText('Run run-9 started; it is running.')
+    cleanup()
+    await tick(RUN_POLL_MS * 3)
+    expect(getWorkflowRun).not.toHaveBeenCalled()
+  })
+
+  it('offers only "Run with approval" while an approval is pending, so it cannot be replaced silently', async () => {
+    load()
+    const memo: ApprovalMemo = new Map([['workflow:wf-1', { approvalId: 'AR-0123456789abcdef', summary: 'running workflow "Weekly review"', replay: {} }]])
+    render(<WorkflowsPanel auth={auth} onUnlock={() => undefined} approvalMemo={memo} />)
+    expect(await screen.findByRole('button', { name: 'Run with approval' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Run Weekly review' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Run again from the start' })).toBeDisabled()
+    await userEvent.click(screen.getByRole('button', { name: 'Forget approval' }))
+    expect(screen.getByRole('button', { name: 'Run Weekly review' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Run again from the start' })).toBeEnabled()
+    expect(memo.size).toBe(0)
+  })
+
+  it('returns focus to the trigger after cancelling a confirmation', async () => {
+    load([])
+    render(<WorkflowsPanel auth={auth} onUnlock={() => undefined} />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete' }))
+    expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus()
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.getByRole('button', { name: 'Delete' })).toHaveFocus()
+  })
+})
+
+describe('parseSteps', () => {
+  const steps = (value: unknown) => () => parseSteps(JSON.stringify(value))
+  it('accepts a valid DAG', () => {
+    expect(parseSteps(JSON.stringify([{ step_id: 'a', name: 'A', step_type: 'tool', action: 'calculator', parameters: { x: 1 } }, { step_id: 'b-2', name: 'B', depends_on: ['a'] }]))).toHaveLength(2)
+  })
+  it('rejects what the server would reject', () => {
+    expect(() => parseSteps('nope')).toThrow('valid JSON')
+    expect(steps([])).toThrow('1 to 50')
+    expect(steps([{ step_id: 'a', name: 'A', when: 'now' }])).toThrow('Unknown step field "when"')
+    expect(steps([{ step_id: 'a b', name: 'A' }])).toThrow('step_id')
+    expect(steps([{ step_id: 'a', name: '  ' }])).toThrow('needs a name')
+    expect(steps([{ step_id: 'a', name: 'A', step_type: 'shell' }])).toThrow('unknown step_type')
+    expect(steps([{ step_id: 'a', name: 'A', parameters: [] }])).toThrow('parameters must be an object')
+    expect(steps([{ step_id: 'a', name: 'A' }, { step_id: 'a', name: 'B' }])).toThrow('used more than once')
+    expect(steps([{ step_id: 'a', name: 'A', depends_on: ['a'] }])).toThrow('cannot depend on itself')
+    expect(steps([{ step_id: 'a', name: 'A', depends_on: ['b'] }, { step_id: 'b', name: 'B', depends_on: ['a'] }])).toThrow('cycle')
+    expect(steps([{ step_id: 'a', name: 'A', depends_on: ['zzz'] }])).toThrow('unknown step "zzz"')
   })
 })

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 /**
  * v6.7: shared pieces for approval-gated actions in the Workflows and Integrations views.
@@ -35,18 +35,28 @@ export function ApprovalRequested({ pending, retryLabel, onRetry, onForget, onOp
 }
 
 /** A button that asks for confirmation inline before running a destructive action. */
-export function ConfirmButton({ label, question, confirmLabel, onConfirm, disabled }: {
+export function ConfirmButton({ label, question, confirmLabel, onConfirm, disabled, danger = true, ariaLabel }: {
   label: string
   question: string
   confirmLabel: string
   onConfirm: () => void
   disabled?: boolean
+  /** false for a non-destructive action that still deserves a confirmation (for example running again). */
+  danger?: boolean
+  ariaLabel?: string
 }) {
   const [asking, setAsking] = useState(false)
-  if (!asking) return <button type="button" className="activity-reject" onClick={() => setAsking(true)} disabled={disabled}>{label}</button>
-  return <span className="gate-confirm" role="alertdialog" aria-label={question}>
+  const trigger = useRef<HTMLButtonElement>(null)
+  const wasAsking = useRef(false)
+  useEffect(() => {
+    // Return focus to the trigger after Confirm or Cancel (it may be gone if the item was removed).
+    if (!asking && wasAsking.current) trigger.current?.focus()
+    wasAsking.current = asking
+  }, [asking])
+  if (!asking) return <button ref={trigger} type="button" className={danger ? 'activity-reject' : undefined} onClick={() => setAsking(true)} disabled={disabled} aria-label={ariaLabel}>{label}</button>
+  return <span className="gate-confirm" role="group" aria-label={question}>
     <span>{question}</span>
-    <button type="button" className="activity-reject" onClick={() => { setAsking(false); onConfirm() }} disabled={disabled}>{confirmLabel}</button>
+    <button type="button" className={danger ? 'activity-reject' : undefined} onClick={() => { setAsking(false); onConfirm() }} disabled={disabled}>{confirmLabel}</button>
     <button type="button" onClick={() => setAsking(false)} autoFocus>Cancel</button>
   </span>
 }

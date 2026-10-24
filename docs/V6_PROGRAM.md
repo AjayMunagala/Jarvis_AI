@@ -42,7 +42,7 @@ The v5.1 router stays available for evaluations. Routing chat across several mod
 | v6.4 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (mark-as-read used POST; the API only accepts PATCH), since fixed with six other findings | Vitest 141 passed (twice); Playwright E2E 11 passed; TypeScript clean |
 | v6.5 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found no blocking issues; one medium and seven low findings fixed | Python 1324 passed; live PostgreSQL 73 passed (tutor live tests rerun after the fixes) |
 | v6.6 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (an "ok" forecast could rest on one fold with no uncertainty band), since fixed with eight other findings | Python 1371 passed; live PostgreSQL 75 passed; short-history probe: 7–9 months give insufficient_history, 10+ give bands on every point |
-| v6.7 | IMPLEMENTED, TESTED; in review | Vitest 187 passed; Playwright E2E 12 passed; TypeScript clean |
+| v6.7 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found no blocking issues; one medium and six low findings fixed | Vitest 200 passed; Playwright E2E 12 passed; TypeScript clean |
 
 ## v6.1 — Usage and cost tracking, fallback model
 
@@ -230,4 +230,33 @@ Eight more findings, all fixed with tests:
 6. **Low:** the seasonal method's real history requirement is now computed and stated.
 7. **Low:** the error minimum rose to 8, and the cumulative balance band widens with the horizon, not its square root.
 8. **Low:** account-read truncation is flagged; refunds and credit-card double counting are noted.
+
+## v6.7 — Workflows, Scheduler and Integrations views
+
+### What it does
+- **Workflows:** list and create definitions (steps as JSON, checked in the browser with the server's rules), delete, run, cancel, and see step results. Runs start in the background (`wait: false`) and are polled every 2 seconds, so Cancel stays usable. "Run again from the start" warns that completed steps run again.
+- **Scheduler:** create jobs (daily briefing by default, reminder, health check, workflow), enable, disable, delete, run now, and recent runs from the audit trail. Cron is UTC; the form shows `30 1 * * *` for 07:00 at UTC+05:30.
+- **Integrations:** adapters and enrollments with secret status, enroll with an `env:JARVIS_INTEGRATION_*` reference (never a value), activate, remove (revoke), and device actions.
+- **Approvals:** a gated action shows its approval ID and that nothing ran, links to the Activity view (which already lists and decides approvals), and replays the identical request with the approval ID once granted. While an approval is pending, the plain action is hidden so it cannot be silently replaced. Pending IDs are cleared on lock and unlock.
+- **Fix outside v6.7:** editing tasks, notes and reminders in the Assistant view had sent POST to PATCH-only routes since v3.1, so edits never saved. They now send PATCH, with a test on the real request.
+
+### Known limits
+- Steps and device-action arguments are entered as JSON.
+- Only runs started from the view are polled; others refresh on load or when opened.
+- Pending approval IDs live in page memory and are lost on reload (the approval itself stays in Activity).
+
+### v6.7 independent review and acceptance
+No blocking issues. Findings, all fixed with tests:
+1. **Medium:** a workflow run blocked the whole panel until it finished, so Cancel was unreachable; runs now start in the background and are polled.
+2. **Low:** "Retry" started a fresh run without saying so; it is now "Run again from the start" with a confirmation.
+3. **Low:** a second click could silently replace a pending approval; the plain action is hidden while one is pending.
+4. **Low:** scheduler history read only 50 audit events; it now reads 200.
+5. **Low:** a test now proves pending approvals are cleared on lock and unlock.
+6. **Low:** confirmations use a plain group role and return focus to their button.
+7. **Low:** workflow steps and action arguments are checked in the browser with the server's rules.
+
+## v6 summary
+All seven versions are accepted. Final regression on the branch: Python 1371 passed (17 skipped); live PostgreSQL 75 passed; Vitest 200 passed; Playwright E2E 12 passed; TypeScript clean.
+
+Deferred, because they need the owner's accounts, money or devices: email and calendar OAuth, delivery to phones, the mobile app, Home Assistant and real devices, and paid model plans.
 
