@@ -130,6 +130,19 @@ class StatusService:
                                storage=_storage(getattr(self.state, "scheduler_service", None)), checks=checks,
                                limitations=limitations)
 
+    def _sources(self) -> SubsystemReport:
+        service = getattr(self.state, "sources_service", None)
+        runner = getattr(self.state, "scheduler_runner", None)
+        roots = len(getattr(service, "folder_roots", ()) or ())
+        limitations = ("Opt-in: nothing is fetched or watched until the owner creates a source.",
+                       "Only https feeds on public addresses; folder sources only inside "
+                       "JARVIS_SOURCES_FOLDER_ROOTS (file contents are never read).")
+        if not getattr(runner, "running", False):
+            limitations += ("The background runner is off: sources poll only on POST /sources/{id}/poll.",)
+        return SubsystemReport(key="sources", name="Event sources (v7.3)", state="limited",
+                               storage=_storage(service), checks=(f"folder roots allowed: {roots}",),
+                               limitations=limitations)
+
     # ------------------------------------------------------------ report
 
     def report(self) -> StatusReport:
@@ -224,6 +237,7 @@ class StatusService:
                                          "Explanations and exercise generation need a real model provider; "
                                          "with the demo provider explanations are labeled demo and generation "
                                          "is refused.")),
+            self._sources(),
             SubsystemReport(key="autonomous", name="Autonomous coordinator (v4.0)", state="limited",
                             limitations=("Keyword intent routing.",
                                          "Commands with write steps wait for an approved request (v4.3).")),

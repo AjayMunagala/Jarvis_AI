@@ -36,6 +36,10 @@ from jarvis.api.routes.improvement import router as improvement_router
 from jarvis.api.routes.autonomous import router as autonomous_router
 from jarvis.api.routes.integrations import router as integrations_router
 from jarvis.api.routes.tutor import router as tutor_router
+from jarvis.api.routes.sources import router as sources_router
+from jarvis.sources.fetchers import parse_folder_roots
+from jarvis.sources.service import SourcesService
+from jarvis.sources.stores import MemorySourceStore, PostgresSourceStore
 from jarvis.tutor.service import TutorService
 from jarvis.tutor.stores import MemoryTutorStore, PostgresTutorStore
 from jarvis.integrations.service import IntegrationService
@@ -325,6 +329,17 @@ def create_app(
     scheduler.utc_offset_minutes = resolved_settings.scheduler_utc_offset_minutes
     app.state.scheduler_runner = SchedulerRunner(scheduler, resolved_settings.owner_id,
                                                  interval_seconds=resolved_settings.scheduler_tick_seconds)
+    # v7.3: opt-in event sources. Nothing is fetched or watched until the owner creates a source; due sources
+    # are polled on runner ticks (runner off by default) or on POST /sources/{id}/poll.
+    source_store = (PostgresSourceStore(
+        resolved_settings.persistence_database_url.get_secret_value(),
+        connect_timeout_seconds=resolved_settings.persistence_connect_timeout_seconds,
+        operation_timeout_seconds=resolved_settings.persistence_operation_timeout_seconds)
+        if resolved_settings.persistence_enabled else MemorySourceStore())
+    app.state.sources_service = SourcesService(
+        source_store, scheduler_service=scheduler, audit_service=app.state.audit_service,
+        folder_roots=parse_folder_roots(resolved_settings.sources_folder_roots))
+    app.state.scheduler_runner.hooks.append(("sources", app.state.sources_service.poll_due))
     app.state.autonomous_coordinator.status_service = app.state.status_service
 
     app.add_middleware(
@@ -363,6 +378,7 @@ def create_app(
     app.include_router(usage_router)
     app.include_router(integrations_router)
     app.include_router(tutor_router)
+    app.include_router(sources_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     scheduler_tick_seconds: float = Field(default=30.0, ge=5.0, le=3_600.0)
     scheduler_quiet_hours: str | None = None
     scheduler_utc_offset_minutes: int = Field(default=0, ge=-720, le=840)
+    # Event sources (v7.3): folders a folder source may watch, separated by os.pathsep (";" on Windows).
+    # Empty by default, so folder sources are refused until the owner allowlists a root.
+    sources_folder_roots: str = Field(default="", max_length=4000)
     # Voice (v3.0): offer optional browser-native voice controls. The owner must still opt in
     # per page session; the server never receives audio.
     voice_enabled: bool = True
@@ -116,6 +119,14 @@ class Settings(BaseSettings):
         if fallback[0] is not None and self.openai_fallback_model is None:
             raise ValueError("A fallback price needs JARVIS_OPENAI_FALLBACK_MODEL.")
         return self
+
+    @field_validator("sources_folder_roots")
+    @classmethod
+    def validate_sources_folder_roots(cls, value: str) -> str:
+        from jarvis.sources.fetchers import parse_folder_roots
+
+        parse_folder_roots(value)  # raises a clear ValueError for a relative path
+        return value
 
     @field_validator("scheduler_quiet_hours")
     @classmethod
