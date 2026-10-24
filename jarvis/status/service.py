@@ -135,7 +135,11 @@ class StatusService:
         database = self._database()
         reports = [
             SubsystemReport(key="provider", name="Model provider", state="mock" if demo else "operational",
-                            checks=(f"configured provider: {getattr(provider, 'name', 'none')}",),
+                            checks=(f"configured provider: {getattr(provider, 'name', 'none')}",)
+                            + ((f"fallback model configured: {provider.fallback.model}",)
+                               if hasattr(provider, "fallback") else ())
+                            + ((f"usage tracking: {getattr(getattr(state, 'usage_service', None), 'recording_failures', 0)} "
+                                "recording failure(s)",) if getattr(state, "usage_service", None) else ()),
                             limitations=("Demo replies only; no language model is used.",) if demo else
                             ("The provider is not contacted by this check.",)),
             database,

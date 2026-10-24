@@ -20,6 +20,8 @@ from jarvis.advanced_intelligence import build_intelligence
 from jarvis.api.routes.intelligence import router as intelligence_router
 from jarvis.api.routes.interface import router as interface_router
 from jarvis.api.routes.status import router as status_router
+from jarvis.api.routes.usage import router as usage_router
+from jarvis.usage.service import MemoryUsageStore, PostgresUsageStore, Price, UsageService
 from jarvis.api.routes.memories import router as memories_router
 from jarvis.api.routes.repo import router as repo_router
 from jarvis.api.routes.tools import router as tools_router
@@ -143,6 +145,22 @@ def create_app(
     app.state.settings = resolved_settings
     app.state.authorization_policy = CapabilityPolicy(resolved_settings.owner_id)
     app.state.provider = resolved_provider
+    # v6.1: usage and cost tracking for real providers (durable when persistence is enabled).
+    prices = {}
+    if (resolved_settings.openai_price_input_per_million is not None
+            and resolved_settings.openai_price_output_per_million is not None
+            and resolved_settings.openai_price_source):
+        prices[resolved_settings.openai_model] = Price(resolved_settings.openai_price_input_per_million,
+                                                       resolved_settings.openai_price_output_per_million,
+                                                       resolved_settings.openai_price_source)
+    usage_store = (PostgresUsageStore(
+        resolved_settings.persistence_database_url.get_secret_value(),
+        connect_timeout_seconds=resolved_settings.persistence_connect_timeout_seconds,
+        operation_timeout_seconds=resolved_settings.persistence_operation_timeout_seconds)
+        if resolved_settings.persistence_enabled else MemoryUsageStore())
+    app.state.usage_service = UsageService(usage_store, prices)
+    if hasattr(resolved_provider, "usage_recorder"):
+        resolved_provider.usage_recorder = app.state.usage_service.record
     app.state.orchestration_service = orchestration_service
     app.state.conversation_repository = conversation_repository
     app.state.memory_repository = memory_repository
@@ -319,6 +337,7 @@ def create_app(
     app.include_router(autonomous_router)
     app.include_router(intelligence_router)
     app.include_router(status_router)
+    app.include_router(usage_router)
     app.include_router(integrations_router)
 
     @app.exception_handler(RequestValidationError)
