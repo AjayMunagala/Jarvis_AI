@@ -27,7 +27,12 @@ from jarvis.finance.models import (
     ImportUndoResult,
     TransactionCreateRequest,
 )
-from jarvis.finance.importing import ImportAccountNotFound, ImportPreviewNotFound, ImportRefused
+from jarvis.finance.importing import (
+    ImportAccountNotFound,
+    ImportBalanceOutOfRange,
+    ImportPreviewNotFound,
+    ImportRefused,
+)
 from jarvis.finance.service import FinanceService
 from jarvis.models.schemas import ErrorResponse
 from jarvis.security.policy import Capability
@@ -249,6 +254,11 @@ async def get_forecast(
 _IMPORT_ERRORS = {code: {"model": ErrorResponse} for code in (401, 403, 404, 413, 422, 503)}
 
 
+def _balance_out_of_range() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                         detail="The resulting account balance would be out of range; nothing was changed.")
+
+
 def _account_missing() -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                          detail="The requested financial account was not found.")
@@ -289,6 +299,8 @@ async def commit_import(
                             detail="The import preview was not found or has expired.") from exc
     except ImportAccountNotFound as exc:
         raise _account_missing() from exc
+    except ImportBalanceOutOfRange as exc:
+        raise _balance_out_of_range() from exc
 
 
 @router.get("/imports", response_model=FinancialImportBatchPage, responses=_ERRORS)
@@ -303,7 +315,7 @@ async def list_imports(
     return await run_in_threadpool(_service(request).list_import_batches, owner, limit=limit, offset=offset)
 
 
-@router.delete("/imports/{batch_id}", response_model=ImportUndoResult, responses=_ERRORS)
+@router.delete("/imports/{batch_id}", response_model=ImportUndoResult, responses=_IMPORT_ERRORS)
 async def undo_import(
     request: Request,
     batch_id: UUID,
@@ -312,7 +324,10 @@ async def undo_import(
     """Undo an import: remove exactly that batch's transactions and reverse their balance effect."""
     owner = _owner(owner_id)
     enforce_capability(request, owner, Capability.FINANCE_WRITE)
-    result = await run_in_threadpool(_service(request).undo_import, owner, batch_id)
+    try:
+        result = await run_in_threadpool(_service(request).undo_import, owner, batch_id)
+    except ImportBalanceOutOfRange as exc:
+        raise _balance_out_of_range() from exc
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="The requested import batch was not found.")

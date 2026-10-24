@@ -184,7 +184,7 @@ def test_out_of_range_amount_is_an_error():
 def test_debit_and_credit_columns():
     service, account = setup()
     data = csv_text("2026-03-01,Groceries,12.00,", "2026-03-02,Salary,,2500.00", "2026-03-03,Both,5.00,5.00",
-                    "2026-03-04,Neither,,", "2026-03-05,Zero credit,7.50,0.00", "2026-03-06,Signed debit,-3.00,",
+                    "2026-03-04,Neither,,", "2026-03-05,Zero credit,7.50,0.00", "2026-03-06,Marked debit,3.00 DR,",
                     header="Date,Description,Debit,Credit")
     result = preview(service, account, data, amount_column=None, debit_column="Debit", credit_column="Credit")
     by_row = {row.row_number: row for row in result.rows}
@@ -333,9 +333,36 @@ def test_duplicates_within_the_file():
     service, account = setup()
     result = preview(service, account, csv_text("2026-03-01,Coffee  Shop,-3.50", "2026-03-01,coffee shop,-3.50",
                                                 "2026-03-01,Coffee Shop 2,-3.50", "2026-03-02,Coffee Shop,-3.50"))
-    assert [row.status for row in result.rows] == ["ok", "duplicate", "ok", "ok"]
-    assert result.rows[1].messages == ["repeats row 1 of this file (same date, amount and description)"]
-    assert result.counts.duplicates_in_file == 1 and result.counts.valid == 3
+    assert [row.status for row in result.rows] == ["ok", "warning", "ok", "ok"]  # a repeat is kept, with a warning
+    assert result.rows[1].messages == [
+        "same date, amount and description as row 1 - kept; banks rarely repeat rows by mistake"]
+    assert result.counts.duplicates_in_file == 1 and result.counts.valid == 4
+    done = commit(service, result)  # kept by default
+    assert done.inserted == 4 and done.skipped_duplicates_in_file == 0
+
+
+def test_repeats_can_be_skipped_on_request():
+    service, account = setup()
+    data = csv_text("2026-03-01,Coffee,-3.50", "2026-03-01,Coffee,-3.50")
+    done = commit(service, preview(service, account, data), skip_duplicates=True)
+    assert done.inserted == 1 and done.skipped_duplicates_in_file == 1
+
+
+def test_overlapping_statements_keep_the_real_second_coffee():
+    service, account = setup(balance=100.0)
+    file_a = csv_text("2026-03-01,Coffee,-3.50", "2026-03-02,Rent,-50.00")
+    assert commit(service, preview(service, account, file_a)).inserted == 2
+    file_b = csv_text("2026-03-02,Rent,-50.00", "2026-03-01,Coffee,-3.50", "2026-03-01,Coffee,-3.50",
+                      "2026-03-03,Bus,-2.00")
+    result = preview(service, account, file_b)
+    assert [row.status for row in result.rows] == ["duplicate", "duplicate", "ok", "ok"]
+    assert result.counts.duplicates_existing == 2 and result.counts.duplicates_in_file == 0
+    done = commit(service, result)
+    assert done.inserted == 2 and done.skipped_duplicates_existing == 2
+    coffees = [tx for tx in stored(service, account) if tx.description == "Coffee"]
+    assert len(coffees) == 2
+    assert service.get_account(OWNER, account.id).balance == round(100 - 3.5 * 2 - 50 - 2, 2)
+    assert commit(service, preview(service, account, file_b)).inserted == 0  # and it stays idempotent
 
 
 def test_duplicates_of_stored_transactions():
@@ -562,8 +589,9 @@ def test_file_size_bound():
     with pytest.raises(ImportRefused) as raw_refused:
         importing.read_table(b"x" * (importing.MAX_IMPORT_BYTES + 1))
     assert raw_refused.value.status_code == 413
-    with pytest.raises(ValidationError):  # the request model caps the base64 text as well
+    with pytest.raises(ImportRefused) as long_text:  # longer base64 is "too large" too, before decoding
         preview(service, account, "x" * (importing.MAX_IMPORT_BYTES + 3))
+    assert long_text.value.status_code == 413 and "maximum size" in long_text.value.message
 
 
 def test_row_bound():
@@ -786,3 +814,259 @@ def test_api_owner_isolation_for_previews_and_batches():
         assert client_b.delete(f"/finance/imports/{batch_id}").status_code == 404
         assert client_a.get("/finance/imports").json()["total"] == 1
         assert client_a.get(f"/finance/accounts/{account['id']}").json()["balance"] == 9.0
+
+
+# ============================================================= review fixes: swapped day/month (finding 1)
+
+
+def test_a_swapped_day_month_format_refuses_the_file():
+    service, account = setup()
+    us_file = csv_text("03/04/2026,Rent,-100", "12/25/2025,Gift,-20")  # 12/25 proves MM/DD
+    with pytest.raises(ImportRefused) as refused:
+        preview(service, account, us_file, date_format="DD/MM/YYYY")
+    assert "looks swapped (DD/MM vs MM/DD)" in refused.value.message and "Gift" not in refused.value.message
+    eu_file = csv_text("03/04/2026,Rent,-100", "25/12/2025,Gift,-20")
+    with pytest.raises(ImportRefused):
+        preview(service, account, eu_file, date_format="MM/DD/YYYY")
+    accepted = preview(service, account, eu_file, date_format="DD/MM/YYYY")
+    assert accepted.rows[0].transaction_date.date().isoformat() == "2026-04-03" and accepted.file_warnings == []
+
+
+def test_ambiguous_day_month_files_carry_a_warning():
+    service, account = setup()
+    ambiguous = preview(service, account, csv_text("03/04/2026,Rent,-100", "05/06/2026,Gift,-20"),
+                        date_format="MM/DD/YYYY")
+    assert any("ambiguous" in warning for warning in ambiguous.file_warnings)
+    same_day_month = preview(service, account, csv_text("03/03/2026,Rent,-100"), date_format="DD/MM/YYYY")
+    assert same_day_month.file_warnings == []  # 3/3 reads the same either way
+    iso = preview(service, account, csv_text("2026-03-04,Rent,-100"))
+    assert iso.file_warnings == []
+
+
+# ============================================================= Indian bank formats (finding 3)
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("1,23,456.78", "123456.78"), ("12,34,567", "1234567"), ("1,00,000.00", "100000.00"),
+    ("Rs. 1,250.00", "1250.00"), ("Rs 500", "500"), ("Rs.500.50", "500.50"), ("INR 1,23,456.00", "123456.00"),
+    ("inr 10", "10"), ("\u20b9 2,500.00", "2500.00"), ("\u20b92,50,000", "250000"), ("Rs. -250.00", "-250.00"),
+    ("1,23,456.78 Dr", "-123456.78"), ("1,23,456.78 Cr.", "123456.78"),
+])
+def test_indian_amounts(text, expected):
+    assert parse_amount(text, ".") == Decimal(expected)
+
+
+@pytest.mark.parametrize("text", ["1,23,4567.00", "12,3,456", "1,23,456,789", "1,234,56.00", "5$5", "Rs5Rs"])
+def test_inconsistent_grouping_and_inner_symbols_are_refused(text):
+    with pytest.raises(AmountError):
+        parse_amount(text, ".")
+
+
+@pytest.mark.parametrize("fmt,text,expected", [
+    ("DD/MM/YY", "05/03/26", datetime(2026, 3, 5, 12, tzinfo=UTC)),
+    ("DD/MM/YY", "05/03/69", datetime(2069, 3, 5, 12, tzinfo=UTC)),
+    ("DD/MM/YY", "05/03/70", datetime(1970, 3, 5, 12, tzinfo=UTC)),
+    ("DD-Mon-YYYY", "05-Mar-2026", datetime(2026, 3, 5, 12, tzinfo=UTC)),
+    ("DD-Mon-YYYY", "5-MAR-2026", datetime(2026, 3, 5, 12, tzinfo=UTC)),
+    ("DD Mon YYYY", "05 mar 2026", datetime(2026, 3, 5, 12, tzinfo=UTC)),
+    ("DD-Mon-YY", "05-Sep-26", datetime(2026, 9, 5, 12, tzinfo=UTC)),
+    ("DD-Mon-YY", "05-Sept-26", datetime(2026, 9, 5, 12, tzinfo=UTC)),
+    ("DD/MM/YYYY", "05/03/2026 11:45 PM", datetime(2026, 3, 5, 23, 45, tzinfo=UTC)),
+    ("DD/MM/YYYY", "05/03/2026 12:10 am", datetime(2026, 3, 5, 0, 10, tzinfo=UTC)),
+    ("DD/MM/YYYY", "05/03/2026 12:10:05 PM", datetime(2026, 3, 5, 12, 10, 5, tzinfo=UTC)),
+    ("YYYY-MM-DD", "2026-03-05 23:45:00+05:30", datetime(2026, 3, 5, 18, 15, tzinfo=UTC)),
+    ("YYYY-MM-DD", "2026-03-05T01:15+0530", datetime(2026, 3, 4, 19, 45, tzinfo=UTC)),
+    ("YYYY-MM-DD", "2026-03-05 10:00 -04:00", datetime(2026, 3, 5, 14, 0, tzinfo=UTC)),
+])
+def test_indian_and_offset_dates(fmt, text, expected):
+    assert parse_date(text, fmt) == expected
+
+
+@pytest.mark.parametrize("fmt,text", [
+    ("DD-Mon-YYYY", "05-Foo-2026"), ("DD/MM/YYYY", "05/03/2026 13:00 PM"), ("DD/MM/YYYY", "05/03/2026 0:30 AM"),
+    ("YYYY-MM-DD", "2026-03-05 10:00+15:00"), ("DD/MM/YY", "05/03/2026"),
+])
+def test_invalid_indian_and_offset_dates(fmt, text):
+    assert parse_date(text, fmt) is None
+
+
+def test_utc_offset_for_times_without_an_offset():
+    assert parse_date("05/03/2026 23:45", "DD/MM/YYYY", 330) == datetime(2026, 3, 5, 18, 15, tzinfo=UTC)
+    assert parse_date("05/03/2026 02:00", "DD/MM/YYYY", 330) == datetime(2026, 3, 4, 20, 30, tzinfo=UTC)
+    assert parse_date("05/03/2026 02:00+00:00", "DD/MM/YYYY", 330) == datetime(2026, 3, 5, 2, 0, tzinfo=UTC)
+    assert parse_date("05/03/2026", "DD/MM/YYYY", 330) == datetime(2026, 3, 5, 12, tzinfo=UTC)  # date only
+    with pytest.raises(ValidationError):
+        make_mapping(utc_offset_minutes=841)
+    with pytest.raises(ValidationError):
+        make_mapping(utc_offset_minutes=-721)
+    service, account = setup()
+    result = preview(service, account, csv_text("2026-03-05 23:45,Late dinner,-900.00"), utc_offset_minutes=330)
+    assert result.rows[0].transaction_date == datetime(2026, 3, 5, 18, 15, tzinfo=UTC)
+
+
+def test_hdfc_style_statement():
+    service, account = setup(balance=10000.0)
+    data = ("Date,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance\n"
+            '05/03/26,UPI-SWIGGY-swiggy@icici-ICIC0000001-123456789012,0000123456789012,05/03/26,450.00,,'
+            '"1,23,456.78"\n'
+            '06/03/26,NEFT CR-HDFC0000001-ACME PVT LTD-SALARY MAR,N123456789,06/03/26,,"1,25,000.00",'
+            '"2,48,006.78"\n'
+            '07/03/26,POS 4111XXXXXXXX1111 AMAZON PAY,0000000000000000,07/03/26,"1,299.00",,"2,46,707.78"\n')
+    result = preview(service, account, data, date_column="Date", date_format="DD/MM/YY",
+                     description_column="Narration", amount_column=None, debit_column="Withdrawal Amt.",
+                     credit_column="Deposit Amt.")
+    assert [row.amount for row in result.rows] == [-450.0, 125000.0, -1299.0]
+    assert result.rows[1].status == "warning"  # unusually large for this file, still importable
+    assert commit(service, result).inserted == 3
+    assert service.get_account(OWNER, account.id).balance == round(10000 - 450 + 125000 - 1299, 2)
+
+
+def test_sbi_style_statement():
+    service, account = setup()
+    data = ("Txn Date\tValue Date\tDescription\tRef No./Cheque No.\tDebit\tCredit\tBalance\n"
+            "5 Mar 2026\t5 Mar 2026\tBY TRANSFER-NEFT*HDFC0000001*N12345*RENT REFUND\tTRANSFER FROM 123\t\t"
+            "1,00,000.00\t2,50,000.00\n"
+            "6 Mar 2026\t6 Mar 2026\tTO TRANSFER-UPI/DR/123456789/GROCERY MART\tTRANSFER TO 456\t2,345.50\t\t"
+            "2,47,654.50\n")
+    result = preview(service, account, data, date_column="Txn Date", date_format="DD Mon YYYY",
+                     description_column="Description", amount_column=None, debit_column="Debit",
+                     credit_column="Credit")
+    assert result.delimiter == "tab" and [row.amount for row in result.rows] == [100000.0, -2345.5]
+    assert all(row.status != "error" for row in result.rows)
+
+
+def test_icici_style_statement_with_cr_dr_amounts_and_ist_times():
+    service, account = setup()
+    data = ("S No.,Value Date,Transaction Date,Transaction Remarks,Amount (INR),Balance (INR)\n"
+            '1,05-Mar-2026,05-Mar-2026 11:42 PM,MMT/IMPS/123456789/RENT,"Rs. 25,000.00 Dr","1,75,000.00 Cr"\n'
+            '2,06-Mar-2026,06-Mar-2026 09:05 AM,INF/INFT/SALARY,"INR 1,25,000.00 Cr","3,00,000.00 Cr"\n')
+    result = preview(service, account, data, date_column="Transaction Date", date_format="DD-Mon-YYYY",
+                     description_column="Transaction Remarks", amount_column="Amount (INR)",
+                     utc_offset_minutes=330)
+    assert [row.amount for row in result.rows] == [-25000.0, 125000.0]
+    assert result.rows[0].transaction_date == datetime(2026, 3, 5, 18, 12, tzinfo=UTC)
+    assert result.rows[1].transaction_date == datetime(2026, 3, 6, 3, 35, tzinfo=UTC)
+
+
+# ============================================================= split column signs (finding 4)
+
+
+def test_signs_and_markers_in_split_columns():
+    service, account = setup()
+    data = csv_text("2026-03-01,Refund,,-50.00", "2026-03-02,Paren debit,(12.00),", "2026-03-03,Wrong marker,5.00 CR,",
+                    "2026-03-04,Wrong credit,,7.00 DR", "2026-03-05,Right credit,,100.00 CR",
+                    "2026-03-06,Right debit,3.00 Dr,", header="Date,Description,Debit,Credit")
+    result = preview(service, account, data, amount_column=None, debit_column="Debit", credit_column="Credit")
+    rows = {row.description: row for row in result.rows}
+    assert rows["Refund"].messages == ["the credit column has a negative amount"]
+    assert rows["Paren debit"].messages == ["the debit column has a negative amount"]
+    assert rows["Wrong marker"].messages == ["the debit column has a CR marker that contradicts the column"]
+    assert rows["Wrong credit"].messages == ["the credit column has a DR marker that contradicts the column"]
+    assert rows["Right credit"].amount == 100.0 and rows["Right credit"].status == "ok"
+    assert rows["Right debit"].amount == -3.0 and rows["Right debit"].status == "ok"
+
+
+# ============================================================= store-level fingerprint conflicts (finding 5)
+
+
+def _batch(account, rows_in_file):
+    from jarvis.finance.models import FinancialImportBatch
+
+    return FinancialImportBatch(id=uuid4(), owner_id=OWNER, account_id=account.id, filename="direct.csv",
+                                rows_in_file=rows_in_file, rows_inserted=0, rows_skipped=0, created_at=NOW)
+
+
+def _tx(account, batch, amount, description):
+    from jarvis.finance.models import FinancialTransaction
+
+    return FinancialTransaction(id=uuid4(), account_id=account.id, owner_id=OWNER, amount=amount, category="other",
+                                description=description, transaction_date=NOW, created_at=NOW,
+                                import_batch_id=batch.id)
+
+
+def test_memory_store_skips_already_stored_fingerprints():
+    service, account = setup(balance=100.0)
+    store = service.store
+    first = _batch(account, 1)
+    assert store.commit_import(first, [(_tx(account, first, -10.0, "old"), "a" * 64)]).inserted == 1
+    second = _batch(account, 3)
+    outcome = store.commit_import(second, [(_tx(account, second, -1.25, "new 1"), "b" * 64),
+                                           (_tx(account, second, -99.0, "conflict"), "a" * 64),
+                                           (_tx(account, second, -2.5, "new 2"), "c" * 64)])
+    assert (outcome.inserted, outcome.conflicts, outcome.balance_change) == (2, 1, -3.75)
+    assert outcome.batch.rows_inserted == 2 and outcome.batch.rows_skipped == 1
+    assert store.get_account(OWNER, account.id).balance == round(100 - 10 - 3.75, 2)
+    assert "conflict" not in {tx.description for tx in stored(service, account)}
+    only_conflicts = store.commit_import(_batch(account, 1), [(_tx(account, first, -5.0, "again"), "a" * 64)])
+    assert only_conflicts.batch is None and only_conflicts.inserted == 0 and only_conflicts.conflicts == 1
+    assert service.list_import_batches(OWNER).total == 2
+
+
+# ============================================================= balance range (finding 7)
+
+
+def test_a_balance_out_of_range_is_refused_and_writes_nothing():
+    service, account = setup(balance=9_999_999_999_990.0)
+    result = preview(service, account, csv_text("2026-03-01,Interest,20.00"))
+    with pytest.raises(importing.ImportBalanceOutOfRange):
+        commit(service, result)
+    assert stored(service, account) == [] and service.list_import_batches(OWNER).total == 0
+    assert service.get_account(OWNER, account.id).balance == 9_999_999_999_990.0
+
+
+def test_api_maps_an_out_of_range_balance_to_422():
+    app, client = make_client()
+    with client:
+        account = client.post("/finance/accounts", json={"name": "C", "account_type": "checking",
+                                                         "institution": "B", "balance": 9_999_999_999_990.0}).json()
+        preview_id = client.post("/finance/imports/preview", json=api_preview_body(
+            account["id"], csv_text(f"{recent(1)},Interest,20.00"))).json()["id"]
+        response = client.post(f"/finance/imports/{preview_id}/commit", json={})
+        assert response.status_code == 422 and "out of range" in response.json()["detail"]
+
+
+# ============================================================= preview cache eviction (finding 8)
+
+
+def test_global_cap_evicts_the_same_owners_oldest_preview_first():
+    service, account = setup()
+    other = service.create_account(OTHER, AccountCreateRequest(name="O", account_type="checking",
+                                                               institution="B", balance=0.0))
+    service.import_previews = ImportPreviewCache(per_owner=3, total=3)
+    data = csv_text("2026-03-01,Coffee,-3.50")
+    mine = preview(service, account, data)
+    theirs = [preview(service, other, data, owner=OTHER) for _ in range(2)]
+    preview(service, other, data, owner=OTHER)  # the cache is full: OTHER's oldest goes, not OWNER's
+    assert commit(service, mine).inserted == 1
+    with pytest.raises(ImportPreviewNotFound):
+        commit(service, theirs[0], owner=OTHER)
+    assert commit(service, theirs[1], owner=OTHER).inserted == 1
+
+
+# ============================================================= small fixes (finding 9)
+
+
+def test_zero_amount_is_a_warning():
+    service, account = setup()
+    data = csv_text("2026-03-01,Card check,0.00", "2026-03-02,Tea,-1.00")
+    result = preview(service, account, data)
+    assert result.rows[0].status == "warning" and "amount is zero" in result.rows[0].messages
+    assert commit(service, result, include_warnings=False).inserted == 1
+
+
+def test_rows_report_the_file_line_number():
+    service, account = setup()
+    data = 'Date,Description,Amount\n2026-03-01,"Two\nline description",-1.00\n\n2026-03-02,Tea,-2.00\n'
+    result = preview(service, account, data)
+    assert [(row.row_number, row.line_number) for row in result.rows] == [(1, 2), (2, 5)]
+
+
+def test_api_base64_over_the_file_limit_is_413():
+    app, client = make_client()
+    with client:
+        account = client.post("/finance/accounts", json={"name": "C", "account_type": "checking",
+                                                         "institution": "B", "balance": 0}).json()
+        body = api_preview_body(account["id"], "a")
+        body["data_base64"] = "A" * (importing.MAX_BASE64_CHARS + 4)  # passes the body limit, over the file limit
+        response = client.post("/finance/imports/preview", json=body)
+        assert response.status_code == 413 and "maximum size" in response.json()["detail"]

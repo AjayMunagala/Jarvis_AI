@@ -184,7 +184,8 @@ class FinanceForecast(StrictSchema):
 
 # ============================================================= v7.1 bank CSV imports
 
-ImportDateFormat = Literal["YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY", "DD-MM-YYYY", "YYYY/MM/DD", "DD.MM.YYYY"]
+ImportDateFormat = Literal["YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY", "DD-MM-YYYY", "YYYY/MM/DD", "DD.MM.YYYY",
+                           "DD/MM/YY", "DD-Mon-YYYY", "DD Mon YYYY", "DD-Mon-YY"]
 ImportRowStatus = Literal["ok", "warning", "error", "duplicate"]
 
 
@@ -200,6 +201,8 @@ class ImportMapping(StrictSchema):
     category_column: str | None = Field(default=None, min_length=1, max_length=200)
     decimal_separator: Literal[".", ","] = "."
     delimiter: Literal[",", ";", "\t", "|"] | None = None  # None: detected from the file
+    # Offset of times written without one (for example 330 for IST); times with an offset use their own.
+    utc_offset_minutes: int = Field(default=0, ge=-720, le=840)
 
     @model_validator(mode="after")
     def _one_amount_layout(self) -> "ImportMapping":
@@ -218,12 +221,14 @@ class ImportMapping(StrictSchema):
 class ImportPreviewRequest(StrictSchema):
     account_id: UUID
     filename: str = Field(min_length=1, max_length=255)
-    data_base64: str = Field(min_length=1, max_length=2_796_204)  # a 2 MB file as base64
+    # Longer than a 2 MB file can produce is refused as too large (413) by the service, before decoding.
+    data_base64: str = Field(min_length=1)
     mapping: ImportMapping
 
 
 class ImportRowResult(StrictSchema):
-    row_number: int = Field(ge=1)
+    row_number: int = Field(ge=1)  # data row (the header and blank rows are not counted)
+    line_number: int = Field(ge=1)  # line in the file where the row starts
     status: ImportRowStatus
     transaction_date: datetime | None = None
     amount: float | None = None
@@ -266,8 +271,9 @@ class ImportPreview(StrictSchema):
 
 class ImportCommitRequest(StrictSchema):
     include_warnings: bool = True
-    # In-file repeats may be inserted with skip_duplicates=false; rows already stored are always skipped.
-    skip_duplicates: bool = True
+    # Repeats within the file are kept by default (fingerprints still make re-imports add nothing);
+    # skip_duplicates=true skips them. Rows already stored for the account are always skipped.
+    skip_duplicates: bool = False
 
 
 class ImportCommitResult(StrictSchema):

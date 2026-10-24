@@ -23,4 +23,37 @@ Each version passes the same gate as v6: tests, the full Python and live Postgre
 
 | Version | Status | Evidence |
 |---|---|---|
-| v7.1 | IMPLEMENTED, TESTED; in review | Python 1491 passed; live PostgreSQL 78 passed |
+| v7.1 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found no blocking issues; four medium and six low findings fixed | Commit tested alone from a clean copy (see below) |
+
+## v7.1 — Bank CSV import
+
+### What it does
+- **Preview** (`POST /finance/imports/preview`, `finance.write`): upload a CSV (base64, at most 2 MB, 10,000 rows, 50 columns) with a column mapping. Nothing is stored except an in-memory preview (30 minutes; 3 per owner).
+  - Encodings: UTF-8 (with or without BOM), UTF-16 with BOM, cp1252 fallback with a warning. The delimiter is sniffed or given.
+  - Dates: ISO, DD/MM/YYYY, MM/DD/YYYY, DD-MM-YYYY, YYYY/MM/DD, DD.MM.YYYY, DD/MM/YY (00–69 → 2000s), DD-Mon-YYYY, DD Mon YYYY, DD-Mon-YY; times with AM/PM or an offset; `utc_offset_minutes` for times without one. A file whose dates look like swapped DD/MM and MM/DD is refused; one where every date is ambiguous gets a warning.
+  - Amounts: one signed column or debit/credit columns; dot or comma decimals; 3-digit and Indian lakh grouping; Rs/INR/₹ and other currency signs at the edges; parentheses; CR/DR. A sign that contradicts its debit/credit column is an error.
+  - Checks: errors (bad date or amount, future or very old dates, empty description, both or neither debit/credit), warnings (outliers, extra decimals, zero amounts, repeated rows).
+- **Commit** (`POST /finance/imports/{id}/commit`): inserts the rows and the balance change in one transaction. Rows already stored are always skipped; same-day repeats within the file are kept (banks rarely repeat rows by mistake). Per-row fingerprints make re-importing the same file add nothing. Balances that would overflow are refused.
+- **Batches:** `GET /finance/imports` lists them; `DELETE /finance/imports/{id}` undoes one atomically, reversing exactly its balance effect.
+- **Upload size:** the app's 64 KB request limit is raised to about 2.8 MB for the preview route only.
+- **Safety:** file content is untrusted; it never appears in logs, audit records or error messages. Descriptions starting with `=`, `+`, `-` or `@` are stored as plain text and never evaluated.
+- **Storage:** migration 0069 (import batches, fingerprints with a per-account unique index, a composite owner check between batches and accounts).
+
+### Known limits
+- Previews are per process and lost on restart.
+- Matching against stored transactions scans at most 50,000 in the file's date range; fingerprints still stop re-imports beyond that.
+- No currency conversion.
+
+### v7.1 independent review and acceptance
+No blocking issues. Findings, all fixed with tests:
+1. **Medium:** swapped DD/MM and MM/DD silently misdated every row with a day of 12 or less.
+2. **Medium:** real same-day repeats were dropped by default, so balances drifted on overlapping statements.
+3. **Medium:** Indian bank formats (lakh grouping, Rs/INR, DD-Mon-YYYY, two-digit years, IST times) were refused.
+4. **Medium:** a negative credit or contradicting CR/DR marker was imported with the wrong sign.
+5. **Low:** the store's conflict path was untested (tests passed for the wrong reason).
+6. **Low:** undo and commit could deadlock (different lock order).
+7. **Low:** an overflowing balance crashed with 500 instead of a refusal.
+8. **Low:** preview memory documented; eviction prefers the same owner's oldest preview.
+9. **Low:** currency signs only at edges, zero amounts warned, consistent "file too large", file line numbers in results.
+10. **Low:** the database now enforces that a batch's account belongs to the same owner.
+

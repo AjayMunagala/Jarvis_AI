@@ -5,17 +5,22 @@
 -- A batch belongs to an account of the same owner and is removed with it. Undoing an import is done by the
 -- application, which deletes the batch's transactions and reverses their balance in one transaction; the foreign
 -- key only clears import_batch_id if a batch row is ever removed some other way. Manual transactions keep both
--- columns NULL.
+-- columns NULL. The batch's account must belong to the same owner (composite foreign key on the new
+-- (id, owner_id) key of financial_accounts).
+ALTER TABLE jarvis_app.financial_accounts ADD CONSTRAINT financial_accounts_id_owner UNIQUE (id, owner_id);
+
 CREATE TABLE jarvis_app.financial_import_batches (
     id uuid PRIMARY KEY,
     owner_id uuid NOT NULL,
-    account_id uuid NOT NULL REFERENCES jarvis_app.financial_accounts (id) ON DELETE CASCADE,
+    account_id uuid NOT NULL,
     filename text NOT NULL,
     rows_in_file integer NOT NULL,
     rows_inserted integer NOT NULL,
     rows_skipped integer NOT NULL,
     created_at timestamptz NOT NULL,
     CONSTRAINT financial_import_batches_id_owner UNIQUE (id, owner_id),
+    CONSTRAINT financial_import_batches_account FOREIGN KEY (account_id, owner_id)
+        REFERENCES jarvis_app.financial_accounts (id, owner_id) ON DELETE CASCADE,
     CONSTRAINT financial_import_batches_filename_length CHECK (char_length(filename) BETWEEN 1 AND 255),
     CONSTRAINT financial_import_batches_counts CHECK (
         rows_in_file BETWEEN 0 AND 10000 AND rows_inserted >= 0 AND rows_skipped >= 0

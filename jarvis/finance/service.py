@@ -26,6 +26,7 @@ from jarvis.finance.importing import (
     ParsedRow,
     PreviewEntry,
     assign_keys,
+    check_day_month_order,
     clean_filename,
     date_window,
     decode_base64,
@@ -324,13 +325,14 @@ class FinanceService:
             raise ImportAccountNotFound("The financial account was not found.")
         table = read_table(decode_base64(req.data_base64), req.mapping.delimiter)
         columns = resolve_columns(table.header, req.mapping)
+        order_warnings = check_day_month_order(table, columns["date_column"], req.mapping.date_format)
         now = now or datetime.now(timezone.utc)
-        rows = [parse_row(number, cells, columns, req.mapping, len(table.header), now.date())
-                for number, cells in table.rows]
+        rows = [parse_row(number, cells, columns, req.mapping, len(table.header), now.date(), line_number)
+                for number, line_number, cells in table.rows]
         flag_outliers(rows)
         assign_keys(owner_id, account.id, rows)
         complete = self._mark_existing_duplicates(owner_id, account.id, rows)
-        warnings = list(table.warnings)
+        warnings = list(table.warnings) + order_warnings
         if not complete:
             warnings.append("The account has too many stored transactions in this date range to check them all "
                             "for duplicates; re-imports of the same rows are still prevented by fingerprints.")
@@ -348,7 +350,8 @@ class FinanceService:
     @staticmethod
     def _row_result(row: ParsedRow) -> ImportRowResult:
         return ImportRowResult(
-            row_number=row.row_number, status=row.status, transaction_date=row.transaction_date,
+            row_number=row.row_number, line_number=max(1, row.line_number), status=row.status,
+            transaction_date=row.transaction_date,
             amount=float(row.amount) if row.amount is not None else None, description=row.description,
             category=row.category, messages=row_messages(row),
         )
@@ -403,7 +406,7 @@ class FinanceService:
                     skipped["existing"] += 1
                 elif row.duplicate == "file" and req.skip_duplicates:
                     skipped["file"] += 1
-                elif row.warnings and not req.include_warnings:
+                elif row.status == "warning" and not req.include_warnings:  # includes kept repeats
                     skipped["warnings"] += 1
                 else:
                     amount = float(row.amount)

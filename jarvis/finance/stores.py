@@ -9,6 +9,7 @@ import threading
 from typing import Any
 from uuid import UUID
 
+from jarvis.finance.importing import check_balance
 from jarvis.finance.models import (
     FinancialAccount,
     FinancialImportBatch,
@@ -314,6 +315,7 @@ class MemoryFinanceStore(FinanceStore):
             if not staged:
                 return ImportOutcome(None, 0, conflicts, 0.0)
             total = _cents_sum([tx.amount for tx, _ in staged])
+            check_balance(acc.balance, total)  # refuse before anything is applied
             stored = batch.model_copy(update={"rows_inserted": len(staged),
                                               "rows_skipped": batch.rows_skipped + conflicts})
             # Everything is staged: apply it in one step under the lock.
@@ -342,11 +344,13 @@ class MemoryFinanceStore(FinanceStore):
             removed = [t for t in self._transactions.values()
                        if t.import_batch_id == batch_id and t.owner_id == owner_id]
             total = _cents_sum([t.amount for t in removed])
+            acc = self._accounts.get(batch.account_id)
+            if acc is not None and acc.owner_id == owner_id:
+                check_balance(acc.balance, -total)
             for t in removed:
                 del self._transactions[t.id]
                 self._forget_fingerprint(t.id)
             del self._import_batches[batch_id]
-            acc = self._accounts.get(batch.account_id)
             if acc is not None and acc.owner_id == owner_id:
                 self._accounts[acc.id] = acc.model_copy(update={
                     "balance": round(acc.balance - float(total), 2), "updated_at": datetime.now(timezone.utc)})
@@ -705,10 +709,11 @@ class PostgresFinanceStore(FinanceStore):
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT 1 FROM jarvis_app.financial_accounts WHERE id = %s AND owner_id = %s FOR UPDATE",
+                    "SELECT balance FROM jarvis_app.financial_accounts WHERE id = %s AND owner_id = %s FOR UPDATE",
                     (batch.account_id, batch.owner_id),
                 )
-                if cur.fetchone() is None:
+                locked = cur.fetchone()
+                if locked is None:
                     conn.rollback()
                     raise ValueError(f"Account {batch.account_id} not found.")
                 cur.execute(
@@ -743,6 +748,11 @@ class PostgresFinanceStore(FinanceStore):
                     conn.rollback()
                     return ImportOutcome(None, 0, conflicts, 0.0)
                 total = _cents_sum(inserted)
+                try:
+                    check_balance(locked[0], total)
+                except Exception:
+                    conn.rollback()
+                    raise
                 cur.execute(
                     """UPDATE jarvis_app.financial_accounts SET balance = balance + %s, updated_at = CURRENT_TIMESTAMP
                        WHERE id = %s AND owner_id = %s""",
@@ -780,16 +790,29 @@ class PostgresFinanceStore(FinanceStore):
                 return [self._batch_from_row(r) for r in cur.fetchall()], total
 
     def undo_import(self, owner_id: UUID, batch_id: UUID) -> UndoOutcome | None:
-        """One database transaction: lock the batch, delete its rows, reverse their sum, drop the batch."""
+        """One database transaction. Locks are taken in the same order as commit_import (the account, then the
+        batch) so an undo and a commit on the same account cannot deadlock; then the rows are deleted, their sum
+        reversed and the batch dropped."""
         with self._get_connection() as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT account_id FROM jarvis_app.financial_import_batches WHERE id = %s AND owner_id = %s",
+                            (batch_id, owner_id))
+                found = cur.fetchone()
+                if found is None:  # unknown or another owner's
+                    conn.rollback()
+                    return None
+                cur.execute(
+                    "SELECT balance FROM jarvis_app.financial_accounts WHERE id = %s AND owner_id = %s FOR UPDATE",
+                    (found[0], owner_id),
+                )
+                locked = cur.fetchone()
                 cur.execute(
                     """SELECT id, owner_id, account_id, filename, rows_in_file, rows_inserted, rows_skipped, created_at
                        FROM jarvis_app.financial_import_batches WHERE id = %s AND owner_id = %s FOR UPDATE""",
                     (batch_id, owner_id),
                 )
                 row = cur.fetchone()
-                if row is None:  # unknown, another owner's, or undone concurrently
+                if row is None:  # undone concurrently while this one waited for the account lock
                     conn.rollback()
                     return None
                 batch = self._batch_from_row(row)
@@ -800,6 +823,12 @@ class PostgresFinanceStore(FinanceStore):
                 )
                 amounts = [r[0] for r in cur.fetchall()]
                 total = _cents_sum(amounts)
+                if locked is not None:
+                    try:
+                        check_balance(locked[0], -total)
+                    except Exception:
+                        conn.rollback()
+                        raise
                 cur.execute(
                     """UPDATE jarvis_app.financial_accounts SET balance = balance - %s, updated_at = CURRENT_TIMESTAMP
                        WHERE id = %s AND owner_id = %s""",
