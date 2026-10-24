@@ -23,6 +23,7 @@ from typing import Callable, Protocol
 
 import httpx
 
+from jarvis.browser.bounded_body import BodyTooLarge, UnsupportedEncoding, read_response_body
 from jarvis.browser.extraction import ExtractedElement
 from jarvis.browser.guarded_transport import GuardedTransport
 from jarvis.browser.models import ProviderCapabilities
@@ -252,7 +253,9 @@ class _HttpContext:
         self.client = httpx.Client(
             follow_redirects=False, timeout=timeout, transport=transport or GuardedTransport(policy), trust_env=False,
             headers={"User-Agent": "JARVIS-Browser/2.6 (+local personal assistant)",
-                     "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8"},
+                     "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8",
+                     # v7.3 review: httpx would decode (stacked) gzip before the size cap is checked.
+                     "Accept-Encoding": "identity"},
         )
         self.history: list[str] = []
         self.position = -1
@@ -273,11 +276,13 @@ class _HttpContext:
                     content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
                     if content_type and not content_type.startswith(_HTML_TYPES):
                         raise ProviderError("unsupported_content", "The response is not an HTML or text page.")
-                    body = bytearray()
-                    for chunk in response.iter_bytes():
-                        body.extend(chunk)
-                        if len(body) > self.limits.max_page_bytes:
-                            raise ProviderError("response_too_large", "The page exceeds the configured size limit.")
+                    try:
+                        body = read_response_body(response, self.limits.max_page_bytes)
+                    except BodyTooLarge:
+                        raise ProviderError("response_too_large", "The page exceeds the configured size limit.") from None
+                    except UnsupportedEncoding:
+                        raise ProviderError("unsupported_content", "The page uses an unsupported or unsafe "
+                                            "content encoding.") from None
                     if response.status_code >= 400:
                         failures.append({"url": sanitize_url(url, keep_query=False), "method": "GET",
                                          "status": response.status_code, "error": "HTTP error status",

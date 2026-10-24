@@ -3,6 +3,8 @@
 -- and are removed with it (ON DELETE CASCADE). The application keeps at most 1000 seen items per source and at
 -- most 50 sources per owner (checked in the same transaction as the insert). Audit events use the existing
 -- 'scheduler' category, so the audit category constraint is unchanged.
+-- Folder files are keyed by relative path; ``version`` is the size and mtime last observed and
+-- ``settled_version`` the one already reported (a change is reported once it is unchanged across two polls).
 CREATE TABLE jarvis_app.event_sources (
     id uuid PRIMARY KEY,
     owner_id uuid NOT NULL,
@@ -22,6 +24,7 @@ CREATE TABLE jarvis_app.event_sources (
     consecutive_failures integer NOT NULL DEFAULT 0,
     last_error text,
     backoff_until timestamptz,
+    last_notified_at timestamptz,
     created_at timestamptz NOT NULL,
     updated_at timestamptz NOT NULL,
     CONSTRAINT event_sources_id_owner UNIQUE (id, owner_id),
@@ -55,13 +58,19 @@ CREATE TABLE jarvis_app.event_source_items (
     matched boolean NOT NULL,
     first_seen_at timestamptz NOT NULL,
     last_seen_at timestamptz NOT NULL,
+    version text,
+    settled_version text,
+    notified_at timestamptz,
     PRIMARY KEY (source_id, item_key),
     CONSTRAINT event_source_items_source FOREIGN KEY (source_id, owner_id)
         REFERENCES jarvis_app.event_sources (id, owner_id) ON DELETE CASCADE,
     CONSTRAINT event_source_items_key_format CHECK (item_key ~ '^[0-9a-f]{64}$'),
     CONSTRAINT event_source_items_title_length CHECK (char_length(title) BETWEEN 1 AND 300),
     CONSTRAINT event_source_items_link_length CHECK (link IS NULL OR char_length(link) BETWEEN 1 AND 2000),
-    CONSTRAINT event_source_items_summary_length CHECK (summary IS NULL OR char_length(summary) BETWEEN 1 AND 1000)
+    CONSTRAINT event_source_items_summary_length CHECK (summary IS NULL OR char_length(summary) BETWEEN 1 AND 1000),
+    CONSTRAINT event_source_items_version_length CHECK ((version IS NULL OR char_length(version) BETWEEN 1 AND 100)
+                                                        AND (settled_version IS NULL
+                                                             OR char_length(settled_version) BETWEEN 1 AND 100))
 );
 CREATE INDEX event_source_items_source_seen ON jarvis_app.event_source_items (source_id, last_seen_at DESC);
 CREATE INDEX event_source_items_owner_source_first ON jarvis_app.event_source_items (owner_id, source_id, first_seen_at DESC);

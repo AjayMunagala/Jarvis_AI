@@ -134,14 +134,28 @@ class StatusService:
         service = getattr(self.state, "sources_service", None)
         runner = getattr(self.state, "scheduler_runner", None)
         roots = len(getattr(service, "folder_roots", ()) or ())
+        checks = (f"folder roots allowed: {roots}",)
+        state = "limited"
+        owner = getattr(self.state.settings, "owner_id", None)
+        if service is not None and owner is not None:
+            try:
+                counts = service.status_counts(owner)
+                checks += (f"sources: {counts['enabled']} on, {counts['disabled']} off, {counts['failing']} failing, "
+                           f"{counts['truncated']} truncated at the last poll",
+                           f"polls running: {counts['polls_running']}; stuck fetches: {counts['abandoned_fetches']}",)
+            except Exception:  # noqa: BLE001 - sanitized; the database check reports storage problems
+                checks += ("source counts could not be read",)
+        if runner is not None:
+            checks += (f"runner hook failures: {getattr(runner, 'failed_hooks', 0)}",)
         limitations = ("Opt-in: nothing is fetched or watched until the owner creates a source.",
                        "Only https feeds on public addresses; folder sources only inside "
-                       "JARVIS_SOURCES_FOLDER_ROOTS (file contents are never read).")
+                       "JARVIS_SOURCES_FOLDER_ROOTS (file contents are never read).",
+                       "At most one notification per poll and source; a new or changed file is reported once it "
+                       "is unchanged across two polls.")
         if not getattr(runner, "running", False):
             limitations += ("The background runner is off: sources poll only on POST /sources/{id}/poll.",)
-        return SubsystemReport(key="sources", name="Event sources (v7.3)", state="limited",
-                               storage=_storage(service), checks=(f"folder roots allowed: {roots}",),
-                               limitations=limitations)
+        return SubsystemReport(key="sources", name="Event sources (v7.3)", state=state,
+                               storage=_storage(service), checks=checks, limitations=limitations)
 
     # ------------------------------------------------------------ report
 

@@ -3,9 +3,9 @@
 A single daemon thread calls ``SchedulerService.run_due`` every
 ``interval_seconds``: due reminders are delivered, due jobs run (each due run
 at most once, by an atomic claim), and notifications held during quiet hours
-are released. v7.3: after that, each registered hook runs (event sources poll
-their due sources), each in its own try/except so a failing hook never fails the
-tick. It is off unless ``JARVIS_SCHEDULER_RUNNER_ENABLED=true``,
+are released. v7.3: after that, each registered hook runs (event sources start
+a background polling cycle and return at once, so polling never delays
+reminders), each in its own try/except so a failing hook never fails the tick. It is off unless ``JARVIS_SCHEDULER_RUNNER_ENABLED=true``,
 following the project's execution-disabled defaults. A tick that fails is
 logged and the next tick runs normally; stopping waits for the current tick.
 """
@@ -48,6 +48,15 @@ class SchedulerRunner:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout)
+        # v7.3 review: a hook that works in the background (event sources) is closed too, so its polls end
+        # (bounded) before the application shuts down; a hook is closed through its object's close(timeout).
+        for name, hook in self.hooks:
+            close = getattr(getattr(hook, "__self__", None), "close", None)
+            if callable(close):
+                try:
+                    close(timeout)
+                except Exception as exc:  # noqa: BLE001 - shutdown continues
+                    logger.warning("Scheduler hook %s could not be closed: %s", name, type(exc).__name__)
 
     def tick(self) -> dict[str, int] | None:
         try:

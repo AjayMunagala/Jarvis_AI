@@ -25,7 +25,7 @@ Each version passes the same gate as v6: tests, the full Python and live Postgre
 |---|---|---|
 | v7.1 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found no blocking issues; four medium and six low findings fixed | Commit 1e8eaa2 tested alone from a clean copy: Python 1544 passed (the git-only repo test fails outside a checkout, as expected); live PostgreSQL 82 passed |
 | v7.2 | IMPLEMENTED, TESTED; in review | 32 new tests pass; live PostgreSQL 88 passed; one v7.3 test assumes 0070 is the newest migration and is being updated with the v7.3 fixes |
-| v7.3 | IMPLEMENTED, TESTED; in review | Python 1639 passed (with v7.1); live PostgreSQL 86 passed |
+| v7.3 | ACCEPTED by Claude as owner on 2026-10-24, after an independent review found one blocking defect (a compressed feed could expand to gigabytes in memory), since fixed with ten other findings | Committed state tested alone from a clean copy (see the v7.3 section) |
 
 ## v7.1 — Bank CSV import
 
@@ -58,4 +58,35 @@ No blocking issues. Findings, all fixed with tests:
 8. **Low:** preview memory documented; eviction prefers the same owner's oldest preview.
 9. **Low:** currency signs only at edges, zero amounts warned, consistent "file too large", file line numbers in results.
 10. **Low:** the database now enforces that a batch's account belongs to the same owner.
+
+## v7.3 — Opt-in event sources
+
+### What it does
+- **Sources** (`/sources`, scheduler capabilities): RSS/Atom feeds and watched folders, at most 50 per owner. Nothing is fetched or watched until the owner creates a source; with the scheduler runner off (the default), sources poll only on `POST /sources/{id}/poll`.
+- **Feeds:** https on port 443 to public addresses only, enforced at connect time for every request and redirect (up to 3); `Accept-Encoding: identity`, at most one gzip/deflate layer decoded with a hard output cap, 2 MB, 15 s; DTDs and entities refused before parsing; titles, links and summaries capped and treated as untrusted.
+- **Folders:** only inside roots listed in `JARVIS_SOURCES_FOLDER_ROOTS`; UNC and device paths refused unless the root is UNC; links and junctions never followed; cloud placeholders listed but never opened; file contents never read; at most 500 entries per poll, scanned lazily.
+- **Notifications:** the first poll records existing items silently. After that, each poll sends at most one notification per source: the item itself, or a summary of several. Quiet hours apply, and each source has its own throttle so one chatty source cannot hide another. New or changed files are reported once they are stable across two polls.
+- **Isolation:** each source polls independently, at most 4 at a time within a 25-second budget per cycle, off the reminder tick. Failures back off exponentially (up to 24 hours); after 10 in a row the source turns itself off with one notice. A storage failure after a fetch also backs off.
+- **Storage:** migration 0070 (sources and seen items).
+
+### Known limits
+- Items suppressed by a source's throttle stay listed under `/sources/{id}/items` but are not re-sent.
+- A timed-out fetch thread cannot be killed; at most 8 may be outstanding.
+- Feeds in encodings expat does not support (such as windows-1252) fail as malformed.
+- A new file is reported one poll after it appears.
+
+### v7.3 independent review and acceptance
+The reviewer found one blocking defect, fixed before acceptance: the 2 MB size cap was checked only after decompression, so an 824-byte doubly gzipped feed made the process allocate 871 MB, and slightly more would crash JARVIS. The browser's HTTP provider had the same pattern and is fixed the same way; a 200 MiB bomb is now refused with under 20 MB of memory.
+
+Ten more findings, all fixed with tests:
+1. **Medium:** polling ran inside the scheduler tick and could delay reminders by minutes.
+2. **Medium:** a shared throttle silently dropped items and let one source hide the others.
+3. **Medium:** a storage failure after a fetch skipped backoff, so the feed was fetched every 30 seconds.
+4. **Low:** a UNC path in a folder source opened an SMB connection before the root check.
+5. **Low:** folder scans read the whole directory before applying their caps; large feeds kept the oldest items.
+6. **Low:** OneDrive placeholders were skipped as links.
+7. **Low:** modified and growing files re-notified as "New item".
+8. **Low:** failure counts and the turn-off notice were not safe across processes.
+9. **Low:** the URL check treated deprecated site-local IPv6 addresses as public.
+10. **Low:** the status report now shows failing, truncated and stuck sources.
 

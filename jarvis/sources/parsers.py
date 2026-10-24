@@ -18,6 +18,7 @@ from xml.etree import ElementTree
 from xml.parsers import expat
 
 MAX_ENTRIES = 200
+MAX_ITEMS_READ = 5000  # items examined in one document (2 MB at most)
 MAX_TITLE_CHARS = 300
 MAX_SUMMARY_CHARS = 1000
 MAX_LINK_CHARS = 2000
@@ -171,8 +172,8 @@ def _entry(item, atom: bool) -> FeedEntry | None:
                      summary=summary or None)
 
 
-def parse_feed(raw: bytes) -> list[FeedEntry]:
-    """Entries of an RSS 2.0, RSS 1.0 or Atom document, in document order, at most ``MAX_ENTRIES``."""
+def parse_feed_document(raw: bytes) -> tuple[list[FeedEntry], bool]:
+    """(entries, truncated): at most ``MAX_ENTRIES`` entries, the newest by published date when a feed has more."""
     if not raw or not raw.strip():
         raise FeedParseError("The feed is empty.")
     _precheck(raw)
@@ -192,9 +193,23 @@ def parse_feed(raw: bytes) -> list[FeedEntry]:
         items, atom = [child for child in root if _local(child.tag) == "item"], False
     else:
         raise FeedParseError("The document is not an RSS or Atom feed.")
-    entries: list[FeedEntry] = []
-    for item in items[:MAX_ENTRIES]:
-        entry = _entry(item, atom)
-        if entry is not None:
-            entries.append(entry)
-    return entries
+    entries = [entry for entry in (_entry(item, atom) for item in items[:MAX_ITEMS_READ]) if entry is not None]
+    return newest(entries), len(entries) > MAX_ENTRIES or len(items) > MAX_ITEMS_READ
+
+
+def newest(entries: list[FeedEntry], limit: int = MAX_ENTRIES) -> list[FeedEntry]:
+    """At most ``limit`` entries: the newest by published date where known (undated entries keep document order
+    after the dated ones); the result is in document order."""
+    if len(entries) <= limit:
+        return entries
+    _floor = datetime.min.replace(tzinfo=timezone.utc)
+    ranked = sorted(range(len(entries)), key=lambda index: (entries[index].published_at is None,
+                                                            -(entries[index].published_at or _floor).timestamp(),
+                                                            index))
+    keep = sorted(ranked[:limit])
+    return [entries[index] for index in keep]
+
+
+def parse_feed(raw: bytes) -> list[FeedEntry]:
+    """Entries of an RSS 2.0, RSS 1.0 or Atom document (at most ``MAX_ENTRIES``, the newest)."""
+    return parse_feed_document(raw)[0]

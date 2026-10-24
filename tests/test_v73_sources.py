@@ -83,6 +83,11 @@ class FakeFetcher:
         return value
 
 
+def scan(*args, **kwargs):
+    events, _truncated = scan_folder(*args, **kwargs)
+    return events
+
+
 def make_service(fetcher=None, *, roots=(), scheduler=None, **kwargs):
     scheduler = scheduler or SchedulerService(MemorySchedulerStore())
     return SourcesService(MemorySourceStore(), scheduler_service=scheduler, feed_fetcher=fetcher or FakeFetcher(),
@@ -92,6 +97,10 @@ def make_service(fetcher=None, *, roots=(), scheduler=None, **kwargs):
 def rss_request(url=FEED_URL, **overrides):
     return SourceCreateRequest(kind="rss", name=overrides.pop("name", "News"), config=SourceConfig(url=url),
                                **overrides)
+
+
+def latest(service, owner=OWNER):
+    return max(notifications(service, owner), key=lambda note: note.created_at)
 
 
 def notifications(service, owner=OWNER):
@@ -378,7 +387,7 @@ def test_first_poll_records_existing_items_without_notifying_then_only_new_items
     service = make_service(fetcher)
     source = service.create_source(OWNER, rss_request())
     first = service.poll_now(OWNER, source.id, now=NOW)
-    assert (first.status, first.baseline, first.fetched, first.new, first.notified) == ("ok", True, 3, 3, 0)
+    assert (first.status, first.baseline, first.fetched, first.new, first.notified) == ("ok", True, 3, 0, 0)
     assert notifications(service) == []
     again = service.poll_now(OWNER, source.id, now=NOW + timedelta(hours=1))
     assert (again.baseline, again.new, again.notified) == (False, 0, 0)  # dedup
@@ -421,7 +430,7 @@ def test_keyword_include_and_exclude_are_case_insensitive():
     assert {item.title: item.matched for item in service.list_items(OWNER, source.id).items}["Rust 2.0"] is False
 
 
-def test_more_new_items_than_the_limit_send_one_summary_notification():
+def test_several_new_items_send_one_summary_and_one_item_sends_itself():
     fetcher = FakeFetcher({FEED_URL: rss(*items("seed"))})
     service = make_service(fetcher)
     source = service.create_source(OWNER, rss_request(max_items_per_poll=3, importance="high"))
@@ -431,33 +440,56 @@ def test_more_new_items_than_the_limit_send_one_summary_notification():
     assert (result.new, result.summarized, result.notified) == (7, True, 1)
     (note,) = notifications(service)
     assert note.title == "7 new items from News" and note.priority == "high"
-    assert note.message.count("\n- ") == 3
-    fetcher.documents[FEED_URL] = rss(*items("m1", "m2", "m3"))
-    exactly = service.poll_now(OWNER, source.id, now=NOW + timedelta(hours=2))
-    assert (exactly.summarized, exactly.notified) == (False, 3)  # high importance bypasses the throttle
+    assert note.message.count("\n- ") == 3 and "and 4 more" in note.message
+    fetcher.documents[FEED_URL] = rss(*items("m1", "m2"))
+    two = service.poll_now(OWNER, source.id, now=NOW + timedelta(hours=2))
+    assert (two.summarized, two.notified) == (True, 1)  # high importance: still one notification per poll
+    fetcher.documents[FEED_URL] = rss(*items("z"))
+    one = service.poll_now(OWNER, source.id, now=NOW + timedelta(hours=3))
+    assert (one.summarized, one.notified) == (False, 1)
+    assert latest(service).title == "News: Title z"
+    assert len(notifications(service)) == 3
 
 
-def test_normal_importance_is_throttled_and_high_is_not():
-    fetcher = FakeFetcher({FEED_URL: rss(*items("seed"))})
+def test_the_throttle_is_per_source_so_one_chatty_source_cannot_hide_another():
+    other_url = "https://other.example.com/feed"
+    fetcher = FakeFetcher({FEED_URL: rss(*items("seed")), other_url: rss(*items("x"))})
     service = make_service(fetcher)
     source = service.create_source(OWNER, rss_request())
+    second = service.create_source(OWNER, rss_request(other_url, name="Other"))
     service.poll_now(OWNER, source.id, now=NOW)
+    service.poll_now(OWNER, second.id, now=NOW)
     fetcher.documents[FEED_URL] = rss(*items("a", "b"))
     burst = service.poll_now(OWNER, source.id, now=NOW + timedelta(hours=1))
-    assert (burst.matched, burst.notified, burst.suppressed) == (2, 1, 1)  # the 15-minute "source" throttle
+    assert (burst.matched, burst.summarized, burst.notified, burst.suppressed) == (2, True, 1, 0)
     fetcher.documents[FEED_URL] = rss(*items("c"))
     soon = service.poll_now(OWNER, source.id, now=NOW + timedelta(hours=1, minutes=5))
-    assert (soon.notified, soon.suppressed) == (0, 1)
+    assert (soon.notified, soon.suppressed) == (0, 1)  # this source's 15-minute throttle
+    fetcher.documents[other_url] = rss(*items("y"))
+    other = service.poll_now(OWNER, second.id, now=NOW + timedelta(hours=1, minutes=6))
+    assert (other.notified, other.suppressed) == (1, 0)  # not hidden by the first source
     fetcher.documents[FEED_URL] = rss(*items("d"))
-    later = service.poll_now(OWNER, source.id, now=NOW + timedelta(hours=1, minutes=20))
-    assert later.notified == 1
-    # the throttle is shared by every source, so many feeds cannot add up to a flood
-    other_fetch = FakeFetcher({"https://other.example.com/feed": rss(*items("x"))})
-    service.feed_fetcher = lambda url: (fetcher if url == FEED_URL else other_fetch)(url)
-    second = service.create_source(OWNER, rss_request("https://other.example.com/feed", name="Other"))
-    service.poll_now(OWNER, second.id, now=NOW + timedelta(hours=1, minutes=21))
-    other_fetch.documents["https://other.example.com/feed"] = rss(*items("y"))
-    assert service.poll_now(OWNER, second.id, now=NOW + timedelta(hours=1, minutes=22)).suppressed == 1
+    assert service.poll_now(OWNER, source.id, now=NOW + timedelta(hours=1, minutes=20)).notified == 1
+    stored = service.get_source(OWNER, source.id)
+    assert stored.last_notified_at == NOW + timedelta(hours=1, minutes=20)
+    # the persisted last notification time keeps the throttle after a restart (a new service and throttler)
+    restarted = SourcesService(service.store, scheduler_service=SchedulerService(service.scheduler_service.store),
+                               feed_fetcher=fetcher)
+    fetcher.documents[FEED_URL] = rss(*items("e"))
+    assert restarted.poll_now(OWNER, source.id, now=NOW + timedelta(hours=1, minutes=25)).suppressed == 1
+
+
+def test_reminders_and_briefings_are_still_never_throttled():
+    scheduler = SchedulerService(MemorySchedulerStore())
+    from jarvis.scheduler.models import NotificationCreateRequest
+
+    for _ in range(3):
+        assert scheduler.dispatch_notification(OWNER, NotificationCreateRequest(
+            category="reminder", title="r", message="m"), now=NOW) is not None
+    assert scheduler.dispatch_notification(OWNER, NotificationCreateRequest(category="custom", title="a",
+                                                                            message="m"), now=NOW) is not None
+    assert scheduler.dispatch_notification(OWNER, NotificationCreateRequest(category="custom", title="b",
+                                                                            message="m"), now=NOW) is None
 
 
 def test_quiet_hours_hold_notifications_and_a_held_duplicate_is_not_repeated():
@@ -497,7 +529,7 @@ def test_failures_back_off_and_ten_in_a_row_turn_the_source_off_with_one_notice(
     assert notice.priority == "high" and notice.title == "Source turned off: News"
     with pytest.raises(SourceConflict):
         service.poll_now(OWNER, source.id, now=when)
-    assert service.poll_due(OWNER, when + timedelta(days=2))["polled"] == 0
+    assert service.run_due_polls(OWNER, when + timedelta(days=2))["polled"] == 0
     assert len(notifications(service)) == 1
     assert backoff_for(1, 15) == timedelta(minutes=30) and backoff_for(30, 1440) == MAX_BACKOFF
     reenabled = service.update_source(OWNER, source.id, SourceUpdateRequest(enabled=True))
@@ -525,17 +557,17 @@ def test_one_failing_or_hanging_source_does_not_stop_the_others():
     service = make_service(fetcher, hard_timeout_seconds=0.3)
     created = {name: service.create_source(OWNER, rss_request(url, name=name)) for url, name in urls.items()}
     try:
-        summary = service.poll_due(OWNER, NOW)
+        summary = service.run_due_polls(OWNER, NOW)
     finally:
         release.set()
-    assert summary == {"polled": 4, "failed": 3, "notified": 0}
+    assert summary == {"polled": 4, "failed": 3, "notified": 0, "skipped": 0, "carried_over": 0}
     states = {name: service.get_source(OWNER, source.id) for name, source in created.items()}
     assert states["good"].last_success_at == NOW and states["good"].consecutive_failures == 0
     assert states["broken"].last_error == "The feed answered HTTP 500."
     assert states["malformed"].last_error == "The feed is not well-formed XML."
     assert states["hang"].last_error == "The source did not respond in time."
     # nothing is due again before the interval (or the backoff) has passed
-    assert service.poll_due(OWNER, NOW + timedelta(minutes=5))["polled"] == 0
+    assert service.run_due_polls(OWNER, NOW + timedelta(minutes=5))["polled"] == 0
 
 
 def test_poll_due_respects_interval_disabled_sources_and_the_per_tick_cap():
@@ -544,10 +576,10 @@ def test_poll_due_respects_interval_disabled_sources_and_the_per_tick_cap():
     for n in range(12):
         service.create_source(OWNER, rss_request(f"{FEED_URL}?n={n}", poll_interval_minutes=30))
     off = service.create_source(OWNER, rss_request(f"{FEED_URL}?off", enabled=False))
-    assert service.poll_due(OWNER, NOW)["polled"] == 10
-    assert service.poll_due(OWNER, NOW)["polled"] == 2  # the rest, oldest first
-    assert service.poll_due(OWNER, NOW + timedelta(minutes=29))["polled"] == 0
-    assert service.poll_due(OWNER, NOW + timedelta(minutes=30))["polled"] == 10
+    assert service.run_due_polls(OWNER, NOW)["polled"] == 10
+    assert service.run_due_polls(OWNER, NOW)["polled"] == 2  # the rest, oldest first
+    assert service.run_due_polls(OWNER, NOW + timedelta(minutes=29))["polled"] == 0
+    assert service.run_due_polls(OWNER, NOW + timedelta(minutes=30))["polled"] == 10
     assert f"{FEED_URL}?off" not in fetcher.calls and not service.get_source(OWNER, off.id).last_polled_at
 
 
@@ -656,24 +688,57 @@ def test_folder_sources_are_refused_without_an_allowlisted_root(tmp_path):
         parse_folder_roots("relative")
 
 
-def test_folder_events_for_new_and_modified_files_only(tmp_path):
+def test_folder_reports_new_and_changed_files_once_they_are_stable(tmp_path):
     (tmp_path / "old.txt").write_text("x")
     service = make_service(roots=(tmp_path,))
-    source = service.create_source(OWNER, folder_request(tmp_path, importance="high"))
+    source = service.create_source(OWNER, folder_request(tmp_path, importance="high", poll_interval_minutes=15))
     first = service.poll_now(OWNER, source.id, now=NOW)
     assert (first.baseline, first.fetched, first.notified) == (True, 1, 0)
     (tmp_path / "report.pdf").write_bytes(b"12345")
+    second = service.poll_now(OWNER, source.id, now=NOW + timedelta(minutes=15))
+    assert (second.new, second.pending, second.notified) == (0, 1, 0)  # seen once: maybe still being written
+    third = service.poll_now(OWNER, source.id, now=NOW + timedelta(minutes=30))
+    assert (third.new, third.pending, third.notified) == (1, 0, 1)
+    assert latest(service).title == "Inbox: report.pdf"
+    # a change is reported as a change, once the file stopped growing
     (tmp_path / "old.txt").write_text("changed content")
     os.utime(tmp_path / "old.txt", ns=(1_800_000_000_000_000_000, 1_800_000_000_000_000_000))
-    (tmp_path / "gone.txt").write_text("y")
-    second = service.poll_now(OWNER, source.id, now=NOW + timedelta(hours=1))
-    assert (second.new, second.notified) == (3, 3)
-    (tmp_path / "gone.txt").unlink()
-    assert service.poll_now(OWNER, source.id, now=NOW + timedelta(hours=2)).new == 0  # deletions are not events
-    titles = sorted(note.title for note in notifications(service))
-    assert titles == ["Inbox: gone.txt", "Inbox: old.txt", "Inbox: report.pdf"]
+    growing = service.poll_now(OWNER, source.id, now=NOW + timedelta(minutes=45))
+    assert (growing.changed, growing.pending) == (0, 1)
+    (tmp_path / "old.txt").write_text("changed content, still growing")
+    os.utime(tmp_path / "old.txt", ns=(1_800_000_001_000_000_000, 1_800_000_001_000_000_000))
+    assert service.poll_now(OWNER, source.id, now=NOW + timedelta(minutes=60)).pending == 1
+    stable = service.poll_now(OWNER, source.id, now=NOW + timedelta(minutes=75))
+    assert (stable.changed, stable.new, stable.notified) == (1, 0, 1)
+    note = latest(service)
+    assert note.title == "Inbox: Changed: old.txt" and note.message.startswith("Changed item")
+    assert service.poll_now(OWNER, source.id, now=NOW + timedelta(minutes=90)).changed == 0
+    (tmp_path / "report.pdf").unlink()
+    assert service.poll_now(OWNER, source.id, now=NOW + timedelta(minutes=105)).new == 0  # deletions: no events
     report = next(item for item in service.list_items(OWNER, source.id).items if item.title == "report.pdf")
     assert report.summary == "5 bytes" and report.link is None
+    assert len(notifications(service)) == 2
+
+
+def test_a_file_changing_again_within_the_interval_is_not_reported_twice(tmp_path):
+    target = tmp_path / "log.txt"
+    target.write_text("a")
+    service = make_service(roots=(tmp_path,))
+    source = service.create_source(OWNER, folder_request(tmp_path, importance="high", poll_interval_minutes=60))
+    service.poll_now(OWNER, source.id, now=NOW)
+    for step, minutes in enumerate((1, 2), start=1):  # manual polls in quick succession
+        target.write_text("b" * step)
+        os.utime(target, ns=(1_800_000_000_000_000_000 + step, 1_800_000_000_000_000_000 + step))
+        service.poll_now(OWNER, source.id, now=NOW + timedelta(minutes=minutes))
+    reported = service.poll_now(OWNER, source.id, now=NOW + timedelta(minutes=3))
+    assert reported.changed == 1
+    target.write_text("ccc")
+    os.utime(target, ns=(1_800_000_000_000_000_009, 1_800_000_000_000_000_009))
+    service.poll_now(OWNER, source.id, now=NOW + timedelta(minutes=4))
+    within = service.poll_now(OWNER, source.id, now=NOW + timedelta(minutes=5))
+    assert (within.changed, within.pending) == (0, 1)  # stable, but reported less than an interval ago
+    later = service.poll_now(OWNER, source.id, now=NOW + timedelta(minutes=64))
+    assert later.changed == 1
 
 
 def test_hidden_and_temporary_files_are_ignored(tmp_path):
@@ -681,7 +746,7 @@ def test_hidden_and_temporary_files_are_ignored(tmp_path):
                  "backup~"):
         (tmp_path / name).write_text("x")
     (tmp_path / "keep.txt").write_text("x")
-    events = scan_folder(str(tmp_path), (tmp_path,))
+    events = scan(str(tmp_path), (tmp_path,))
     assert [event.relative_path for event in events] == ["keep.txt"]
     assert is_ignored_name("FILE.TMP") and not is_ignored_name("notes.txt")
 
@@ -712,9 +777,9 @@ def test_recursion_depth_and_entry_cap(tmp_path):
         (level / f"file{depth}.txt").write_text("x")
         level = level / f"d{depth}"
         level.mkdir()
-    flat = scan_folder(str(tmp_path), (tmp_path,))
+    flat = scan(str(tmp_path), (tmp_path,))
     assert [event.relative_path for event in flat] == ["file0.txt"]
-    deep = scan_folder(str(tmp_path), (tmp_path,), recursive_depth=3)
+    deep = scan(str(tmp_path), (tmp_path,), recursive_depth=3)
     assert [event.relative_path for event in deep] == ["file0.txt", "d0/file1.txt", "d0/d1/file2.txt",
                                                        "d0/d1/d2/file3.txt"]
     with pytest.raises(ValidationError):
@@ -723,7 +788,7 @@ def test_recursion_depth_and_entry_cap(tmp_path):
     many.mkdir()
     for n in range(520):
         (many / f"f{n:04d}.txt").write_text("")
-    assert len(scan_folder(str(many), (tmp_path,))) == 500
+    assert len(scan(str(many), (tmp_path,))) == 500
 
 
 def _symlink_or_skip(link: Path, target: Path, directory: bool):
@@ -744,7 +809,7 @@ def test_symlink_escapes_are_refused(tmp_path):
     service = make_service(roots=(root,))
     with pytest.raises(SourceInvalid, match="not inside"):
         service.create_source(OWNER, folder_request(root / "escape"))
-    events = scan_folder(str(root), (root,), recursive_depth=3)
+    events = scan(str(root), (root,), recursive_depth=3)
     assert [event.relative_path for event in events] == ["real.txt"]  # links are never followed
 
 
@@ -761,7 +826,7 @@ def test_junction_escapes_are_refused(tmp_path):
     service = make_service(roots=(root,))
     with pytest.raises(SourceInvalid, match="not inside"):
         service.create_source(OWNER, folder_request(root / "junction"))
-    assert [event.relative_path for event in scan_folder(str(root), (root,), recursive_depth=3)] == ["real.txt"]
+    assert [event.relative_path for event in scan(str(root), (root,), recursive_depth=3)] == ["real.txt"]
 
 
 def test_a_watched_folder_that_becomes_unsafe_fails_the_poll(tmp_path):
@@ -897,9 +962,325 @@ def test_api_owner_isolation():
 
 def test_migration_mirrors_validation_and_keeps_the_audit_constraint():
     ids = [migration_id for migration_id, *_ in migrations._migration_files(migrations.MIGRATIONS_DIR)]
-    assert ids[-1] == "0070_event_sources" and "0069_finance_imports" in ids
+    assert "0070_event_sources" in ids and "0069_finance_imports" in ids
+    assert ids.index("0070_event_sources") > ids.index("0069_finance_imports")
     sql = (migrations.MIGRATIONS_DIR / "0070_event_sources.sql").read_text(encoding="utf-8")
     for fragment in ("ON DELETE CASCADE", "BETWEEN 15 AND 1440", "BETWEEN 1 AND 20", "('low', 'normal', 'high')",
                      "recursive_depth BETWEEN 0 AND 3", "cardinality(include_keywords) <= 20"):
         assert fragment in sql
     assert "audit_events" not in sql.split("--", 1)[0] and "ALTER TABLE" not in sql
+
+
+# ------------------------------------------------------------------ v7.3 review fixes
+
+
+def _stream_response(body, encoding=None, content_type="application/rss+xml"):
+    headers = {"content-type": content_type}
+    if encoding:
+        headers["content-encoding"] = encoding
+    return lambda request: httpx.Response(200, headers=headers, stream=httpx.ByteStream(body))
+
+
+def _peak_mib(work):
+    import tracemalloc
+
+    tracemalloc.start()
+    try:
+        try:
+            work()
+        except Exception as exc:  # noqa: BLE001 - the caller asserts on the returned exception
+            return tracemalloc.get_traced_memory()[1] / 2**20, exc
+        return tracemalloc.get_traced_memory()[1] / 2**20, None
+    finally:
+        tracemalloc.stop()
+
+
+def test_decompression_bombs_are_refused_with_bounded_memory():
+    import gzip
+    import zlib
+
+    bomb = gzip.compress(b"\0" * (200 * 2**20), compresslevel=9)  # 200 MiB of zeros in about 200 KB
+    stacked = gzip.compress(gzip.compress(b"\0" * (50 * 2**20)))
+    cases = [(bomb, "gzip", "response_too_large"), (stacked, "gzip, gzip", "unsupported_encoding"),
+             (b"\x0b\x02\x80", "br", "unsupported_encoding"), (b"x", "zstd", "unsupported_encoding"),
+             (zlib.compress(b"\0" * (50 * 2**20)), "deflate", "response_too_large"),
+             (b"not gzip at all", "gzip", "unsupported_encoding")]
+    for body, encoding, code in cases:
+        seen_headers = []
+
+        def handler(request, body=body, encoding=encoding):
+            seen_headers.append(request.headers.get("accept-encoding"))
+            return _stream_response(body, encoding)(request)
+
+        fetcher = HttpFeedFetcher(resolver=resolver_for(PUBLIC), transport=httpx.MockTransport(handler))
+        peak, error = _peak_mib(lambda: fetcher(FEED_URL))
+        assert isinstance(error, FetchError) and error.code == code, (encoding, error)
+        assert peak < 20, (encoding, peak)
+        assert seen_headers == ["identity"]
+
+
+def test_one_gzip_or_deflate_layer_under_the_cap_is_decoded():
+    import gzip
+    import zlib
+
+    document = rss(*items("a", "b"))
+    for body, encoding in ((gzip.compress(document), "gzip"), (zlib.compress(document), "deflate"),
+                           (zlib.compress(document)[2:-4], "deflate"), (document, "identity"), (document, None)):
+        fetcher = HttpFeedFetcher(resolver=resolver_for(PUBLIC),
+                                  transport=_transport({FEED_URL: _stream_response(body, encoding)}))
+        assert [entry.title for entry in parse_feed(fetcher(FEED_URL))] == ["Title a", "Title b"], encoding
+
+
+def test_the_browser_http_provider_refuses_bombs_too():
+    import gzip
+
+    from jarvis.browser.providers import ContextLimits, HttpBrowserProvider, ProviderError
+    from jarvis.browser.url_policy import URLPolicy
+
+    page = b"<html><body><p>hello</p></body></html>"
+    routes = {
+        "https://a.example/bomb": _stream_response(gzip.compress(b"\0" * (100 * 2**20)), "gzip", "text/html"),
+        "https://a.example/stacked": _stream_response(gzip.compress(gzip.compress(page)), "gzip, gzip", "text/html"),
+        "https://a.example/br": _stream_response(b"\x0b", "br", "text/html"),
+        "https://a.example/ok": _stream_response(gzip.compress(page), "gzip", "text/html"),
+    }
+    provider = HttpBrowserProvider(transport=_transport(routes))
+    context = provider.open_context(URLPolicy(resolver=lambda host, port: ["93.184.216.34"]),
+                                    ContextLimits(navigation_timeout_seconds=5, max_page_bytes=200_000))
+    for path, code in (("bomb", "response_too_large"), ("stacked", "unsupported_content"),
+                       ("br", "unsupported_content")):
+        peak, error = _peak_mib(lambda: context.navigate(f"https://a.example/{path}"))
+        assert isinstance(error, ProviderError) and error.code == code, (path, error)
+        assert peak < 20
+    assert "hello" in repr(context.navigate("https://a.example/ok"))
+
+
+def test_site_local_ipv6_is_refused():
+    with pytest.raises(FetchError):
+        check_feed_url("https://[fec0::1]/feed")
+    with pytest.raises(FetchError):
+        check_feed_url("https://site.example.com/feed", resolver_for({"site.example.com": ["fec0::5"]}))
+    from jarvis.browser.url_policy import URLPolicy, BlockedURL
+
+    with pytest.raises(BlockedURL):
+        URLPolicy(resolver=resolver_for({"x.example.com": ["fec0::1"]})).check("https://x.example.com/")
+
+
+def test_the_runner_tick_is_not_delayed_by_slow_sources():
+    from jarvis.assistant.models import ReminderCreateRequest
+    from jarvis.assistant.service import AssistantService
+    from jarvis.assistant.stores import MemoryAssistantStore
+
+    release = threading.Event()
+    scheduler = SchedulerService(MemorySchedulerStore())
+    scheduler.assistant_service = assistant = AssistantService(MemoryAssistantStore())
+    urls = [f"{FEED_URL}?n={n}" for n in range(6)]
+    fetcher = FakeFetcher({url: (lambda: release.wait(10) and rss(*items("a"))) for url in urls})
+    service = make_service(fetcher, scheduler=scheduler)
+    for url in urls:
+        service.create_source(OWNER, rss_request(url))
+    runner = SchedulerRunner(scheduler, OWNER)
+    runner.hooks.append(("sources", service.poll_due))
+    assistant.create_reminder(OWNER, ReminderCreateRequest(title="Take a break",
+                                                           remind_at=datetime.now(timezone.utc) - timedelta(minutes=1)))
+    try:
+        started = __import__("time").monotonic()
+        first = runner.tick()
+        second = runner.tick()  # the cycle is still running: no second cycle, no waiting
+        elapsed = __import__("time").monotonic() - started
+        assert elapsed < 2 and first["reminders"] == 1 and first["sources_dispatched"] == 1
+        assert second["sources_busy"] == 1
+        assert [note.title for note in notifications(service)] == ["Take a break"]
+        assert service.polls_running <= service.max_concurrent_polls == 4
+    finally:
+        release.set()
+    assert service.wait_idle(10)
+    assert service.last_cycle["polled"] == 6 and runner.failed_hooks == 0
+
+
+def test_a_cycle_stops_starting_polls_after_its_budget_and_carries_the_rest_over():
+    release = threading.Event()
+    urls = [f"{FEED_URL}?n={n}" for n in range(6)]
+    fetcher = FakeFetcher({url: (lambda: release.wait(0.4) or rss(*items("a"))) for url in urls})
+    service = make_service(fetcher)
+    service.max_concurrent_polls, service.tick_budget_seconds = 2, 0.2
+    for url in urls:
+        service.create_source(OWNER, rss_request(url))
+    summary = service.run_due_polls(OWNER, NOW)
+    assert summary["polled"] == 2 and summary["carried_over"] == 4
+    service.tick_budget_seconds = 25
+    assert service.run_due_polls(OWNER, NOW)["polled"] == 4  # the carried-over sources are still due
+
+
+def test_stuck_fetch_threads_are_capped_and_close_waits_for_polls():
+    release = threading.Event()
+    fetcher = FakeFetcher({f"{FEED_URL}?n={n}": (lambda: release.wait(10) and rss()) for n in range(4)})
+    service = make_service(fetcher, hard_timeout_seconds=0.05)
+    service.max_abandoned_fetches = 2
+    sources = [service.create_source(OWNER, rss_request(f"{FEED_URL}?n={n}")) for n in range(4)]
+    try:
+        results = [service.poll_now(OWNER, source.id, now=NOW) for source in sources]
+        assert [result.status for result in results] == ["failed", "failed", "skipped", "skipped"]
+        assert "stuck" in results[2].error and service.abandoned_fetches == 2
+        assert service.status_counts(OWNER)["abandoned_fetches"] == 2
+        assert service.get_source(OWNER, sources[2].id).consecutive_failures == 0  # refused, not a failure
+    finally:
+        release.set()
+    for _ in range(100):
+        if service.abandoned_fetches == 0:
+            break
+        threading.Event().wait(0.05)
+    assert service.abandoned_fetches == 0
+    service.close(5)
+    assert service.poll_due(OWNER) == {"dispatched": 0, "closing": 1}
+    assert service.poll_now(OWNER, sources[0].id, now=NOW).status == "skipped"
+
+
+def test_runner_stop_closes_the_sources_service():
+    scheduler = SchedulerService(MemorySchedulerStore())
+    service = make_service(scheduler=scheduler)
+    runner = SchedulerRunner(scheduler, OWNER)
+    runner.hooks.append(("sources", service.poll_due))
+    runner.stop(1)
+    assert service.poll_due(OWNER)["closing"] == 1
+
+
+def test_storage_failure_after_a_good_fetch_still_backs_off():
+    from jarvis.sources.stores import SourceStorageError
+
+    fetcher = FakeFetcher({FEED_URL: rss(*items("a"))})
+    service = make_service(fetcher)
+    source = service.create_source(OWNER, rss_request(poll_interval_minutes=15))
+
+    def broken(*args, **kwargs):
+        raise SourceStorageError("Failed to record the source items.")
+
+    service.store.sync_items = broken
+    result = service.run_due_polls(OWNER, NOW)
+    stored = service.get_source(OWNER, source.id)
+    assert result["failed"] == 1 and stored.consecutive_failures == 1
+    assert stored.last_error == "The poll results could not be stored."
+    assert service.run_due_polls(OWNER, NOW + timedelta(minutes=16))["polled"] == 0  # backoff: 30 minutes
+    # even the failure cannot be stored: an in-memory next-eligible time stops a re-fetch on every tick
+    service.store.record_failure = broken
+    calls = len(fetcher.calls)
+    assert service.run_due_polls(OWNER, NOW + timedelta(minutes=31))["failed"] == 1
+    assert service.run_due_polls(OWNER, NOW + timedelta(minutes=32))["polled"] == 0
+    assert len(fetcher.calls) == calls + 1
+
+
+def test_unc_and_device_paths_are_refused_before_any_filesystem_access(tmp_path, monkeypatch):
+    service = make_service(roots=(tmp_path,))
+
+    def no_filesystem(*_args, **_kwargs):
+        raise AssertionError("the filesystem was touched")
+
+    monkeypatch.setattr(os.path, "realpath", no_filesystem)
+    monkeypatch.setattr(os, "scandir", no_filesystem)
+    for path in ("\\\\attacker.example\\share\\x", "//attacker.example/share", "\\\\?\\UNC\\attacker\\share",
+                 "\\\\.\\PhysicalDrive0", "\\\\?\\C:\\Windows", str(tmp_path.parent / "elsewhere")):
+        with pytest.raises(SourceInvalid, match="not inside"):
+            service.create_source(OWNER, folder_request(path))
+
+
+def test_folder_scans_are_lazy_and_report_truncation(tmp_path, monkeypatch):
+    for n in range(30):
+        (tmp_path / f"f{n:02d}.txt").write_text("")
+    looked = []
+    real_scandir = os.scandir
+
+    class Counting:
+        def __init__(self, path):
+            self.inner = real_scandir(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.inner.close()
+
+        def __iter__(self):
+            for entry in self.inner:
+                looked.append(entry.name)
+                yield entry
+
+    monkeypatch.setattr(os, "scandir", Counting)
+    events, truncated = scan_folder(str(tmp_path), (tmp_path,), max_entries=10)
+    assert truncated and len(events) == 10 and len(looked) == 11  # stops at the cap, never lists the rest
+
+
+def test_a_poll_reports_folder_truncation(tmp_path):
+    for n in range(505):
+        (tmp_path / f"f{n:03d}.txt").write_text("")
+    service = make_service(roots=(tmp_path,))
+    source = service.create_source(OWNER, folder_request(tmp_path))
+    result = service.poll_now(OWNER, source.id, now=NOW)
+    assert result.truncated and result.fetched == 500
+    assert service.status_counts(OWNER)["truncated"] == 1
+
+
+def test_a_long_feed_keeps_the_newest_entries():
+    from email.utils import format_datetime
+
+    from jarvis.sources.parsers import parse_feed_document
+
+    body = "".join(f"<item><title>T{n}</title><guid>{n}</guid><pubDate>"
+                   f"{format_datetime(datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(hours=n))}</pubDate>"
+                   "</item>" for n in range(260))
+    entries, truncated = parse_feed_document(f"<rss><channel>{body}</channel></rss>".encode())
+    assert truncated and len(entries) == 200
+    assert [entry.title for entry in entries][:1] == ["T60"] and entries[-1].title == "T259"
+    small, small_truncated = parse_feed_document(rss(*items("a")))
+    assert not small_truncated and len(small) == 1
+
+
+def test_only_symlinks_and_mount_points_count_as_links():
+    import stat
+    from types import SimpleNamespace
+
+    from jarvis.sources.fetchers import is_link_or_junction
+
+    def entry(tag):
+        info = SimpleNamespace(st_reparse_tag=tag)
+        return SimpleNamespace(is_symlink=lambda: False, is_junction=lambda: False,
+                               stat=lambda follow_symlinks=False: info), info
+
+    for tag, expected in ((stat.IO_REPARSE_TAG_SYMLINK, True), (stat.IO_REPARSE_TAG_MOUNT_POINT, True),
+                          (0x9000001A, False),  # IO_REPARSE_TAG_CLOUD_6 (OneDrive placeholder)
+                          (0x9000601A, False), (0, False)):
+        item, info = entry(tag)
+        assert is_link_or_junction(item, info) is expected, hex(tag)
+
+
+def test_an_edit_does_not_overwrite_a_concurrent_failure_count():
+    fetcher = FakeFetcher({FEED_URL: FetchError("http_error", "The feed answered HTTP 500.")})
+    service = make_service(fetcher)
+    source = service.create_source(OWNER, rss_request())
+    stale = service.get_source(OWNER, source.id)
+    service.poll_now(OWNER, source.id, now=NOW)  # a failure counted after the edit read the source
+    service.store.update_settings(stale.model_copy(update={"name": "Renamed"}), reset_failures=False)
+    stored = service.get_source(OWNER, source.id)
+    assert stored.name == "Renamed" and stored.consecutive_failures == 1 and stored.backoff_until is not None
+
+
+def test_status_reports_counts_and_runner_hook_failures(tmp_path):
+    app, client = make_client(tmp_path)
+    with client:
+        good = client.post("/sources", json={"kind": "rss", "name": "News", "config": {"url": FEED_URL}}).json()
+        client.post("/sources", json={"kind": "rss", "name": "Off", "config": {"url": FEED_URL}, "enabled": False})
+        app.state.sources_service.feed_fetcher = FakeFetcher({FEED_URL: FetchError("http_error", "HTTP 500.")})
+        client.post(f"/sources/{good['id']}/poll")
+        report = client.get("/status").json()
+        sources = next(item for item in report["subsystems"] if item["key"] == "sources")
+        checks = " ".join(sources["checks"])
+        assert "1 on, 1 off, 1 failing" in checks and "stuck fetches: 0" in checks
+        assert "runner hook failures: 0" in checks
+
+
+def test_the_last_audit_constraint_still_allows_the_scheduler_category():
+    ids = [migration_id for migration_id, *_ in migrations._migration_files(migrations.MIGRATIONS_DIR)]
+    rebuilt = [migration_id for migration_id in ids
+               if "audit_events_category_allowed" in (migrations.MIGRATIONS_DIR / f"{migration_id}.sql").read_text(
+                   encoding="utf-8")]
+    latest_sql = (migrations.MIGRATIONS_DIR / f"{rebuilt[-1]}.sql").read_text(encoding="utf-8")
+    assert "'scheduler'" in latest_sql

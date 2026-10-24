@@ -1,7 +1,8 @@
 """Contracts for opt-in event sources (v7.3): RSS/Atom feeds and watched local folders.
 
 Item text (titles, summaries, file names) comes from outside JARVIS and is untrusted: it is stored and returned
-as plain text, never executed, and fenced before it is shown to a model (``service.fence_item_for_model``).
+as plain text and never executed. No item text reaches a model in v7.3; ``service.fence_item_for_model`` is
+available (and tested) to fence it for the first feature that does.
 """
 
 from datetime import datetime
@@ -62,6 +63,7 @@ class SourceCreateRequest(_Filters):
     enabled: bool = True
     poll_interval_minutes: int = Field(default=60, ge=15, le=1440)
     importance: Importance = "normal"
+    # v7.3 review: every poll sends at most one notification per source; this is how many titles a summary lists.
     max_items_per_poll: int = Field(default=5, ge=1, le=20)
 
     @model_validator(mode="after")
@@ -104,6 +106,7 @@ class EventSource(_Filters):
     consecutive_failures: int = Field(default=0, ge=0)
     last_error: str | None = Field(default=None, max_length=200)
     backoff_until: datetime | None = None
+    last_notified_at: datetime | None = None  # the per-source anti-fatigue throttle survives restarts
     created_at: datetime
     updated_at: datetime
 
@@ -126,6 +129,12 @@ class SourceItem(StrictSchema):
     matched: bool
     first_seen_at: datetime
     last_seen_at: datetime
+    # Folder files: ``version`` is the size and mtime last observed, ``settled_version`` the version already
+    # reported (or recorded at the first poll); a new or changed file is reported once it is unchanged across two
+    # polls, so a file that is still being written is not reported half-done. Feed items have no version.
+    version: str | None = Field(default=None, max_length=100)
+    settled_version: str | None = Field(default=None, max_length=100)
+    notified_at: datetime | None = None
 
 
 class SourceItemPage(StrictSchema):
@@ -140,11 +149,15 @@ class PollResult(StrictSchema):
     trigger: Literal["manual", "scheduled"]
     baseline: bool = False  # first successful poll: existing items were recorded as seen without notifying
     fetched: int = Field(default=0, ge=0)
+    truncated: bool = False  # the feed or folder had more entries than one poll reads
     new: int = Field(default=0, ge=0)
+    changed: int = Field(default=0, ge=0)  # folder files whose size or mtime changed (reported once settled)
+    pending: int = Field(default=0, ge=0)  # folder files waiting to be unchanged across two polls
     matched: int = Field(default=0, ge=0)
-    notified: int = Field(default=0, ge=0)
-    held: int = Field(default=0, ge=0)
-    suppressed: int = Field(default=0, ge=0)  # dropped by the anti-fatigue throttle or already held
+    # At most one notification per poll and source: the item itself, or a summary of several.
+    notified: int = Field(default=0, ge=0, le=1)
+    held: int = Field(default=0, ge=0, le=1)  # stored until quiet hours end
+    suppressed: int = Field(default=0, ge=0, le=1)  # dropped by this source's throttle or an identical held one
     summarized: bool = False
     consecutive_failures: int = Field(default=0, ge=0)
     disabled: bool = False

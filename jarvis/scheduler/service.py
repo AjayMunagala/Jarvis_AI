@@ -433,9 +433,13 @@ class SchedulerService:
     # ========================================================= Notifications
 
     def dispatch_notification(
-        self, owner_id: UUID, req: NotificationCreateRequest, now: datetime | None = None
+        self, owner_id: UUID, req: NotificationCreateRequest, now: datetime | None = None, *,
+        throttle_key: str | None = None, throttle_last_dispatched: datetime | None = None,
     ) -> Notification | None:
-        """Dispatches a notification, applying anti-fatigue throttling and quiet hours (v4.5)."""
+        """Dispatches a notification, applying anti-fatigue throttling and quiet hours (v4.5).
+
+        v7.3: ``throttle_key`` throttles by that key instead of the category (one event source per key, so a
+        chatty source cannot hide the others); the caller then supplies the persisted last delivery time."""
         now = now or datetime.now(timezone.utc)
         held = self.in_quiet_hours(now) and req.priority != "urgent"
         if held and self.store.held_notification_exists(owner_id, req.category, req.title):
@@ -443,10 +447,11 @@ class SchedulerService:
         if req.category not in ("reminder", "briefing"):  # reminders and briefings were asked for: never dropped
             allowed, reason = self.throttler.should_allow(
                 owner_id=owner_id,
-                category=req.category,
+                category=throttle_key or req.category,
                 priority=req.priority,
                 now=now,
-                last_dispatched=self._persisted_last_dispatch(owner_id, req.category),
+                last_dispatched=throttle_last_dispatched if throttle_key
+                else self._persisted_last_dispatch(owner_id, req.category),
             )
             if not allowed:
                 logger.info("Notification throttled for owner %s: %s", owner_id, reason)
