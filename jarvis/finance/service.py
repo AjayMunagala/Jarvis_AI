@@ -4,7 +4,8 @@ Strict safety invariant: Contains ZERO broker, exchange, or order execution APIs
 Purely analytical personal finance intelligence.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 import logging
 from typing import Any
 from uuid import UUID, uuid4
@@ -15,18 +16,48 @@ from jarvis.finance.analytics import (
     compute_net_worth,
 )
 from jarvis.finance.forecasting import build_forecast
+from jarvis.finance.importing import (
+    DELIMITERS,
+    MAX_EXISTING_SCAN,
+    PREVIEW_ROWS,
+    ImportAccountNotFound,
+    ImportPreviewCache,
+    ImportPreviewNotFound,
+    ParsedRow,
+    PreviewEntry,
+    assign_keys,
+    clean_filename,
+    date_window,
+    decode_base64,
+    existing_key_counts,
+    flag_outliers,
+    mark_duplicates,
+    parse_row,
+    read_table,
+    resolve_columns,
+    row_messages,
+)
 from jarvis.finance.models import (
     AccountCreateRequest,
     FinanceForecast,
     FinancialAccount,
     FinancialAccountPage,
     FinancialAnalyticsReport,
+    FinancialImportBatch,
+    FinancialImportBatchPage,
     FinancialSnapshot,
     FinancialTransaction,
     FinancialTransactionPage,
+    ImportCommitRequest,
+    ImportCommitResult,
+    ImportCounts,
+    ImportPreview,
+    ImportPreviewRequest,
+    ImportRowResult,
+    ImportUndoResult,
     TransactionCreateRequest,
 )
-from jarvis.finance.stores import FinanceStore
+from jarvis.finance.stores import FinanceStore, ImportOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +68,13 @@ FORECAST_MAX_ACCOUNTS = 1000
 
 
 class FinanceService:
-    def __init__(self, store: FinanceStore, audit_service: Any = None) -> None:
+    def __init__(
+        self, store: FinanceStore, audit_service: Any = None, import_previews: ImportPreviewCache | None = None
+    ) -> None:
         self.store = store
         self.audit_service = audit_service
+        # v7.1: CSV import previews are held in memory only (TTL and caps; see ImportPreviewCache).
+        self.import_previews = import_previews or ImportPreviewCache()
 
     def _audit(self, owner_id: UUID, event_type: str, subject: str, details: dict[str, Any]) -> None:
         if self.audit_service is not None:
@@ -267,3 +302,162 @@ class FinanceService:
             accounts_truncated=accounts_truncated,
             as_of=as_of,
         )
+
+    # ========================================================= Bank CSV imports (v7.1)
+
+    def _mark_existing_duplicates(self, owner_id: UUID, account_id: UUID, rows: list[ParsedRow]) -> bool:
+        """Flag rows already stored for the account; False when the stored history was too large to scan fully."""
+        window = date_window(rows)
+        if window is None:
+            mark_duplicates(rows, {})
+            return True
+        stored = self.store.list_transaction_keys(owner_id, account_id, window[0], window[1], MAX_EXISTING_SCAN + 1)
+        mark_duplicates(rows, existing_key_counts(account_id, stored[:MAX_EXISTING_SCAN]))
+        return len(stored) <= MAX_EXISTING_SCAN
+
+    def preview_import(
+        self, owner_id: UUID, req: ImportPreviewRequest, now: datetime | None = None
+    ) -> ImportPreview:
+        """Parse and check a bank CSV file; only the in-memory preview is kept. Nothing is written or audited."""
+        account = self.store.get_account(owner_id, req.account_id)
+        if account is None:
+            raise ImportAccountNotFound("The financial account was not found.")
+        table = read_table(decode_base64(req.data_base64), req.mapping.delimiter)
+        columns = resolve_columns(table.header, req.mapping)
+        now = now or datetime.now(timezone.utc)
+        rows = [parse_row(number, cells, columns, req.mapping, len(table.header), now.date())
+                for number, cells in table.rows]
+        flag_outliers(rows)
+        assign_keys(owner_id, account.id, rows)
+        complete = self._mark_existing_duplicates(owner_id, account.id, rows)
+        warnings = list(table.warnings)
+        if not complete:
+            warnings.append("The account has too many stored transactions in this date range to check them all "
+                            "for duplicates; re-imports of the same rows are still prevented by fingerprints.")
+        entry = PreviewEntry(
+            id=uuid4(), owner_id=owner_id, account_id=account.id, filename=clean_filename(req.filename), rows=rows,
+            created_at=now, expires_at=now + timedelta(seconds=self.import_previews.ttl_seconds),
+            created_monotonic=self.import_previews.clock(),
+            meta={"encoding": table.encoding, "delimiter": DELIMITERS[table.delimiter],
+                  "columns": table.header, "blank_rows": table.blank_rows, "warnings": warnings,
+                  "complete": complete},
+        )
+        self.import_previews.put(entry)
+        return self._preview_response(entry)
+
+    @staticmethod
+    def _row_result(row: ParsedRow) -> ImportRowResult:
+        return ImportRowResult(
+            row_number=row.row_number, status=row.status, transaction_date=row.transaction_date,
+            amount=float(row.amount) if row.amount is not None else None, description=row.description,
+            category=row.category, messages=row_messages(row),
+        )
+
+    def _preview_response(self, entry: PreviewEntry) -> ImportPreview:
+        rows = entry.rows
+        valid = [row for row in rows if row.valid]
+        dated = [row.transaction_date for row in rows if row.key is not None and row.transaction_date is not None]
+        credits = sum((row.amount for row in valid if row.amount > 0), Decimal("0"))
+        debits = sum((row.amount for row in valid if row.amount < 0), Decimal("0"))
+        counts = ImportCounts(
+            rows=len(rows), valid=len(valid),
+            ok=sum(1 for row in rows if row.status == "ok"),
+            warnings=sum(1 for row in rows if row.status == "warning"),
+            errors=sum(1 for row in rows if row.status == "error"),
+            duplicates_in_file=sum(1 for row in rows if row.duplicate == "file"),
+            duplicates_existing=sum(1 for row in rows if row.duplicate == "existing"),
+            blank_rows_skipped=entry.meta["blank_rows"],
+        )
+        return ImportPreview(
+            id=entry.id, account_id=entry.account_id, filename=entry.filename, created_at=entry.created_at,
+            expires_at=entry.expires_at, encoding=entry.meta["encoding"], delimiter=entry.meta["delimiter"],
+            columns=entry.meta["columns"], counts=counts,
+            rows=[self._row_result(row) for row in rows[:PREVIEW_ROWS]],
+            issues=[self._row_result(row) for row in rows if row.status != "ok"][:PREVIEW_ROWS],
+            total_valid_amount=float(credits + debits), total_valid_credits=float(credits),
+            total_valid_debits=float(debits), date_from=min(dated) if dated else None,
+            date_to=max(dated) if dated else None, duplicate_check_complete=entry.meta["complete"],
+            file_warnings=entry.meta["warnings"],
+        )
+
+    def commit_import(
+        self, owner_id: UUID, preview_id: UUID, req: ImportCommitRequest
+    ) -> ImportCommitResult:
+        """Insert the preview's valid rows and their balance change in one transaction. The preview is consumed;
+        if storing fails nothing is written and the preview is put back so the owner can retry."""
+        entry = self.import_previews.take(owner_id, preview_id)
+        if entry is None:
+            raise ImportPreviewNotFound("The import preview was not found or has expired.")
+        try:
+            if self.store.get_account(owner_id, entry.account_id) is None:
+                raise ImportAccountNotFound("The financial account was not found.")
+            self._mark_existing_duplicates(owner_id, entry.account_id, entry.rows)  # fresh at commit time
+            now = datetime.now(timezone.utc)
+            batch_id = uuid4()
+            skipped = {"errors": 0, "warnings": 0, "file": 0, "existing": 0}
+            to_store: list[tuple[FinancialTransaction, str]] = []
+            for row in entry.rows:
+                if row.errors or row.amount is None or row.fingerprint is None:
+                    skipped["errors"] += 1
+                elif row.duplicate == "existing":
+                    skipped["existing"] += 1
+                elif row.duplicate == "file" and req.skip_duplicates:
+                    skipped["file"] += 1
+                elif row.warnings and not req.include_warnings:
+                    skipped["warnings"] += 1
+                else:
+                    amount = float(row.amount)
+                    to_store.append((FinancialTransaction(
+                        id=uuid4(), account_id=entry.account_id, owner_id=owner_id, amount=amount,
+                        category=row.category or categorize_transaction(row.description, amount),
+                        description=row.description, transaction_date=row.transaction_date, created_at=now,
+                        import_batch_id=batch_id,
+                    ), row.fingerprint))
+            batch = FinancialImportBatch(
+                id=batch_id, owner_id=owner_id, account_id=entry.account_id, filename=entry.filename,
+                rows_in_file=len(entry.rows), rows_inserted=0, rows_skipped=len(entry.rows) - len(to_store),
+                created_at=now,
+            )
+            try:
+                outcome = self.store.commit_import(batch, to_store) if to_store else ImportOutcome(None, 0, 0, 0.0)
+            except ValueError:
+                if self.store.get_account(owner_id, entry.account_id) is None:
+                    raise ImportAccountNotFound("The financial account was not found.") from None
+                raise
+        except Exception:
+            self.import_previews.restore(entry)
+            raise
+        account = self.store.get_account(owner_id, entry.account_id)
+        result = ImportCommitResult(
+            batch_id=outcome.batch.id if outcome.batch is not None else None, account_id=entry.account_id,
+            inserted=outcome.inserted, skipped_errors=skipped["errors"], skipped_warnings=skipped["warnings"],
+            skipped_duplicates_in_file=skipped["file"],
+            # Rows whose fingerprint was stored between preview and commit count as already stored.
+            skipped_duplicates_existing=skipped["existing"] + outcome.conflicts,
+            balance_change=round(outcome.balance_change, 2),
+            account_balance=account.balance if account is not None else None,
+        )
+        # Counts only: never descriptions, amounts or the file name (all file-derived).
+        self._audit(owner_id, "finance.import.commit",
+                    f"finance:import:{result.batch_id or preview_id}",
+                    {"account_id": str(entry.account_id), "rows_in_file": len(entry.rows),
+                     "inserted": result.inserted, "skipped_errors": result.skipped_errors,
+                     "skipped_warnings": result.skipped_warnings,
+                     "skipped_duplicates_in_file": result.skipped_duplicates_in_file,
+                     "skipped_duplicates_existing": result.skipped_duplicates_existing})
+        return result
+
+    def list_import_batches(self, owner_id: UUID, limit: int = 50, offset: int = 0) -> FinancialImportBatchPage:
+        items, total = self.store.list_import_batches(owner_id, limit=max(1, min(limit, 200)),
+                                                      offset=max(0, offset))
+        return FinancialImportBatchPage(items=items, total=total)
+
+    def undo_import(self, owner_id: UUID, batch_id: UUID) -> ImportUndoResult | None:
+        """Remove exactly the batch's transactions and reverse their balance effect, atomically."""
+        outcome = self.store.undo_import(owner_id, batch_id)
+        if outcome is None:
+            return None
+        self._audit(owner_id, "finance.import.undo", f"finance:import:{batch_id}",
+                    {"account_id": str(outcome.batch.account_id), "removed": outcome.removed})
+        return ImportUndoResult(batch_id=batch_id, account_id=outcome.batch.account_id, removed=outcome.removed,
+                                balance_change=round(outcome.balance_change, 2))

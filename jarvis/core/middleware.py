@@ -6,14 +6,19 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 
 class RequestBodyLimitMiddleware:
-    def __init__(self, app: ASGIApp, max_body_bytes: int) -> None:
+    def __init__(self, app: ASGIApp, max_body_bytes: int, path_limits: dict[str, int] | None = None) -> None:
         self.app = app
         self.max_body_bytes = max_body_bytes
+        # v7.1: exact POST paths that carry an upload get their own limit (for example the CSV import preview).
+        self.path_limits = dict(path_limits or {})
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        max_body_bytes = self.max_body_bytes
+        if scope.get("method") == "POST" and scope.get("path") in self.path_limits:
+            max_body_bytes = self.path_limits[scope["path"]]
 
         content_length = next(
             (
@@ -25,7 +30,7 @@ class RequestBodyLimitMiddleware:
         )
         if content_length is not None:
             try:
-                if int(content_length) > self.max_body_bytes:
+                if int(content_length) > max_body_bytes:
                     await self._reject(scope, send)
                     return
             except ValueError:
@@ -43,7 +48,7 @@ class RequestBodyLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 bytes_received += len(message.get("body", b""))
-                if bytes_received > self.max_body_bytes:
+                if bytes_received > max_body_bytes:
                     body_too_large = True
                     return {"type": "http.request", "body": b"", "more_body": False}
             return message

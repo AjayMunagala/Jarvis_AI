@@ -56,6 +56,7 @@ from jarvis.scheduler.service import SchedulerService, parse_quiet_hours
 from jarvis.scheduler.stores import MemorySchedulerStore, PostgresSchedulerStore
 from jarvis.health.service import HealthService
 from jarvis.health.stores import MemoryHealthStore, PostgresHealthStore
+from jarvis.finance.importing import IMPORT_REQUEST_BODY_BYTES
 from jarvis.finance.service import FinanceService
 from jarvis.finance.stores import MemoryFinanceStore, PostgresFinanceStore
 from jarvis.improvement.service import ImprovementService
@@ -329,6 +330,9 @@ def create_app(
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=resolved_settings.max_request_body_bytes,
+        # v7.1: a bank CSV (up to 2 MB, sent as base64) needs more than the general JSON limit; only this path.
+        path_limits={"/finance/imports/preview": max(resolved_settings.max_request_body_bytes,
+                                                     IMPORT_REQUEST_BODY_BYTES)},
     )
     # v4.2: added last so they run first (outermost): every request gets a correlation ID, and failed
     # v3.x mutations are audited with it.

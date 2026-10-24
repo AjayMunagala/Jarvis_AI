@@ -16,11 +16,18 @@ from jarvis.finance.models import (
     FinancialAccount,
     FinancialAccountPage,
     FinancialAnalyticsReport,
+    FinancialImportBatchPage,
     FinancialSnapshot,
     FinancialTransaction,
     FinancialTransactionPage,
+    ImportCommitRequest,
+    ImportCommitResult,
+    ImportPreview,
+    ImportPreviewRequest,
+    ImportUndoResult,
     TransactionCreateRequest,
 )
+from jarvis.finance.importing import ImportAccountNotFound, ImportPreviewNotFound, ImportRefused
 from jarvis.finance.service import FinanceService
 from jarvis.models.schemas import ErrorResponse
 from jarvis.security.policy import Capability
@@ -235,3 +242,78 @@ async def get_forecast(
     return await run_in_threadpool(
         _service(request).get_forecast, owner, horizon=horizon, min_train=min_train
     )
+
+
+# ============================================================= Bank CSV imports (v7.1)
+
+_IMPORT_ERRORS = {code: {"model": ErrorResponse} for code in (401, 403, 404, 413, 422, 503)}
+
+
+def _account_missing() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                         detail="The requested financial account was not found.")
+
+
+@router.post("/imports/preview", response_model=ImportPreview, status_code=status.HTTP_201_CREATED,
+             responses=_IMPORT_ERRORS)
+async def preview_import(
+    request: Request,
+    body: ImportPreviewRequest,
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> ImportPreview:
+    """Parse and check a bank CSV file. Nothing is stored except an in-memory preview that expires in 30 minutes."""
+    owner = _owner(owner_id)
+    enforce_capability(request, owner, Capability.FINANCE_WRITE)
+    try:
+        return await run_in_threadpool(_service(request).preview_import, owner, body)
+    except ImportAccountNotFound as exc:
+        raise _account_missing() from exc
+    except ImportRefused as exc:  # content-free messages by construction
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+
+@router.post("/imports/{preview_id}/commit", response_model=ImportCommitResult, responses=_IMPORT_ERRORS)
+async def commit_import(
+    request: Request,
+    preview_id: UUID,
+    body: ImportCommitRequest,
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> ImportCommitResult:
+    """Store the preview's valid rows with the balance change, all or nothing. A preview commits once."""
+    owner = _owner(owner_id)
+    enforce_capability(request, owner, Capability.FINANCE_WRITE)
+    try:
+        return await run_in_threadpool(_service(request).commit_import, owner, preview_id, body)
+    except ImportPreviewNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="The import preview was not found or has expired.") from exc
+    except ImportAccountNotFound as exc:
+        raise _account_missing() from exc
+
+
+@router.get("/imports", response_model=FinancialImportBatchPage, responses=_ERRORS)
+async def list_imports(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> FinancialImportBatchPage:
+    owner = _owner(owner_id)
+    enforce_capability(request, owner, Capability.FINANCE_READ)
+    return await run_in_threadpool(_service(request).list_import_batches, owner, limit=limit, offset=offset)
+
+
+@router.delete("/imports/{batch_id}", response_model=ImportUndoResult, responses=_ERRORS)
+async def undo_import(
+    request: Request,
+    batch_id: UUID,
+    owner_id: UUID | None = Depends(authenticated_owner),
+) -> ImportUndoResult:
+    """Undo an import: remove exactly that batch's transactions and reverse their balance effect."""
+    owner = _owner(owner_id)
+    enforce_capability(request, owner, Capability.FINANCE_WRITE)
+    result = await run_in_threadpool(_service(request).undo_import, owner, batch_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="The requested import batch was not found.")
+    return result
