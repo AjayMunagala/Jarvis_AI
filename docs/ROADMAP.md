@@ -308,3 +308,7 @@ The scope was derived from the repository, because no earlier document defined t
   - Step timeouts and run deadlines; writes are never retried, and a timed-out write is reported as unknown.
   - Cancel stops live runs; compensation is idempotent and honest; finance writes are atomic.
   - Runs with write steps need approval (migration 0063); tool steps use the ToolRuntime; restarts are recovered.
+- **v4.5 Bounded proactive runtime: accepted by the project lead on 2026-10-24, after an independent review and fixes.**
+  - Real cron and strict schedules; an optional background runner (off by default) runs each due job at most once.
+  - Reminders are delivered once; quiet hours hold notifications; the throttle survives restarts.
+  - Workflow jobs run through the engine; write workflows pause for the owner's approval.

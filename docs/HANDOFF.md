@@ -645,3 +645,11 @@ v2.8 should reuse `ToolRuntime.invoke` (it already accepts a correlation id and 
 - **Finance:** a transaction and its balance change are atomic.
 - **Startup:** runs interrupted by a restart are marked failed.
 - **Details:** `docs/V41_V50_PROGRAM.md`.
+
+## v4.5 — Bounded proactive runtime (accepted by the project lead on 2026-10-24)
+
+- **Schedules:** cron expressions are evaluated for real, and invalid schedules are refused with 422.
+- **Runner:** a background runner (`JARVIS_SCHEDULER_RUNNER_ENABLED`, off by default) delivers due reminders and runs each due job at most once, through a compare-and-set claim.
+- **Quiet hours:** they hold notifications (`JARVIS_SCHEDULER_QUIET_HOURS`), and the throttle survives restarts.
+- **Workflow jobs:** they use the engine. A write workflow pauses for approval.
+- **Details:** `docs/V41_V50_PROGRAM.md`.

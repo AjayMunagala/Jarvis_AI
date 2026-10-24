@@ -62,7 +62,8 @@ Results are always labelled as real, mock or unavailable.
 | v4.2 | ACCEPTED by Claude as project lead on 2026-10-24 (acceptance delegated by the owner), after an independent review and fixes | Python 1093 passed; live PostgreSQL 54 passed; Vitest 131; E2E 11 | branch head at push |
 | v4.3 | ACCEPTED by Claude as project lead on 2026-10-24 (owner approved the policy change the same day), after an independent review that found one blocking defect, since fixed | Python 1115 passed; live PostgreSQL 57 passed; Vitest 132; E2E 11 | branch head at push |
 | v4.4 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review (no bypass found; 8 status-reporting and robustness findings, all fixed) | Python 1135 passed; live PostgreSQL 59 passed; Vitest 132; E2E 11 | branch head at push |
-| v4.5–v5.0 | NOT STARTED | — | — |
+| v4.5 | ACCEPTED by Claude as project lead on 2026-10-24, after an independent review found one blocking defect (a run could resurrect a deleted job or rewind the schedule), since fixed with nine other findings | Python 1160 passed; live PostgreSQL 61 passed; frontend unchanged | branch head at push |
+| v4.6–v5.0 | NOT STARTED | — | — |
 
 ---
 
@@ -373,4 +374,78 @@ These were run on the v4.4 commit in a separate clean checkout.
 **Known limits:**
 - A step thread that times out keeps running until its call returns.
 - Recovery covers the configured owner's first 200 runs per state.
+
+## v4.5 — Bounded proactive runtime
+
+### Why it was needed
+- **Nothing ran on its own:** jobs ran only when triggered by hand, and reminders were never delivered.
+- **Cron and schedule errors were hidden:** every cron expression ran hourly, and an invalid interval silently became 5 minutes.
+- **The throttle was unreliable:** its state was lost on restart, and it could drop reminders.
+- **No duplicate protection.**
+- **Workflow jobs were not connected** to the workflow engine.
+
+### Changes
+1. **Strict schedules** (`jarvis/scheduler/cron.py`).
+   - A real five-field cron parser: lists, ranges, steps, and Sunday as 0 or 7. As in standard cron, a day field starting with `*` does not restrict the day.
+   - Validation: intervals must be 60 seconds to 366 days; `once` takes a delay of 0 to 366 days or an ISO date-time.
+   - An invalid schedule is refused with 422 when a job is created or enabled. Disabling a job never needs a valid schedule.
+2. **Background runner** (`jarvis/scheduler/runner.py`).
+   - It is off by default, following the execution-disabled defaults. Turn it on with `JARVIS_SCHEDULER_RUNNER_ENABLED=true`; it ticks every `JARVIS_SCHEDULER_TICK_SECONDS`, 30 s by default.
+   - Each tick delivers due reminders, runs due jobs and releases held notifications.
+   - A failed tick is logged; `/status` shows the runner state and the failures in a row.
+3. **Each due run happens at most once.**
+   - A due job is claimed with a compare-and-set on `next_run_at`, so only one worker runs it, even across processes.
+   - A run then records its result with another compare-and-set, never by rewriting the whole row. A job deleted, disabled or edited during its run keeps that change, and a slow run never rewinds the schedule.
+   - Missed runs after downtime collapse into one.
+   - The concurrency limit is checked before claiming, so a busy scheduler leaves the job due.
+   - At startup, jobs left `running` by a crash are marked failed.
+4. **Reminders.**
+   - A due reminder is delivered once: its notification is stored first, under an ID derived from the reminder, and only then is the reminder marked triggered.
+   - A storage failure leaves the reminder pending for the next tick.
+   - Reminders are never dropped by the anti-fatigue throttle.
+5. **Quiet hours.**
+   - Set them with `JARVIS_SCHEDULER_QUIET_HOURS` (for example `22:00-07:00`) and `JARVIS_SCHEDULER_UTC_OFFSET_MINUTES`.
+   - During quiet hours, non-urgent notifications are stored but held. They are hidden from listings and released when the quiet hours end, by the runner or on the next listing.
+   - The throttle still applies, and duplicate held notifications collapse.
+6. **Persisted throttle:** the last delivery time is read from storage, so a restart does not reset the throttle. Throttled notifications are audited.
+7. **Workflow jobs.**
+   - Workflow jobs start a background run of the workflow engine.
+   - A workflow with write steps cannot run unattended, because approvals are single-use. The job records one approval request, sends one notification, pauses itself and runs nothing.
+
+### Independent review and acceptance
+The reviewer confirmed:
+- the claim is a correct compare-and-set;
+- cron parsing is correct;
+- no write workflow runs without approval;
+- reminders are delivered once;
+- quiet hours wrap around midnight correctly;
+- no content appears in audit records or logs.
+
+It found one blocking defect, fixed before acceptance: a job run wrote back a stale copy of the whole job. That could re-create a deleted job, re-enable a disabled one, revert an edit, and rewind the schedule so a due run happened twice across workers.
+
+It also found nine more issues, all fixed with tests:
+1. A due run was lost when the concurrency limit was reached.
+2. A crash between claim and run left the job "running".
+3. Quiet hours bypassed the throttle, so notifications flooded in the morning.
+4. A reminder was lost when storing its notification failed.
+5. A recurring write workflow asked for approval on every tick.
+6. Cron treated `*/1` as restricting the day.
+7. `once` values `nan`, `inf` and `1e20` caused HTTP 500.
+8. Older jobs with now-invalid schedules could not be disabled.
+9. Smaller issues:
+   - scheduler queries had no statement timeout;
+   - `/status` stayed "limited" after a single failed tick;
+   - long workflow runs delayed reminders.
+
+**Tests:**
+- `tests/test_v45_scheduler_runtime.py`: 26 tests.
+- `integration_tests/test_v45_postgres.py`: 2 live tests, covering the claim race across six workers, and once-only reminders with hold, release and the persisted throttle.
+- Python: 1160 passed, 0 failed, 17 skipped.
+- Live PostgreSQL: 61 passed.
+
+These were run on the v4.5 commit in a separate clean checkout. The frontend is unchanged.
+
+**Known limits:**
+- Notifications appear in JARVIS only; nothing is sent to other devices.
+- Delivery is at most once: a run claimed by a process that then crashes is not retried.
 
