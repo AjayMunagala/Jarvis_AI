@@ -129,3 +129,58 @@ def test_knowledge_from_untrusted_documents_is_labelled_untrusted():
     labels = [record.label for record in gathered.records if record.source_kind == "knowledge"]
     assert labels == ["untrusted document: upload.txt"]
 
+
+# ------------------------------------------------------------- review fixes
+
+def test_workspace_summaries_never_crowd_out_relevant_documents():
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from jarvis.memory.context import MAX_WORKSPACE_ITEMS
+
+    documents = [SimpleNamespace(id=uuid4(), content=f"Relevant document {n} about the report.", source_kind="document",
+                                 source_reference=f"doc{n}") for n in range(5)]
+    workspace = [SimpleNamespace(id=uuid4(), content=f"Task: chore {n}", source_kind="workspace", label="task")
+                 for n in range(20)]
+    assembled = assemble_context(retrieved=documents, workspace=workspace, workspace_status="included",
+                                 terms=["report"])
+    kinds = [item.source_type for item in assembled.items]
+    assert kinds.count("document") == 5 and kinds.count("workspace") == MAX_WORKSPACE_ITEMS
+
+
+def test_an_expired_deadline_stops_gathering():
+    from time import monotonic
+
+    app = make_app()
+    with TestClient(app, headers=HEADERS):
+        seed(app)
+        gathered = gather_workspace_records(app.state, OWNER, "quarterly report", allows=lambda capability: True,
+                                            deadline=monotonic() - 1)
+    assert gathered.records == () and gathered.status == "unavailable"
+
+
+def test_stateless_chat_is_unchanged_with_the_flag_on():
+    app = make_app(chat_workspace_context_enabled=True)
+    with TestClient(app) as client:  # no credential: stateless demo chat
+        reply = client.post("/chat", json={"message": "quarterly report"})
+    assert reply.status_code == 200 and reply.json().get("context") is None
+
+
+def test_building_chat_context_writes_no_audit_records():
+    app = make_app(chat_workspace_context_enabled=True)
+    with TestClient(app, headers=HEADERS) as client:
+        seed(app)
+        before = len(client.get("/activity", params={"limit": 200}).json()["events"])
+        client.post("/chat", json={"message": "quarterly report"})
+        after = client.get("/activity", params={"limit": 200}).json()["events"]
+    assert len(after) == before and not any(item["event_type"] == "knowledge.search" for item in after)
+
+
+def test_k_and_w_text_is_not_a_citation_without_such_records():
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    memory = SimpleNamespace(id=uuid4(), content="Prefers tea.", source_kind="memory", category="preference")
+    assembled = assemble_context(retrieved=[memory])
+    assert cited_refs("See [M1], [K1] and [W2].", assembled) == ({"M1"}, 0)
+

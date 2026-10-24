@@ -122,7 +122,7 @@ class KnowledgeService:
 
     # ------------------------------------------------------------- Hybrid Search
 
-    def search(self, owner_id: UUID, req: KnowledgeSearchRequest) -> KnowledgeSearchResponse:
+    def search(self, owner_id: UUID, req: KnowledgeSearchRequest, *, audit: bool = True) -> KnowledgeSearchResponse:
         lexical_matches = self.store.search_chunks_lexical(
             owner_id, req.query, limit=req.top_k * 2
         )
@@ -135,12 +135,13 @@ class KnowledgeService:
             lexical_matches, semantic_matches, k=60, top_k=req.top_k
         )
 
-        self._audit(  # v4.6: metadata only; the query text is never stored in the audit trail
-            owner_id,
-            "knowledge.search",
-            "knowledge:search",
-            {"query_chars": len(req.query), "matched": len(scored_results)},
-        )
+        if audit:  # v4.7: internal context reads (chat workspace context) pass audit=False
+            self._audit(  # v4.6: metadata only; the query text is never stored in the audit trail
+                owner_id,
+                "knowledge.search",
+                "knowledge:search",
+                {"query_chars": len(req.query), "matched": len(scored_results)},
+            )
 
         return KnowledgeSearchResponse(
             query=req.query,

@@ -133,7 +133,7 @@ async def chat(
                                             execution_id=context.execution_id)
 
     assembled: AssembledContext | None = None
-    if repository is not None or settings.chat_workspace_context_enabled:
+    if repository is not None or workspace.status != "disabled":  # stateless chat without an owner is unchanged
         assembled = assemble_context(
             history=history,
             retrieved=retrieval.records if retrieval is not None else (),
@@ -247,10 +247,12 @@ async def _gather_workspace(request: Request, owner_id: UUID, message: str, *, d
         except Exception:  # noqa: BLE001 - a policy error is never permission
             return False
 
+    # At most half of the remaining time: the model call still needs the rest. The same limit is passed to the
+    # gatherer, which stops between queries once it is reached, so an abandoned gathering ends soon.
+    budget = remaining / 2
     task = asyncio.create_task(run_in_threadpool(gather_workspace_records, request.app.state, owner_id, message,
-                                                 allows=allows))
-    # At most half of the remaining time: the model call still needs the rest.
-    completed, _ = await asyncio.wait({task}, timeout=remaining / 2)
+                                                 allows=allows, deadline=monotonic() + budget))
+    completed, _ = await asyncio.wait({task}, timeout=budget)
     if not completed:
         task.add_done_callback(_consume_background_result)
         logger.warning("Workspace context timed out", extra={"execution_id": execution_id})

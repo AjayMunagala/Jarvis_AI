@@ -21,6 +21,7 @@ untrusted JSON data.
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
+from time import monotonic
 from typing import Any, Callable
 from uuid import UUID
 
@@ -45,26 +46,37 @@ class WorkspaceGathering:
     skipped: tuple[str, ...] = ()  # sources skipped: not permitted or failed
 
 
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)  # stored naive values are UTC
+
+
 def _when(value: datetime | None) -> str:
-    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if value else "no due date"
+    return _aware(value).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if value else "no due date"
 
 
 def gather_workspace_records(state: Any, owner_id: UUID, message: str, *, allows: Callable[[str], bool],
                              now: datetime | None = None, knowledge_limit: int = 3,
-                             item_limit: int = 5) -> WorkspaceGathering:
+                             item_limit: int = 5, deadline: float | None = None) -> WorkspaceGathering:
+    """``deadline`` (a ``time.monotonic`` value) is checked before each query, so a gathering the chat request
+    stopped waiting for ends soon instead of holding a worker thread (v4.7 review)."""
     now = now or datetime.now(timezone.utc)
     records: list[WorkspaceRecord] = []
     skipped: list[str] = []
     attempted = failed = 0
 
+    def out_of_time() -> bool:
+        return deadline is not None and monotonic() >= deadline
+
     knowledge = getattr(state, "knowledge_service", None)
     query = " ".join(message.split())[:200]
-    if knowledge is not None and query and allows("knowledge.read"):
+    if knowledge is not None and query and allows("knowledge.read") and not out_of_time():
         attempted += 1
         try:
             from jarvis.knowledge.models import KnowledgeSearchRequest
 
-            for hit in knowledge.search(owner_id, KnowledgeSearchRequest(query=query, top_k=knowledge_limit)).results:
+            # audit=False: building chat context is a read, not an owner search, and records nothing.
+            for hit in knowledge.search(owner_id, KnowledgeSearchRequest(query=query, top_k=knowledge_limit),
+                                        audit=False).results:
                 # v4.6 marks chunks of untrusted documents (for example indexed research files); the label says so.
                 label = ("untrusted document: " if hit.chunk.untrusted else "") + hit.document_title
                 records.append(WorkspaceRecord(id=hit.chunk.id, content=hit.chunk.content, source_kind="knowledge",
@@ -77,24 +89,32 @@ def gather_workspace_records(state: Any, owner_id: UUID, message: str, *, allows
         skipped.append("knowledge (not permitted)")
 
     assistant = getattr(state, "assistant_service", None)
-    if assistant is not None and allows("assistant.read"):
+    if assistant is not None and allows("assistant.read") and not out_of_time():
         attempted += 1
         try:
             from jarvis.assistant.models import ReminderStatus, TaskStatus
 
-            tasks = [task for status in (TaskStatus.IN_PROGRESS, TaskStatus.PENDING)
-                     for task in assistant.list_tasks(owner_id, status=status, limit=50).items]
-            tasks.sort(key=lambda task: (task.due_date is None, task.due_date or now, task.title))
+            tasks = []
+            for status in (TaskStatus.IN_PROGRESS, TaskStatus.PENDING):
+                if out_of_time():
+                    raise TimeoutError("the chat request stopped waiting")
+                tasks.extend(assistant.list_tasks(owner_id, status=status, limit=50).items)
+            tasks.sort(key=lambda task: (task.due_date is None, _aware(task.due_date) if task.due_date else now,
+                                         task.title))
             for task in tasks[:item_limit]:
                 records.append(WorkspaceRecord(
                     id=task.id, source_kind="workspace", label="task", updated_at=task.updated_at,
                     content=f"Task: {task.title} (status {task.status.value}, priority {task.priority.value}, "
                             f"due {_when(task.due_date)})"))
+            if out_of_time():
+                raise TimeoutError("the chat request stopped waiting")
             for reminder in assistant.list_reminders(owner_id, status=ReminderStatus.PENDING, due_before=now + WINDOW,
                                                      limit=item_limit).items:
                 records.append(WorkspaceRecord(
                     id=reminder.id, source_kind="workspace", label="reminder", updated_at=reminder.updated_at,
                     content=f"Reminder: {reminder.title} at {_when(reminder.remind_at)}"))
+            if out_of_time():
+                raise TimeoutError("the chat request stopped waiting")
             for event in assistant.list_calendar_events(owner_id, start_range=now, end_range=now + WINDOW,
                                                         limit=item_limit).items:
                 place = f" at {event.location}" if getattr(event, "location", None) else ""
@@ -110,7 +130,7 @@ def gather_workspace_records(state: Any, owner_id: UUID, message: str, *, allows
 
     if records:
         status = "included"
-    elif attempted and failed == attempted:
+    elif (attempted and failed == attempted) or out_of_time():
         status = "unavailable"
     else:
         status = "empty"
