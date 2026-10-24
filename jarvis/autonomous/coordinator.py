@@ -120,14 +120,16 @@ class AutonomousCoordinator:
                               sort_keys=True, default=str)
         write_names = ", ".join(f"{step.subsystem}.{step.action}" for step in writes)
         proposal = ApprovalProposal(
-            category="autonomous", action="autonomous.execute", target=f"{plan.intent}: {write_names}",
-            reason=f"Autonomous command: {req.prompt}", risk="medium",
-            expected_side_effects=f"Runs {len(steps)} planned step(s), {len(writes)} of which write data: {write_names}.",
+            category="autonomous", action="autonomous.execute", target=f"{plan.intent}: {write_names}"[:300],
+            reason=f"Autonomous command: {req.prompt}"[:500], risk="medium",
+            expected_side_effects=f"Runs {len(steps)} planned step(s), {len(writes)} of which write data: "
+                                  f"{write_names}."[:300],
             scope_material=hashlib.sha256(material.encode("utf-8")).hexdigest(),
         )
         return run_approved(self.approval_service, owner_id, proposal, req.approval_id,
                             lambda: self._run_steps(owner_id, req, plan, steps, command_id, now,
-                                                    approval_id=req.approval_id))
+                                                    approval_id=req.approval_id),
+                            succeeded=lambda result: result.status == "completed")
 
     def _run_steps(self, owner_id: UUID, req: AutonomousCommandRequest, plan: Any, steps: list, command_id: UUID,
                    now: datetime, *, approval_id: str | None) -> AutonomousCommandResult:

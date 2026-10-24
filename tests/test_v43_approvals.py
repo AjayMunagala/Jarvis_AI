@@ -317,3 +317,69 @@ def test_status_and_execution_note_describe_enforcement():
     text = str(report)
     assert "self-approval" not in text and "Writes without approval" not in text
     assert "run once" in note.replace("runs once", "run once")
+
+
+# ------------------------------------------------------------- review fixes
+
+def test_longest_allowed_prompt_is_gated_not_crashed():
+    app, client = make_client()
+    with client:
+        body = {"prompt": "finance " + "x" * 992, "dry_run": False}
+        result = approve_over_http(client, lambda approval_id: execute(client, body, approval_id))
+    assert result.status_code == 200 and result.json()["status"] == "completed"
+
+
+def test_failed_approved_autonomous_run_is_audited_as_failed(monkeypatch):
+    app, client = make_client()
+    with client:
+        def broken(owner_id):
+            raise RuntimeError("snapshot store down")
+
+        monkeypatch.setattr(app.state.finance_service, "generate_snapshot", broken)
+        result = approve_over_http(client, lambda approval_id: execute(client, FINANCE, approval_id))
+        types = [item["event_type"] for item in events(client)]
+    assert result.status_code == 200 and result.json()["status"] == "failed"
+    assert "approved_action_failed" in types and "approved_action_succeeded" not in types
+
+
+def test_unrestorable_record_is_refused_before_an_approval_is_requested(quarantine_client):
+    app, client, root = quarantine_client
+    suspect = root / "suspect.py"
+    suspect.write_text("eval(input())", encoding="utf-8")
+    moved = approve_over_http(client, lambda approval_id: client.post(
+        "/health/security/quarantine", json={"file_path": "suspect.py", "reason": "eval"},
+        params={"approval_id": approval_id} if approval_id else {}))
+    suspect.write_text("a new file now occupies the original path", encoding="utf-8")
+    before = len(client.get("/approvals").json()["approvals"])
+    refused = client.post(f"/health/security/quarantined/{moved.json()['id']}/restore")
+    assert refused.status_code == 404 and "already exists" in refused.json()["detail"]
+    assert len(client.get("/approvals").json()["approvals"]) == before
+    assert suspect.read_text(encoding="utf-8") == "a new file now occupies the original path"
+
+
+def test_a_second_approval_for_the_same_proposal_applies_nothing():
+    app, client = make_client()
+    with client:
+        created = client.post("/improvement/proposals", json={
+            "target_name": "prompts/summarizer.md", "proposed_content": "Once.", "rationale": "r"}).json()
+        decide = f"/improvement/proposals/{created['id']}/decide"
+        first = client.post(decide, json={"decision": "approved"}).json()["approval"]["approval_id"]
+        client.post(f"/approvals/{first}/approve", json={})
+        second = client.post(decide, json={"decision": "approved"}).json()["approval"]["approval_id"]
+        client.post(f"/approvals/{second}/approve", json={})
+        assert first != second
+        assert client.post(decide, json={"decision": "approved"}, params={"approval_id": first}).status_code == 200
+        again = client.post(decide, json={"decision": "approved"}, params={"approval_id": second})
+    assert again.status_code == 422 and "already approved" in again.json()["detail"]
+
+
+def test_store_refuses_use_outside_the_window_even_if_the_service_check_is_skipped():
+    approvals = memory_approvals()
+    request = approvals.request(OWNER, proposal())
+    decided = approvals.decide(OWNER, request.approval_id, approve=True, note=None)
+    decided_at = approval_module.datetime.fromisoformat(decided.decided_at)
+    common = dict(category="quarantine", action="security.quarantine", scope_sha256=request.scope_sha256,
+                  now=decided_at + timedelta(seconds=1))
+    assert approvals.store.consume(OWNER, request.approval_id, decided_after=decided_at, **common) is None
+    assert approvals.store.consume(OWNER, request.approval_id, decided_after=decided_at - timedelta(seconds=1),
+                                   **common) is not None

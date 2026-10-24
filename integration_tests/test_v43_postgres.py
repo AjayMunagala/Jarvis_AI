@@ -35,3 +35,34 @@ def test_database_refuses_inconsistent_approval_rows(isolated_postgres):
         with pytest.raises(psycopg.errors.CheckViolation):
             connection.execute("UPDATE jarvis_app.approval_requests SET category = 'unknown' WHERE id = %s",
                                (approval_id,))
+
+
+def test_concurrent_use_of_one_approval_succeeds_once_in_postgresql(isolated_postgres):
+    import threading
+
+    from jarvis.audit.models import ApprovalProposal
+    from jarvis.audit.service import ApprovalError, ApprovalService, AuditService
+    from jarvis.audit.stores import PostgresApprovalStore, PostgresAuditStore
+    from test_postgres_integration import TEST_OWNER_ID
+
+    url = isolated_postgres.database_url
+    service = ApprovalService(PostgresApprovalStore(url), AuditService(PostgresAuditStore(url)), ttl_seconds=900)
+    proposal = ApprovalProposal(category="quarantine", action="security.quarantine", target="a.txt", reason="r",
+                                risk="medium", expected_side_effects="moves a.txt", scope_material="a.txt|hash")
+    request = service.request(TEST_OWNER_ID, proposal)
+    service.decide(TEST_OWNER_ID, request.approval_id, approve=True, note=None)
+    used, refused, barrier = [], [], threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        try:
+            used.append(service.consume(TEST_OWNER_ID, request.approval_id, proposal).approval_id)
+        except ApprovalError as exc:
+            refused.append(exc.status_code)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert used == [request.approval_id] and refused == [409] * 7

@@ -5,6 +5,7 @@ import difflib
 import hashlib
 import logging
 from pathlib import Path
+import threading
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -52,6 +53,7 @@ class ImprovementService:
         self.repo_root = repo_root or Path.cwd()
         self.audit_service = audit_service
         self.approval_service: Any = None  # v4.3: apply and restore run only under an approved request
+        self._apply_lock = threading.Lock()  # one apply/restore at a time, re-checked after the approval is used
         # In-memory registry for mock/virtual target contents (e.g. prompt templates)
         self._target_storage: dict[str, str] = {
             "prompts/assistant_persona.md": "You are JARVIS, a helpful, secure AI personal assistant.",
@@ -156,7 +158,19 @@ class ImprovementService:
                            f"{_sha(proposal.proposed_content)}",
         )
         return run_approved(self.approval_service, owner_id, approval, approval_id,
-                            lambda: self._decide(owner_id, proposal, req))
+                            lambda: self._apply_if_still_pending(owner_id, proposal, req))
+
+    def _apply_if_still_pending(
+        self, owner_id: UUID, proposal: PromptMutationProposal, req: ProposalDecisionRequest
+    ) -> PromptMutationProposal:
+        with self._apply_lock:
+            current = self.store.get_proposal(owner_id, proposal.id)
+            if current is None or current.status != "pending":
+                raise ValueError(f"Proposal {proposal.id} is no longer pending; nothing was applied.")
+            if self.get_target_content(proposal.target_name) != proposal.original_content:
+                raise ValueError("The target has changed since this proposal was made; nothing was applied. "
+                                 "Create a new proposal.")
+            return self._decide(owner_id, proposal, req)
 
     def _decide(
         self, owner_id: UUID, proposal: PromptMutationProposal, req: ProposalDecisionRequest
@@ -215,7 +229,16 @@ class ImprovementService:
             scope_material=f"{proposal.id}|{proposal.snapshot_id}|{_sha(current)}|{_sha(original_content)}",
         )
         return run_approved(self.approval_service, owner_id, approval, approval_id,
-                            lambda: self._restore(owner_id, proposal, target_name, original_content))
+                            lambda: self._restore_if_unchanged(owner_id, proposal, target_name, original_content,
+                                                               current))
+
+    def _restore_if_unchanged(self, owner_id: UUID, proposal: PromptMutationProposal, target_name: str,
+                              original_content: str, approved_current: str) -> PromptMutationProposal:
+        with self._apply_lock:
+            latest = self.store.get_proposal(owner_id, proposal.id)
+            if latest is None or latest.status != "approved" or self.get_target_content(target_name) != approved_current:
+                raise ValueError(f"Proposal {proposal.id} changed after the restore was approved; nothing was restored.")
+            return self._restore(owner_id, proposal, target_name, original_content)
 
     def _restore(self, owner_id: UUID, proposal: PromptMutationProposal, target_name: str,
                  original_content: str) -> PromptMutationProposal:

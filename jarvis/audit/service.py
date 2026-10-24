@@ -257,8 +257,12 @@ class ApprovalService:
 
 
 def run_approved(approvals: "ApprovalService | None", owner_id: UUID, proposal: ApprovalProposal,
-                 approval_id: str | None, action: Callable[[], T]) -> T:
-    """Run ``action`` only under an approved, unused request for exactly this proposal (v4.3)."""
+                 approval_id: str | None, action: Callable[[], T],
+                 succeeded: Callable[[T], bool] | None = None) -> T:
+    """Run ``action`` only under an approved, unused request for exactly this proposal (v4.3).
+
+    ``succeeded`` decides the audited outcome for actions that report failure in their result instead of raising.
+    """
     if approvals is None:
         raise ApprovalError(503, "The approval gateway is unavailable, so nothing was executed.")
     if approval_id is None:
@@ -273,5 +277,5 @@ def run_approved(approvals: "ApprovalService | None", owner_id: UUID, proposal: 
     except Exception as exc:
         approvals.record_outcome(owner_id, approval, succeeded=False, error_type=type(exc).__name__)
         raise
-    approvals.record_outcome(owner_id, approval, succeeded=True)
+    approvals.record_outcome(owner_id, approval, succeeded=succeeded(result) if succeeded else True)
     return result

@@ -103,8 +103,8 @@ class QuarantineManager:
             restored_at=None,
         )
 
-    def restore_file(self, record: QuarantinedFile) -> QuarantinedFile:
-        """Restores a quarantined file back to its original location."""
+    def check_restorable(self, record: QuarantinedFile) -> Path:
+        """Non-mutating restore precheck; returns the contained destination or raises (v4.3)."""
         src_path = Path(record.quarantine_path)
         dest_path = Path(record.original_path)
 
@@ -122,6 +122,12 @@ class QuarantineManager:
         current_hash = calculate_file_sha256(src_path)
         if current_hash != record.hash_sha256:
             raise ValueError("Cryptographic hash mismatch. Quarantined file has been altered.")
+        return dest_path
+
+    def restore_file(self, record: QuarantinedFile) -> QuarantinedFile:
+        """Restores a quarantined file back to its original location."""
+        src_path = Path(record.quarantine_path)
+        dest_path = self.check_restorable(record)  # checked again: the state may change after approval
 
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src_path), str(dest_path))

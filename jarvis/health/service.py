@@ -136,7 +136,7 @@ class HealthService:
         resolved, file_hash = self.quarantine_manager.inspect(Path(req.file_path))
         display = self.quarantine_manager.display_path(resolved)
         proposal = ApprovalProposal(
-            category="quarantine", action="security.quarantine", target=display, reason=req.reason, risk="medium",
+            category="quarantine", action="security.quarantine", target=display[:300], reason=req.reason, risk="medium",
             expected_side_effects="Moves the file out of the repository into the quarantine directory; it can be restored.",
             scope_material=f"{display}|{file_hash}|{req.reason}",
         )
@@ -168,10 +168,11 @@ class HealthService:
             raise ValueError(f"Quarantined record {record_id} not found.")
         if record.restored_at is not None:
             raise ValueError(f"Quarantined record {record_id} was already restored.")
+        self.quarantine_manager.check_restorable(record)  # refuse before any approval is requested or used
         display = self.quarantine_manager.display_path(record.original_path)
         proposal = ApprovalProposal(
-            category="quarantine", action="security.restore", target=display,
-            reason=f"Restore the quarantined file to {display}", risk="medium",
+            category="quarantine", action="security.restore", target=display[:300],
+            reason=f"Restore the quarantined file to {display}"[:500], risk="medium",
             expected_side_effects="Moves the quarantined file back to its original location; nothing is overwritten.",
             scope_material=f"{record.id}|{record.hash_sha256}|{display}",
         )
