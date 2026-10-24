@@ -16,6 +16,8 @@ class AutonomousCommandRequest(StrictSchema):
     context: dict[str, Any] = Field(default_factory=dict)
     dry_run: bool = False
     max_steps: int = Field(default=5, ge=1, le=20)
+    # v4.3: a command with write steps runs only with the ID of an approved request for exactly this command.
+    approval_id: str | None = Field(default=None, pattern=r"^AR-[a-f0-9]{16}$")
 
 
 class AutonomousStepLog(StrictSchema):
@@ -37,6 +39,7 @@ class AutonomousCommandResult(StrictSchema):
     steps: list[AutonomousStepLog]
     summary: str
     executed_at: datetime
+    approval_id: str | None = None
 
 
 class SubsystemStatus(StrictSchema):

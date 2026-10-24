@@ -5,11 +5,15 @@ and Self-Improvement into a coherent AI operating system experience.
 """
 
 from datetime import datetime, timezone
+import hashlib
+import json
 import logging
 from typing import Any
 from uuid import UUID, uuid4
 
 from jarvis.assistant.models import NoteCreateRequest, TaskCreateRequest
+from jarvis.audit.models import ApprovalProposal
+from jarvis.audit.service import run_approved
 from jarvis.autonomous.models import (
     AutonomousCommandRequest,
     AutonomousCommandResult,
@@ -23,6 +27,9 @@ from jarvis.research.models import DocumentParseRequest
 from jarvis.scheduler.models import JobCreateRequest
 
 logger = logging.getLogger(__name__)
+
+# v4.3: steps that only read. Every other step writes (or is unknown) and needs an approved request.
+READ_ONLY_ACTIONS = frozenset({("finance", "accounts.list"), ("knowledge", "search"), ("improvement", "benchmarks.run")})
 
 
 class AutonomousCoordinator:
@@ -49,6 +56,7 @@ class AutonomousCoordinator:
         self.finance_service = finance_service
         self.improvement_service = improvement_service
         self.audit_service = audit_service
+        self.approval_service: Any = None  # v4.3: write commands run only under an approved request
         self._history: list[AutonomousCommandResult] = []
 
     def _audit(self, owner_id: UUID, event_type: str, subject: str, details: dict[str, Any]) -> None:
@@ -102,8 +110,30 @@ class AutonomousCoordinator:
             self._history.append(result)
             return result
 
+        steps = plan.planned_steps[: req.max_steps]
+        writes = [step for step in steps if (step.subsystem, step.action) not in READ_ONLY_ACTIONS]
+        if not writes:
+            return self._run_steps(owner_id, req, plan, steps, command_id, now, approval_id=None)
+        # v4.3: the approval is bound to the exact plan (prompt, context and every planned step with its payload).
+        material = json.dumps({"prompt": req.prompt, "context": req.context, "max_steps": req.max_steps,
+                               "steps": [[step.subsystem, step.action, step.payload] for step in steps]},
+                              sort_keys=True, default=str)
+        write_names = ", ".join(f"{step.subsystem}.{step.action}" for step in writes)
+        proposal = ApprovalProposal(
+            category="autonomous", action="autonomous.execute", target=f"{plan.intent}: {write_names}",
+            reason=f"Autonomous command: {req.prompt}", risk="medium",
+            expected_side_effects=f"Runs {len(steps)} planned step(s), {len(writes)} of which write data: {write_names}.",
+            scope_material=hashlib.sha256(material.encode("utf-8")).hexdigest(),
+        )
+        return run_approved(self.approval_service, owner_id, proposal, req.approval_id,
+                            lambda: self._run_steps(owner_id, req, plan, steps, command_id, now,
+                                                    approval_id=req.approval_id))
+
+    def _run_steps(self, owner_id: UUID, req: AutonomousCommandRequest, plan: Any, steps: list, command_id: UUID,
+                   now: datetime, *, approval_id: str | None) -> AutonomousCommandResult:
+        step_logs: list[AutonomousStepLog] = []
         overall_status = "completed"
-        for idx, pstep in enumerate(plan.planned_steps[: req.max_steps]):
+        for idx, pstep in enumerate(steps):
             try:
                 out_data, step_summary = self._dispatch_action(owner_id, pstep.subsystem, pstep.action, pstep.payload)
                 step_logs.append(
@@ -147,6 +177,7 @@ class AutonomousCoordinator:
             steps=step_logs,
             summary=summary_text,
             executed_at=now,
+            approval_id=approval_id,
         )
 
         self._history.append(result)
@@ -159,6 +190,7 @@ class AutonomousCoordinator:
                 "status": overall_status,
                 "steps_completed": len(step_logs),
                 "subsystems": plan.subsystems_involved,
+                "approval_id": approval_id,
             },
         )
         return result

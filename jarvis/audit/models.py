@@ -1,9 +1,14 @@
 """Contracts for the approval gateway and central audit trail (v2.9).
 
 Owner decision for v2.9: approvals are **recorded only**. Approving a request
-changes its state and is audited, but executes nothing; ``execution`` is always
-``"not_available"``. Execution after approval requires a separately reviewed
-isolation design.
+changes its state and is audited, but executes nothing.
+
+Owner decision for v4.3: approvals are **enforced** for autonomous write
+commands, controlled-improvement apply/restore and file quarantine/restore
+(categories ``autonomous``, ``improvement`` and ``quarantine``). Those actions
+do not run until a matching request is approved, and an approved request runs
+its action at most once (``execution="single_use"``, ``consumed_at``). Tool and
+browser requests are still recorded only (``execution="not_available"``).
 """
 
 from typing import Literal
@@ -16,7 +21,10 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 AuditCategory = Literal["tool", "browser", "approval", "intelligence", "orchestration", "assistant", "workflow",
                         "knowledge", "research", "scheduler", "health", "finance", "improvement"]
 ApprovalState = Literal["pending", "approved", "rejected", "expired"]
-ApprovalCategory = Literal["tool", "browser"]
+# v4.3 (migration 0062): enforced categories, whose approved action runs once.
+ApprovalCategory = Literal["tool", "browser", "autonomous", "improvement", "quarantine"]
+ENFORCED_CATEGORIES = frozenset({"autonomous", "improvement", "quarantine"})
+ApprovalExecution = Literal["not_available", "single_use"]
 RiskLevel = Literal["low", "medium", "high", "critical", "consequential"]
 DetailValue = StrictStr | int | float | bool | None
 
@@ -65,14 +73,31 @@ class ApprovalRequest(Contract):
     state: ApprovalState
     decided_at: StrictStr | None = None
     decision_note: StrictStr | None = Field(default=None, max_length=300)
-    execution: Literal["not_available"] = "not_available"
+    execution: ApprovalExecution = "not_available"
+    consumed_at: StrictStr | None = None
     durable: StrictBool
+
+
+APPROVAL_ID_HELP = ("Leave empty to request approval (HTTP 202, nothing runs). After approving the request, "
+                    "repeat the same call with its approval ID to run the action once.")
+
+
+def execution_for(category: str) -> ApprovalExecution:
+    return "single_use" if category in ENFORCED_CATEGORIES else "not_available"
 
 
 class ApprovalPage(Contract):
     durable_storage: StrictBool
     execution_note: StrictStr
     approvals: tuple[ApprovalRequest, ...]
+
+
+class ApprovalRequiredResponse(Contract):
+    """HTTP 202 body (v4.3): the action was not run; it waits for the owner to approve ``approval``."""
+
+    status: Literal["approval_required"] = "approval_required"
+    detail: StrictStr
+    approval: ApprovalRequest
 
 
 class ApprovalDecisionRequest(Contract):

@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from database import runner
+from approval_flow import approve_in_service, memory_approvals
 from jarvis.core.config import Settings
 from jarvis.health.quarantine import QuarantineManager
 from jarvis.improvement.immutable import ImmutableSecurityFileError, resolve_improvement_target
@@ -174,9 +175,11 @@ def test_improvement_writes_only_existing_allowlisted_prompt_files(tmp_path):
     victim = tmp_path / "app.py"
     victim.write_text("print('original')", encoding="utf-8")
     service = ImprovementService(MemoryImprovementStore(), repo_root=tmp_path)
+    service.approval_service = approvals = memory_approvals()
     proposal = service.propose_mutation(OWNER, ProposalCreateRequest(
         target_name="prompts/greeting.md", proposed_content="Hello, owner.", rationale="Friendlier greeting"))
-    service.decide_proposal(OWNER, proposal.id, ProposalDecisionRequest(decision="approved", comment="ok"))
+    approve_in_service(approvals, OWNER, lambda approval_id: service.decide_proposal(
+        OWNER, proposal.id, ProposalDecisionRequest(decision="approved", comment="ok"), approval_id))
     assert prompt.read_text(encoding="utf-8") == "Hello, owner."
     with pytest.raises(ImmutableSecurityFileError):
         service.propose_mutation(OWNER, ProposalCreateRequest(

@@ -4,6 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 import pytest
 
+from approval_flow import approve_in_service, memory_approvals
 from jarvis.improvement.immutable import (
     ImmutableSecurityFileError,
     assert_mutable_target,
@@ -97,6 +98,7 @@ def test_improvement_service_proposal_lifecycle_and_rejection():
 def test_approval_and_one_click_snapshot_restore():
     store = MemoryImprovementStore()
     service = ImprovementService(store)
+    service.approval_service = approvals = memory_approvals()
 
     target = "prompts/assistant_persona.md"
     original_content = service.get_target_content(target)
@@ -113,16 +115,18 @@ def test_approval_and_one_click_snapshot_restore():
     )
 
     # 2. Approve mutation (creates snapshot)
-    approved = service.decide_proposal(
+    approved = approve_in_service(approvals, TEST_OWNER, lambda approval_id: service.decide_proposal(
         TEST_OWNER,
         proposal.id,
         ProposalDecisionRequest(decision="approved", comment="Approved by owner"),
-    )
+        approval_id,
+    ))
     assert approved.status == "approved"
     assert approved.snapshot_id is not None
     assert service.get_target_content(target) == new_content
 
     # 3. 1-Click Rollback / Restore
-    restored = service.restore_snapshot(TEST_OWNER, proposal.id)
+    restored = approve_in_service(approvals, TEST_OWNER,
+                                  lambda approval_id: service.restore_snapshot(TEST_OWNER, proposal.id, approval_id))
     assert restored.status == "restored"
     assert service.get_target_content(target) == original_content

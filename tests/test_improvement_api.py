@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from approval_flow import approve_over_http
 from jarvis.core.config import Settings
 from jarvis.main import create_app
 from jarvis.security.policy import Capability, CapabilityPolicy
@@ -147,10 +148,11 @@ def test_proposal_lifecycle_and_restore_api(client):
 
     # Restore authorization and approve
     client.app_ref.state.authorization_policy = CapabilityPolicy(TEST_OWNER)
-    approve_res = client.post(
+    approve_res = approve_over_http(client, lambda approval_id: client.post(
         f"/improvement/proposals/{prop_id}/decide",
         json={"decision": "approved", "comment": "Verified and approved by owner."},
-    )
+        params={"approval_id": approval_id} if approval_id else {},
+    ))
     assert approve_res.status_code == 200
     approved_prop = approve_res.json()
     assert approved_prop["status"] == "approved"
@@ -161,7 +163,8 @@ def test_proposal_lifecycle_and_restore_api(client):
     assert svc.get_target_content(target) == proposed
 
     # Test 1-click snapshot restore
-    restore_res = client.post(f"/improvement/proposals/{prop_id}/restore")
+    restore_res = approve_over_http(client, lambda approval_id: client.post(
+        f"/improvement/proposals/{prop_id}/restore", params={"approval_id": approval_id} if approval_id else {}))
     assert restore_res.status_code == 200
     restored_prop = restore_res.json()
     assert restored_prop["status"] == "restored"

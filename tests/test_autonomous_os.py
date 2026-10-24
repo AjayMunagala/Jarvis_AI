@@ -17,6 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from approval_flow import approve_over_http
 from jarvis.core.config import Settings
 from jarvis.main import create_app
 from jarvis.security.policy import Capability, CapabilityPolicy
@@ -126,7 +127,7 @@ def test_dry_run_simulation(client):
         "dry_run": True,
         "max_steps": 5,
     }
-    res = client.post("/autonomous/execute", json=payload)
+    res = client.post("/autonomous/execute", json=payload)  # a dry run writes nothing, so needs no approval
     assert res.status_code == 200
     result = res.json()
 
@@ -154,7 +155,8 @@ def test_financial_health_assessment_command(client):
         "dry_run": False,
         "max_steps": 5,
     }
-    res = client.post("/autonomous/execute", json=payload)
+    res = approve_over_http(client, lambda approval_id: client.post(
+        "/autonomous/execute", json={**payload, **({"approval_id": approval_id} if approval_id else {})}))
     assert res.status_code == 200
     result = res.json()
 
@@ -189,7 +191,8 @@ def test_research_and_knowledge_ingestion_command(client):
         },
         "dry_run": False,
     }
-    res = client.post("/autonomous/execute", json=payload)
+    res = approve_over_http(client, lambda approval_id: client.post(
+        "/autonomous/execute", json={**payload, **({"approval_id": approval_id} if approval_id else {})}))
     assert res.status_code == 200
     result = res.json()
 
@@ -224,7 +227,8 @@ def test_proactive_maintenance_sweep_command(client):
         "prompt": "Run full system diagnostic telemetry and benchmark check",
         "dry_run": False,
     }
-    res = client.post("/autonomous/execute", json=payload)
+    res = approve_over_http(client, lambda approval_id: client.post(
+        "/autonomous/execute", json={**payload, **({"approval_id": approval_id} if approval_id else {})}))
     assert res.status_code == 200
     result = res.json()
 
@@ -248,7 +252,8 @@ def test_proactive_scheduling_command(client):
         "prompt": "Schedule a proactive recurring maintenance reminder job",
         "dry_run": False,
     }
-    res = client.post("/autonomous/execute", json=payload)
+    res = approve_over_http(client, lambda approval_id: client.post(
+        "/autonomous/execute", json={**payload, **({"approval_id": approval_id} if approval_id else {})}))
     assert res.status_code == 200
     result = res.json()
 
@@ -268,7 +273,9 @@ def test_proactive_scheduling_command(client):
 
 def test_command_history_retrieval(client):
     # Execute a live command and a dry-run command
-    client.post("/autonomous/execute", json={"prompt": "Run full system diagnostic telemetry and benchmark check", "dry_run": False})
+    sweep = {"prompt": "Run full system diagnostic telemetry and benchmark check", "dry_run": False}
+    approve_over_http(client, lambda approval_id: client.post(
+        "/autonomous/execute", json={**sweep, **({"approval_id": approval_id} if approval_id else {})}))
     client.post("/autonomous/execute", json={"prompt": "Deep research analysis on agent systems", "dry_run": True})
 
     res = client.get("/autonomous/history")

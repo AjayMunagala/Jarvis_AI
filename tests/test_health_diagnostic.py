@@ -5,6 +5,7 @@ import tempfile
 from uuid import uuid4
 import pytest
 
+from approval_flow import approve_in_service, memory_approvals
 from jarvis.health.models import QuarantineRequest
 from jarvis.health.probes import (
     get_system_telemetry,
@@ -113,6 +114,7 @@ def test_health_service_lifecycle():
         tmp_path = Path(tmpdir)
         store = MemoryHealthStore()
         service = HealthService(store, quarantine_dir=tmp_path / ".quarantine", repo_root=tmp_path)
+        service.approval_service = approvals = memory_approvals()
 
         # 1. Capture snapshot
         snap = service.capture_snapshot(TEST_OWNER)
@@ -133,10 +135,11 @@ def test_health_service_lifecycle():
         test_file = tmp_path / "suspect.py"
         test_file.write_text("eval(malicious_code)", encoding="utf-8")
 
-        q_record = service.quarantine_file(
+        q_record = approve_in_service(approvals, TEST_OWNER, lambda approval_id: service.quarantine_file(
             TEST_OWNER,
             QuarantineRequest(file_path=str(test_file), reason="Suspicious eval invocation"),
-        )
+            approval_id,
+        ))
         assert not test_file.exists()
 
         # List quarantined files
@@ -145,6 +148,7 @@ def test_health_service_lifecycle():
         assert q_page.items[0].id == q_record.id
 
         # Restore file
-        restored = service.restore_quarantined_file(TEST_OWNER, q_record.id)
+        restored = approve_in_service(approvals, TEST_OWNER, lambda approval_id: service.restore_quarantined_file(
+            TEST_OWNER, q_record.id, approval_id))
         assert test_file.exists()
         assert restored.restored_at is not None

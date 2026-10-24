@@ -749,7 +749,8 @@ export type ApprovalState = 'pending' | 'approved' | 'rejected' | 'expired'
 export interface ApprovalRequest {
   approval_id: string
   owner_id: string
-  category: 'tool' | 'browser'
+  // v4.3: autonomous, improvement and quarantine requests are enforced; their approved action runs once.
+  category: 'tool' | 'browser' | 'autonomous' | 'improvement' | 'quarantine'
   action: string
   target: string
   reason: string
@@ -762,7 +763,8 @@ export interface ApprovalRequest {
   state: ApprovalState
   decided_at: string | null
   decision_note: string | null
-  execution: 'not_available'
+  execution: 'not_available' | 'single_use'
+  consumed_at: string | null
   durable: boolean
 }
 export interface ApprovalPage { durable_storage: boolean; execution_note: string; approvals: ApprovalRequest[] }

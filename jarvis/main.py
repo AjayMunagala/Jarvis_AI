@@ -48,7 +48,8 @@ from jarvis.finance.service import FinanceService
 from jarvis.finance.stores import MemoryFinanceStore, PostgresFinanceStore
 from jarvis.improvement.service import ImprovementService
 from jarvis.improvement.stores import MemoryImprovementStore
-from jarvis.audit.service import ApprovalService, AuditService
+from jarvis.audit.service import ApprovalError, ApprovalRequired, ApprovalService, AuditService
+from jarvis.audit.models import ApprovalRequiredResponse
 from jarvis.audit.stores import (
     MemoryApprovalStore, MemoryAuditStore, PostgresApprovalStore, PostgresAuditStore,
 )
@@ -222,6 +223,9 @@ def create_app(
         improvement_service=app.state.improvement_service,
         audit_service=app.state.audit_service,
     )
+    # v4.3: autonomous writes, improvement apply/restore and quarantine/restore wait for an approved request.
+    for component in (app.state.autonomous_coordinator, app.state.improvement_service, app.state.health_service):
+        component.approval_service = app.state.approval_service
     # v4.2: one truthful status source, also used by health snapshots, scheduled health checks and the
     # autonomous overview (each previously reported fixed "operational"/"healthy" values).
     app.state.status_service = StatusService(app.state)
@@ -306,6 +310,20 @@ def create_app(
             },
             headers=exc.headers,
         )
+
+    @app.exception_handler(ApprovalRequired)
+    async def approval_required_handler(request: Request, exc: ApprovalRequired) -> JSONResponse:
+        # v4.3: the action was not run. 202 because the request was accepted for the owner's decision.
+        body = ApprovalRequiredResponse(
+            detail=f"Approval required: approve {exc.request.approval_id}, then repeat this request with "
+                   f"approval_id={exc.request.approval_id}. Nothing was executed.",
+            approval=exc.request)
+        return JSONResponse(status_code=202, content=body.model_dump(mode="json"))
+
+    @app.exception_handler(ApprovalError)
+    async def approval_error_handler(request: Request, exc: ApprovalError) -> JSONResponse:
+        error = {404: "approval_not_found", 409: "approval_not_usable"}.get(exc.status_code, "approval_unavailable")
+        return JSONResponse(status_code=exc.status_code, content={"error": error, "detail": exc.public_message})
 
     @app.exception_handler(Exception)
     async def unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:

@@ -4,7 +4,8 @@ PostgreSQL storage is used only when persistence is enabled (decision D7). All
 SQL is parameterized and owner-scoped; each operation runs under the existing
 transaction-local statement-timeout helpers. Approval decisions are a single
 conditional ``UPDATE`` so a request can be decided at most once and never after
-it expires.
+it expires. Using an approved request (v4.3) is also a single conditional
+``UPDATE``, so an approval can never run its action twice.
 """
 
 import json
@@ -15,7 +16,7 @@ from time import monotonic
 from typing import Callable, Protocol
 from uuid import UUID
 
-from jarvis.audit.models import ApprovalRequest, AuditRecord
+from jarvis.audit.models import ApprovalRequest, AuditRecord, execution_for
 from jarvis.persistence.operation_timeout import bounded_connect_timeout, execute_with_deadline, operation_deadline
 
 
@@ -38,6 +39,8 @@ class ApprovalStore(Protocol):
     def list(self, owner_id: UUID, *, limit: int, state: str | None = None) -> tuple[ApprovalRequest, ...]: ...
     def decide(self, owner_id: UUID, approval_id: str, *, state: str, note: str | None, now: datetime) -> ApprovalRequest | None: ...
     def expire(self, owner_id: UUID, *, now: datetime) -> int: ...
+    def consume(self, owner_id: UUID, approval_id: str, *, category: str, action: str, scope_sha256: str,
+                now: datetime, decided_after: datetime) -> ApprovalRequest | None: ...
 
 
 # --------------------------------------------------------------- memory
@@ -103,11 +106,22 @@ class MemoryApprovalStore:
                     count += 1
         return count
 
+    def consume(self, owner_id, approval_id, *, category, action, scope_sha256, now, decided_after):
+        with self._lock:
+            item = self._items.get(approval_id)
+            if (item is None or item.owner_id != owner_id or item.state != "approved" or item.consumed_at is not None
+                    or (item.category, item.action, item.scope_sha256) != (category, action, scope_sha256)
+                    or item.decided_at is None or datetime.fromisoformat(item.decided_at) <= decided_after):
+                return None
+            updated = item.model_copy(update={"consumed_at": now.isoformat(timespec="milliseconds")})
+            self._items[approval_id] = updated
+            return updated
+
 
 # ------------------------------------------------------------- postgres
 
 _APPROVAL_COLUMNS = ("id, owner_id, category, action, target, reason, risk, expected_side_effects, scope_sha256, "
-                     "correlation_id, created_at, expires_at, state, decided_at, decision_note")
+                     "correlation_id, created_at, expires_at, state, decided_at, decision_note, consumed_at")
 
 
 class _PostgresBase:
@@ -183,16 +197,17 @@ class PostgresApprovalStore(_PostgresBase):
             approval_id=row[0], owner_id=row[1], category=row[2], action=row[3], target=row[4], reason=row[5],
             risk=row[6], expected_side_effects=row[7], scope_sha256=row[8], correlation_id=row[9],
             created_at=_iso(row[10]), expires_at=_iso(row[11]), state=row[12], decided_at=_iso(row[13]),
-            decision_note=row[14], durable=True,
+            decision_note=row[14], consumed_at=_iso(row[15]), execution=execution_for(row[2]), durable=True,
         )
 
     def create(self, request):
         self._run(lambda execute: execute(
             f"""INSERT INTO jarvis_app.approval_requests ({_APPROVAL_COLUMNS})
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (request.approval_id, request.owner_id, request.category, request.action, request.target, request.reason,
              request.risk, request.expected_side_effects, request.scope_sha256, request.correlation_id,
-             request.created_at, request.expires_at, request.state, request.decided_at, request.decision_note),
+             request.created_at, request.expires_at, request.state, request.decided_at, request.decision_note,
+             request.consumed_at),
         ))
 
     def get(self, owner_id, approval_id):
@@ -227,3 +242,12 @@ class PostgresApprovalStore(_PostgresBase):
                WHERE owner_id = %s AND state = 'pending' AND expires_at <= %s RETURNING id""",
             (owner_id, now)).fetchall())
         return len(rows)
+
+    def consume(self, owner_id, approval_id, *, category, action, scope_sha256, now, decided_after):
+        row = self._run(lambda execute: execute(
+            f"""UPDATE jarvis_app.approval_requests SET consumed_at = %s
+                WHERE id = %s AND owner_id = %s AND state = 'approved' AND consumed_at IS NULL
+                  AND category = %s AND action = %s AND scope_sha256 = %s AND decided_at > %s
+                RETURNING {_APPROVAL_COLUMNS}""",
+            (now, approval_id, owner_id, category, action, scope_sha256, decided_after)).fetchone())
+        return self._record(row) if row else None

@@ -10,6 +10,12 @@ import {
 } from '../services/api'
 import './ActivityPanel.css'
 
+function executionLabel(item: ApprovalRequest): string {
+  if (item.execution !== 'single_use') return 'not available'
+  if (item.consumed_at) return `used once at ${new Date(item.consumed_at).toLocaleTimeString()}`
+  return item.state === 'approved' ? 'approved, not used yet' : 'not run'
+}
+
 export default function ActivityPanel({ auth, onUnlock }: { auth: ApiAuth; onUnlock: () => void }) {
   const [activity, setActivity] = useState<ActivityPage | null>(null)
   const [approvals, setApprovals] = useState<ApprovalPage | null>(null)
@@ -41,7 +47,9 @@ export default function ActivityPanel({ auth, onUnlock }: { auth: ApiAuth; onUnl
     try {
       const updated = await decideApproval(item.approval_id, approve, undefined, auth)
       if (version !== generation.current) return
-      setNotice(`${updated.approval_id} ${updated.state}. Nothing was executed.`)
+      setNotice(updated.execution === 'single_use' && updated.state === 'approved'
+        ? `${updated.approval_id} approved. Nothing has run yet: repeat the action with approval_id=${updated.approval_id} to run it once.`
+        : `${updated.approval_id} ${updated.state}. Nothing was executed.`)
       await refresh(version)
     } catch (cause) {
       if (version === generation.current) setError(cause instanceof Error ? cause.message : 'The decision failed.')
@@ -54,9 +62,9 @@ export default function ActivityPanel({ auth, onUnlock }: { auth: ApiAuth; onUnl
   const decided = approvals?.approvals.filter((item) => item.state !== 'pending') ?? []
 
   return <section className="activity-panel" aria-labelledby="activity-heading">
-    <p className="activity-kicker">AUDIT TRAIL · APPROVALS ARE RECORDED ONLY</p>
+    <p className="activity-kicker">AUDIT TRAIL · APPROVALS</p>
     <h1 id="activity-heading">Activity</h1>
-    <p>Every tool call, browser action and approval decision is recorded here. Approving a request records your decision; it does not execute anything in this version.</p>
+    <p>Every tool call, browser action and approval decision is recorded here. Approving a tool or browser request records your decision only. Autonomous, improvement and quarantine actions wait for your approval, then run once when the same action is submitted again with the approval ID.</p>
     {!auth.token && <div role="status"><p>Unlock the workspace to view activity.</p><button type="button" onClick={onUnlock}>Unlock activity</button></div>}
     {error && <p role="alert">{error}</p>}
     {notice && <p role="status" className="activity-notice">{notice}</p>}
@@ -69,12 +77,12 @@ export default function ActivityPanel({ auth, onUnlock }: { auth: ApiAuth; onUnl
         <p>{item.target}</p>
         <small>{item.reason} Expected side effects: {item.expected_side_effects} Expires {new Date(item.expires_at).toLocaleTimeString()}.</small>
         <div className="activity-actions">
-          <button type="button" onClick={() => void decide(item, true)} disabled={busy !== null}>Approve (record only)</button>
+          <button type="button" onClick={() => void decide(item, true)} disabled={busy !== null}>{item.execution === 'single_use' ? 'Approve (allows one run)' : 'Approve (record only)'}</button>
           <button type="button" className="activity-reject" onClick={() => void decide(item, false)} disabled={busy !== null}>Reject</button>
         </div>
       </li>)}</ul> : <p>No pending approval requests.</p>}
       {decided.length > 0 && <details><summary>Decided and expired ({decided.length})</summary><ul className="activity-decided">{decided.map((item) => <li key={item.approval_id}>
-        {item.action} · {item.state}{item.decided_at ? ` at ${new Date(item.decided_at).toLocaleTimeString()}` : ''} · execution: not available
+        {item.action} · {item.state}{item.decided_at ? ` at ${new Date(item.decided_at).toLocaleTimeString()}` : ''} · execution: {executionLabel(item)}
       </li>)}</ul></details>}
     </section>}
 

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from starlette.concurrency import run_in_threadpool
 
 from jarvis.api.dependencies import authenticated_owner, enforce_capability
+from jarvis.audit.models import APPROVAL_ID_HELP, ApprovalRequiredResponse
 from jarvis.health.models import (
     DiagnosticReport,
     HealthSnapshot,
@@ -23,7 +24,8 @@ from jarvis.models.schemas import ErrorResponse
 from jarvis.security.policy import Capability
 
 router = APIRouter(prefix="/health", tags=["health-diagnostic"])
-_ERRORS = {code: {"model": ErrorResponse} for code in (401, 403, 404, 422, 503)}
+_ERRORS = {code: {"model": ErrorResponse} for code in (401, 403, 404, 409, 422, 503)}
+_GATED = {**_ERRORS, 202: {"model": ApprovalRequiredResponse, "description": "Approval required; nothing was executed."}}
 
 
 def _owner(owner_id: UUID | None) -> UUID:
@@ -107,18 +109,19 @@ async def list_quarantined_files(
     "/security/quarantine",
     response_model=QuarantinedFile,
     status_code=status.HTTP_201_CREATED,
-    responses=_ERRORS,
+    responses=_GATED,
 )
 async def quarantine_file(
     request: Request,
     body: QuarantineRequest,
+    approval_id: str | None = Query(default=None, pattern=r"^AR-[a-f0-9]{16}$", description=APPROVAL_ID_HELP),
     owner_id: UUID | None = Depends(authenticated_owner),
 ) -> QuarantinedFile:
     owner = _owner(owner_id)
     enforce_capability(request, owner, Capability.SECURITY_QUARANTINE_FILE)
     try:
         return await run_in_threadpool(
-            _service(request).quarantine_file, owner, body, approved_by=owner
+            _service(request).quarantine_file, owner, body, approval_id
         )
     except FileNotFoundError as exc:
         raise HTTPException(
@@ -135,18 +138,19 @@ async def quarantine_file(
 @router.post(
     "/security/quarantined/{record_id}/restore",
     response_model=QuarantinedFile,
-    responses=_ERRORS,
+    responses=_GATED,
 )
 async def restore_quarantined_file(
     request: Request,
     record_id: UUID,
+    approval_id: str | None = Query(default=None, pattern=r"^AR-[a-f0-9]{16}$", description=APPROVAL_ID_HELP),
     owner_id: UUID | None = Depends(authenticated_owner),
 ) -> QuarantinedFile:
     owner = _owner(owner_id)
     enforce_capability(request, owner, Capability.SECURITY_QUARANTINE_FILE)
     try:
         return await run_in_threadpool(
-            _service(request).restore_quarantined_file, owner, record_id
+            _service(request).restore_quarantined_file, owner, record_id, approval_id
         )
     except ValueError as exc:
         raise HTTPException(

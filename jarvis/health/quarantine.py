@@ -56,14 +56,8 @@ class QuarantineManager:
         except ValueError:
             return Path(path).name
 
-    def quarantine_file(
-        self,
-        owner_id: UUID,
-        file_path: Path,
-        reason: str,
-        approved_by: UUID | None = None,
-    ) -> QuarantinedFile:
-        """Moves suspect file to quarantine directory with a .quarantine.bak extension."""
+    def inspect(self, file_path: Path) -> tuple[Path, str]:
+        """Validate a quarantine target and return its resolved path and SHA-256, without moving it."""
         candidate = file_path
         if file_path.is_absolute():
             try:  # absolute paths are accepted only when they are inside the root
@@ -75,8 +69,20 @@ class QuarantineManager:
             raise FileNotFoundError("The file to quarantine does not exist inside the repository.")
         if not resolved.is_file():
             raise ValueError("Only regular files can be quarantined.")
+        return resolved, calculate_file_sha256(resolved)
 
-        file_hash = calculate_file_sha256(resolved)
+    def quarantine_file(
+        self,
+        owner_id: UUID,
+        file_path: Path,
+        reason: str,
+        approved_by: UUID | None = None,
+        expected_sha256: str | None = None,
+    ) -> QuarantinedFile:
+        """Moves suspect file to quarantine directory with a .quarantine.bak extension."""
+        resolved, file_hash = self.inspect(file_path)
+        if expected_sha256 is not None and file_hash != expected_sha256:
+            raise ValueError("The file changed after it was approved for quarantine; it was not moved.")
         record_id = uuid4()
         dest_filename = f"{record_id.hex}_{resolved.name}.quarantine.bak"
         dest_path = self.quarantine_dir / dest_filename

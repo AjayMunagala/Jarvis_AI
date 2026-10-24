@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from starlette.concurrency import run_in_threadpool
 
 from jarvis.api.dependencies import authenticated_owner, enforce_capability
+from jarvis.audit.models import APPROVAL_ID_HELP, ApprovalRequiredResponse
 from jarvis.improvement.immutable import ImmutableSecurityFileError
 from jarvis.improvement.models import (
     BenchmarkSuiteResult,
@@ -23,7 +24,8 @@ from jarvis.models.schemas import ErrorResponse
 from jarvis.security.policy import Capability
 
 router = APIRouter(prefix="/improvement", tags=["improvement"])
-_ERRORS = {code: {"model": ErrorResponse} for code in (401, 403, 404, 422, 503)}
+_ERRORS = {code: {"model": ErrorResponse} for code in (401, 403, 404, 409, 422, 503)}
+_GATED = {**_ERRORS, 202: {"model": ApprovalRequiredResponse, "description": "Approval required; nothing was executed."}}
 
 
 def _owner(owner_id: UUID | None) -> UUID:
@@ -110,19 +112,20 @@ async def get_proposal(
 @router.post(
     "/proposals/{proposal_id}/decide",
     response_model=PromptMutationProposal,
-    responses=_ERRORS,
+    responses=_GATED,
 )
 async def decide_proposal(
     request: Request,
     proposal_id: UUID,
     body: ProposalDecisionRequest,
+    approval_id: str | None = Query(default=None, pattern=r"^AR-[a-f0-9]{16}$", description=APPROVAL_ID_HELP),
     owner_id: UUID | None = Depends(authenticated_owner),
 ) -> PromptMutationProposal:
     owner = _owner(owner_id)
     enforce_capability(request, owner, Capability.IMPROVEMENT_APPROVE)
     try:
         return await run_in_threadpool(
-            _service(request).decide_proposal, owner, proposal_id, body
+            _service(request).decide_proposal, owner, proposal_id, body, approval_id
         )
     except ValueError as exc:
         raise HTTPException(
@@ -134,18 +137,19 @@ async def decide_proposal(
 @router.post(
     "/proposals/{proposal_id}/restore",
     response_model=PromptMutationProposal,
-    responses=_ERRORS,
+    responses=_GATED,
 )
 async def restore_snapshot(
     request: Request,
     proposal_id: UUID,
+    approval_id: str | None = Query(default=None, pattern=r"^AR-[a-f0-9]{16}$", description=APPROVAL_ID_HELP),
     owner_id: UUID | None = Depends(authenticated_owner),
 ) -> PromptMutationProposal:
     owner = _owner(owner_id)
     enforce_capability(request, owner, Capability.IMPROVEMENT_APPROVE)
     try:
         return await run_in_threadpool(
-            _service(request).restore_snapshot, owner, proposal_id
+            _service(request).restore_snapshot, owner, proposal_id, approval_id
         )
     except ValueError as exc:
         raise HTTPException(

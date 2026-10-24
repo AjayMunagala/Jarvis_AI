@@ -11,7 +11,7 @@ const approval = (overrides: Partial<ApprovalRequest> = {}): ApprovalRequest => 
   approval_id: 'AR-0123456789abcdef', owner_id: 'o', category: 'browser', action: 'browser.click', target: 'https://site.example/ · Pay now',
   reason: 'Submits a form.', risk: 'consequential', expected_side_effects: 'May submit a payment.', scope_sha256: 'a'.repeat(64),
   correlation_id: null, created_at: '2026-10-17T10:00:00Z', expires_at: '2026-10-17T10:15:00Z', state: 'pending',
-  decided_at: null, decision_note: null, execution: 'not_available', durable: false, ...overrides,
+  decided_at: null, decision_note: null, execution: 'not_available', consumed_at: null, durable: false, ...overrides,
 })
 const approvals = (items: ApprovalRequest[], durable = false): ApprovalPage => ({
   durable_storage: durable, execution_note: 'Approving records your decision only.', approvals: items,
@@ -62,6 +62,22 @@ describe('ActivityPanel', () => {
     expect(decideApproval).toHaveBeenCalledWith('AR-0123456789abcdef', true, undefined, auth)
     expect(await screen.findByText('AR-0123456789abcdef approved. Nothing was executed.')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByText('No pending approval requests.')).toBeInTheDocument())
+  })
+
+  it('explains that an enforced approval allows one run and shows whether it was used', async () => {
+    const gated = approval({ category: 'quarantine', action: 'security.quarantine', execution: 'single_use' })
+    vi.mocked(getActivity).mockResolvedValue(activity())
+    vi.mocked(getApprovals).mockResolvedValueOnce(approvals([gated])).mockResolvedValue(approvals([
+      approval({ ...gated, approval_id: 'AR-1111111111111111', state: 'approved', decided_at: '2026-10-17T10:01:00Z', consumed_at: '2026-10-17T10:02:00Z' }),
+      approval({ ...gated, approval_id: 'AR-2222222222222222', state: 'approved', decided_at: '2026-10-17T10:01:00Z' }),
+    ]))
+    vi.mocked(decideApproval).mockResolvedValue({ ...gated, state: 'approved' })
+    render(<ActivityPanel auth={auth} onUnlock={() => undefined} />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Approve (allows one run)' }))
+    expect(await screen.findByText(/Nothing has run yet: repeat the action with approval_id=AR-0123456789abcdef/)).toBeInTheDocument()
+    await userEvent.click(await screen.findByText('Decided and expired (2)'))
+    expect(screen.getByText(/execution: used once at/)).toBeInTheDocument()
+    expect(screen.getByText(/execution: approved, not used yet/)).toBeInTheDocument()
   })
 
   it('reports rejection failures without changing state', async () => {

@@ -5,8 +5,18 @@
   and the failure is counted; it is never reported as durable.
 - ``ApprovalService.request`` records an approval request for an action the
   system refused to run (``approval_required``). ``approve``/``reject`` decide a
-  pending, unexpired, owner-scoped request exactly once. **Nothing is executed**
-  on approval in v2.9; every decision is audited.
+  pending, unexpired, owner-scoped request exactly once. Deciding never
+  executes anything; every decision is audited.
+- v4.3 enforcement: ``run_approved`` guards an enforced action (autonomous
+  writes, improvement apply/restore, quarantine/restore). Without an approval
+  ID it records a pending request bound to a SHA-256 of the exact action and
+  raises ``ApprovalRequired`` (HTTP 202); nothing runs. With the ID of an
+  approved request for the same action and scope, it marks the request used
+  (once, atomically) and then runs the action, auditing the outcome. A request
+  for a different action or a changed target, a pending, rejected, expired or
+  already-used request, and a request approved longer ago than the approval
+  window are refused with HTTP 409. If the gateway is missing or cannot store
+  the request, nothing runs (HTTP 503).
 """
 
 import hashlib
@@ -14,16 +24,24 @@ import logging
 import secrets
 import threading
 from datetime import datetime, timedelta, timezone
+from typing import Callable, TypeVar
 from uuid import UUID
 
-from jarvis.audit.models import ActivityPage, ApprovalPage, ApprovalProposal, ApprovalRequest, AuditRecord
+from jarvis.audit.models import (ActivityPage, ApprovalPage, ApprovalProposal, ApprovalRequest, AuditRecord,
+                                 execution_for)
 from jarvis.audit.stores import MemoryApprovalStore, MemoryAuditStore, StorageError
 from jarvis.core.correlation import get_correlation_id
 from jarvis.repo.secret_redactor import redact_secrets
 
 logger = logging.getLogger(__name__)
-EXECUTION_NOTE = ("Approving records your decision only. In this version nothing is executed after approval; "
-                  "execution requires a separately reviewed isolation design.")
+EXECUTION_NOTE = ("Approving a tool or browser request records your decision only; nothing is executed. "
+                  "Autonomous, improvement and quarantine actions wait for your approval: once approved, the action "
+                  "runs once, when it is submitted again with its approval ID within the approval window.")
+T = TypeVar("T")
+
+
+def scope_hash(category: str, action: str, scope_material: str) -> str:
+    return hashlib.sha256(f"{category}|{action}|{scope_material}".encode("utf-8", "replace")).hexdigest()
 
 
 def now_utc() -> datetime:
@@ -98,6 +116,14 @@ class ApprovalError(Exception):
         self.public_message = message
 
 
+class ApprovalRequired(Exception):
+    """The action was not run: it waits for the owner to approve ``request`` (HTTP 202)."""
+
+    def __init__(self, request: ApprovalRequest):
+        super().__init__(request.approval_id)
+        self.request = request
+
+
 class ApprovalService:
     def __init__(self, store, audit: AuditService, *, ttl_seconds: int, max_pending: int = 100):
         self.store = store
@@ -112,9 +138,7 @@ class ApprovalService:
     def request(self, owner_id: UUID, proposal: ApprovalProposal) -> ApprovalRequest | None:
         """Record a pending approval; returns None (and audits) if it cannot be stored."""
         created = now_utc()
-        scope = hashlib.sha256(
-            f"{proposal.category}|{proposal.action}|{proposal.scope_material}".encode("utf-8", "replace")
-        ).hexdigest()
+        scope = scope_hash(proposal.category, proposal.action, proposal.scope_material)
         try:
             self.store.expire(owner_id, now=created)
             pending = self.store.list(owner_id, limit=self.max_pending + 1, state="pending")
@@ -131,7 +155,8 @@ class ApprovalService:
                 action=proposal.action, target=_clean(proposal.target, 300), reason=_clean(proposal.reason, 500),
                 risk=proposal.risk, expected_side_effects=_clean(proposal.expected_side_effects, 300),
                 scope_sha256=scope, correlation_id=proposal.correlation_id, created_at=_iso(created),
-                expires_at=_iso(created + self.ttl), state="pending", durable=self.durable,
+                expires_at=_iso(created + self.ttl), state="pending", execution=execution_for(proposal.category),
+                durable=self.durable,
             )
             self.store.create(request)
         except StorageError:
@@ -180,3 +205,73 @@ class ApprovalService:
                           decision=state, status=state, subject=updated.action, correlation_id=updated.correlation_id,
                           details={"approval_id": approval_id, "executed": False})
         return updated
+
+    # ------------------------------------------------------------ v4.3 enforcement
+
+    def consume(self, owner_id: UUID, approval_id: str, proposal: ApprovalProposal) -> ApprovalRequest:
+        """Mark an approved request for exactly this action and scope as used, or raise ApprovalError."""
+        current = self.get(owner_id, approval_id)  # 404 for unknown/foreign ids; expires stale requests
+        now = now_utc()
+        scope = scope_hash(proposal.category, proposal.action, proposal.scope_material)
+        if (current.category, current.action, current.scope_sha256) != (proposal.category, proposal.action, scope):
+            problem = ("The approval was granted for a different action or target, or the target has changed since "
+                       "it was requested. Nothing was executed.")
+        elif current.state == "pending":
+            problem = "The approval request is still waiting for your decision. Nothing was executed."
+        elif current.state != "approved":
+            problem = f"The approval request is {current.state}. Nothing was executed."
+        elif current.consumed_at is not None:
+            problem = "The approval has already been used; each approval runs its action once. Nothing was executed."
+        elif current.decided_at is None or datetime.fromisoformat(current.decided_at) + self.ttl <= now:
+            problem = "The approval window has ended; request a new approval. Nothing was executed."
+        else:
+            problem = None
+        updated = None
+        if problem is None:
+            try:
+                updated = self.store.consume(owner_id, approval_id, category=proposal.category, action=proposal.action,
+                                             scope_sha256=scope, now=now, decided_after=now - self.ttl)
+            except StorageError as exc:
+                raise ApprovalError(503, "Approval storage is unavailable. Nothing was executed.") from exc
+            if updated is None:  # lost a race with another use of the same approval
+                problem = "The approval could not be used; it was used or changed concurrently. Nothing was executed."
+        if updated is None:
+            self.audit.record(owner_id=owner_id, category="approval", event_type="approval_use_refused",
+                              decision="denied", status=current.state, subject=proposal.action,
+                              details={"approval_id": approval_id, "category": proposal.category})
+            raise ApprovalError(409, problem)
+        self.audit.record(owner_id=owner_id, category="approval", event_type="approval_used", decision="allowed",
+                          status="consumed", subject=proposal.action,
+                          details={"approval_id": approval_id, "category": proposal.category})
+        return updated
+
+    def record_outcome(self, owner_id: UUID, approval: ApprovalRequest, *, succeeded: bool,
+                       error_type: str | None = None) -> None:
+        details = {"approval_id": approval.approval_id, "executed": True}
+        if error_type:
+            details["error_type"] = error_type
+        self.audit.record(owner_id=owner_id, category="approval",
+                          event_type="approved_action_succeeded" if succeeded else "approved_action_failed",
+                          decision="allowed", status="succeeded" if succeeded else "failed", subject=approval.action,
+                          details=details)
+
+
+def run_approved(approvals: "ApprovalService | None", owner_id: UUID, proposal: ApprovalProposal,
+                 approval_id: str | None, action: Callable[[], T]) -> T:
+    """Run ``action`` only under an approved, unused request for exactly this proposal (v4.3)."""
+    if approvals is None:
+        raise ApprovalError(503, "The approval gateway is unavailable, so nothing was executed.")
+    if approval_id is None:
+        request = approvals.request(owner_id, proposal)
+        if request is None:
+            raise ApprovalError(503, "The approval request could not be recorded (storage unavailable or too many "
+                                     "pending requests), so nothing was executed.")
+        raise ApprovalRequired(request)
+    approval = approvals.consume(owner_id, approval_id, proposal)
+    try:
+        result = action()
+    except Exception as exc:
+        approvals.record_outcome(owner_id, approval, succeeded=False, error_type=type(exc).__name__)
+        raise
+    approvals.record_outcome(owner_id, approval, succeeded=True)
+    return result

@@ -229,7 +229,7 @@ def fake_connect(log, rows=(), fail=False):
 def approval_row(state="pending"):
     now = datetime.now(timezone.utc)
     return ("AR-" + "a" * 16, OWNER, "tool", "files.write", "files.write", "r", "high", "fx", "c" * 64, None,
-            now, now + timedelta(minutes=15), state, now if state != "pending" else None, None)
+            now, now + timedelta(minutes=15), state, now if state != "pending" else None, None, None)
 
 
 def test_postgres_decision_is_one_conditional_owner_scoped_update():

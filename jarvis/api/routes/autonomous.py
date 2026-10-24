@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from starlette.concurrency import run_in_threadpool
 
 from jarvis.api.dependencies import authenticated_owner, enforce_capability
+from jarvis.audit.models import ApprovalRequiredResponse
 from jarvis.autonomous.coordinator import AutonomousCoordinator
 from jarvis.autonomous.models import (
     AutonomousCommandRequest,
@@ -19,7 +20,8 @@ from jarvis.models.schemas import ErrorResponse
 from jarvis.security.policy import Capability
 
 router = APIRouter(prefix="/autonomous", tags=["autonomous"])
-_ERRORS = {code: {"model": ErrorResponse} for code in (401, 403, 404, 422, 503)}
+_ERRORS = {code: {"model": ErrorResponse} for code in (401, 403, 404, 409, 422, 503)}
+_ERRORS[202] = {"model": ApprovalRequiredResponse, "description": "Approval required; nothing was executed."}
 
 
 def _owner(owner_id: UUID | None) -> UUID:

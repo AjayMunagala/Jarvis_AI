@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from approval_flow import approve_over_http
 from jarvis.core.config import Settings
 from jarvis.main import create_app
 from jarvis.security.policy import Capability, CapabilityPolicy
@@ -124,7 +125,8 @@ def test_file_quarantine_and_restore_api(client):
             "file_path": str(suspect),
             "reason": "Anomalous raw socket opening detected in untrusted script",
         }
-        q_res = client.post("/health/security/quarantine", json=payload)
+        q_res = approve_over_http(client, lambda approval_id: client.post(
+            "/health/security/quarantine", json=payload, params={"approval_id": approval_id} if approval_id else {}))
         assert q_res.status_code == 201
         record = q_res.json()
         record_id = record["id"]
@@ -137,7 +139,8 @@ def test_file_quarantine_and_restore_api(client):
         assert list_res.json()["total"] == 1
 
         # Restore file
-        restore_res = client.post(f"/health/security/quarantined/{record_id}/restore")
+        restore_res = approve_over_http(client, lambda approval_id: client.post(
+            f"/health/security/quarantined/{record_id}/restore", params={"approval_id": approval_id} if approval_id else {}))
         assert restore_res.status_code == 200
         restored = restore_res.json()
         assert restored["restored_at"] is not None

@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+from jarvis.audit.models import ApprovalProposal
+from jarvis.audit.service import run_approved
 from jarvis.health.models import (
     DiagnosticReport,
     HealthSnapshot,
@@ -32,6 +34,7 @@ class HealthService:
     ) -> None:
         self.store = store
         self.repo_root = repo_root or Path.cwd()
+        self.approval_service: Any = None  # v4.3: quarantine and restore run only under an approved request
         q_dir = quarantine_dir or (self.repo_root / ".quarantine")
         self.quarantine_manager = QuarantineManager(q_dir, allowed_root=self.repo_root)
         self.audit_service = audit_service
@@ -127,14 +130,26 @@ class HealthService:
         self,
         owner_id: UUID,
         req: QuarantineRequest,
-        approved_by: UUID | None = None,
+        approval_id: str | None = None,
     ) -> QuarantinedFile:
-        target_path = Path(req.file_path)
+        """Quarantine one repository file once the owner approved exactly this file content (v4.3)."""
+        resolved, file_hash = self.quarantine_manager.inspect(Path(req.file_path))
+        display = self.quarantine_manager.display_path(resolved)
+        proposal = ApprovalProposal(
+            category="quarantine", action="security.quarantine", target=display, reason=req.reason, risk="medium",
+            expected_side_effects="Moves the file out of the repository into the quarantine directory; it can be restored.",
+            scope_material=f"{display}|{file_hash}|{req.reason}",
+        )
+        return run_approved(self.approval_service, owner_id, proposal, approval_id,
+                            lambda: self._quarantine(owner_id, req, resolved, file_hash))
+
+    def _quarantine(self, owner_id: UUID, req: QuarantineRequest, resolved: Path, file_hash: str) -> QuarantinedFile:
         record = self.quarantine_manager.quarantine_file(
             owner_id=owner_id,
-            file_path=target_path,
+            file_path=resolved,
             reason=req.reason,
-            approved_by=approved_by,
+            approved_by=owner_id,
+            expected_sha256=file_hash,
         )
         self.store.save_quarantined_file(record)
         self._audit(
@@ -146,12 +161,23 @@ class HealthService:
         return record
 
     def restore_quarantined_file(
-        self, owner_id: UUID, record_id: UUID
+        self, owner_id: UUID, record_id: UUID, approval_id: str | None = None
     ) -> QuarantinedFile:
         record = self.store.get_quarantined_file(owner_id, record_id)
         if not record:
             raise ValueError(f"Quarantined record {record_id} not found.")
+        if record.restored_at is not None:
+            raise ValueError(f"Quarantined record {record_id} was already restored.")
+        display = self.quarantine_manager.display_path(record.original_path)
+        proposal = ApprovalProposal(
+            category="quarantine", action="security.restore", target=display,
+            reason=f"Restore the quarantined file to {display}", risk="medium",
+            expected_side_effects="Moves the quarantined file back to its original location; nothing is overwritten.",
+            scope_material=f"{record.id}|{record.hash_sha256}|{display}",
+        )
+        return run_approved(self.approval_service, owner_id, proposal, approval_id, lambda: self._restore(owner_id, record))
 
+    def _restore(self, owner_id: UUID, record: QuarantinedFile) -> QuarantinedFile:
         restored_record = self.quarantine_manager.restore_file(record)
         self.store.update_quarantined_file(restored_record)
         self._audit(

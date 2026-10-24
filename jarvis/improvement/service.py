@@ -2,11 +2,14 @@
 
 from datetime import datetime, timezone
 import difflib
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+from jarvis.audit.models import ApprovalProposal
+from jarvis.audit.service import run_approved
 from jarvis.improvement.immutable import resolve_improvement_target
 from jarvis.improvement.models import (
     BenchmarkSuiteResult,
@@ -19,6 +22,10 @@ from jarvis.improvement.sandbox import run_offline_benchmarks
 from jarvis.improvement.stores import ImprovementStore
 
 logger = logging.getLogger(__name__)
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def generate_unified_diff(original: str, proposed: str, filename: str) -> str:
@@ -44,6 +51,7 @@ class ImprovementService:
         self.store = store
         self.repo_root = repo_root or Path.cwd()
         self.audit_service = audit_service
+        self.approval_service: Any = None  # v4.3: apply and restore run only under an approved request
         # In-memory registry for mock/virtual target contents (e.g. prompt templates)
         self._target_storage: dict[str, str] = {
             "prompts/assistant_persona.md": "You are JARVIS, a helpful, secure AI personal assistant.",
@@ -127,14 +135,32 @@ class ImprovementService:
         return ProposalPage(items=items, total=total)
 
     def decide_proposal(
-        self, owner_id: UUID, proposal_id: UUID, req: ProposalDecisionRequest
+        self, owner_id: UUID, proposal_id: UUID, req: ProposalDecisionRequest, approval_id: str | None = None
     ) -> PromptMutationProposal:
         proposal = self.store.get_proposal(owner_id, proposal_id)
         if not proposal:
             raise ValueError(f"Proposal {proposal_id} not found.")
         if proposal.status != "pending":
             raise ValueError(f"Proposal {proposal_id} is already {proposal.status}.")
+        if req.decision != "approved":
+            return self._decide(owner_id, proposal, req)
+        # v4.3: applying writes the target, so it needs an approved request bound to this exact change.
+        if self.get_target_content(proposal.target_name) != proposal.original_content:
+            raise ValueError("The target has changed since this proposal was made; nothing was applied. "
+                             "Create a new proposal.")
+        approval = ApprovalProposal(
+            category="improvement", action="improvement.apply", target=proposal.target_name,
+            reason=proposal.rationale[:500], risk="high",
+            expected_side_effects=f"Replaces the content of {proposal.target_name}; a restore snapshot is saved first."[:300],
+            scope_material=f"{proposal.id}|{proposal.target_name}|{_sha(proposal.original_content)}|"
+                           f"{_sha(proposal.proposed_content)}",
+        )
+        return run_approved(self.approval_service, owner_id, approval, approval_id,
+                            lambda: self._decide(owner_id, proposal, req))
 
+    def _decide(
+        self, owner_id: UUID, proposal: PromptMutationProposal, req: ProposalDecisionRequest
+    ) -> PromptMutationProposal:
         now = datetime.now(timezone.utc)
         snapshot_id = None
 
@@ -168,7 +194,7 @@ class ImprovementService:
         return updated
 
     def restore_snapshot(
-        self, owner_id: UUID, proposal_id: UUID
+        self, owner_id: UUID, proposal_id: UUID, approval_id: str | None = None
     ) -> PromptMutationProposal:
         proposal = self.store.get_proposal(owner_id, proposal_id)
         if not proposal:
@@ -181,6 +207,18 @@ class ImprovementService:
             raise ValueError(f"Snapshot data for {proposal.snapshot_id} not found.")
 
         target_name, original_content = snapshot
+        current = self.get_target_content(target_name)
+        approval = ApprovalProposal(
+            category="improvement", action="improvement.restore", target=target_name,
+            reason=f"Restore {target_name} to its content before proposal {proposal.id}"[:500], risk="high",
+            expected_side_effects=f"Replaces the current content of {target_name} with the saved snapshot."[:300],
+            scope_material=f"{proposal.id}|{proposal.snapshot_id}|{_sha(current)}|{_sha(original_content)}",
+        )
+        return run_approved(self.approval_service, owner_id, approval, approval_id,
+                            lambda: self._restore(owner_id, proposal, target_name, original_content))
+
+    def _restore(self, owner_id: UUID, proposal: PromptMutationProposal, target_name: str,
+                 original_content: str) -> PromptMutationProposal:
         # 1-click rollback: restore original content
         self.set_target_content(target_name, original_content)
 

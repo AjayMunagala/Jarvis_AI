@@ -104,7 +104,8 @@ class StatusService:
             key="health", name="System health (v3.6)", state="operational" if complete else "limited",
             storage=_storage(getattr(self.state, "health_service", None)), checks=checks,
             limitations=(() if complete else ("Unmeasurable metrics are reported as null.",))
-            + ("Quarantine is a move with a SHA-256 check, not encryption; approval is self-approval until v4.3.",))
+            + ("Quarantine is a move with a SHA-256 check, not encryption.",
+               "Quarantine and restore wait for an approved request (v4.3)."))
 
     # ------------------------------------------------------------ report
 
@@ -131,7 +132,9 @@ class StatusService:
                             limitations=(("Some records could only be kept in memory.",) if audit_failures else ())),
             SubsystemReport(key="approvals", name="Approval gateway", state="operational",
                             storage=_storage(getattr(state, "approval_service", None)),
-                            limitations=("Approving records the decision only; nothing is executed.",)),
+                            limitations=("Tool and browser approvals record the decision only; nothing is executed.",
+                                         "Autonomous writes, improvement apply/restore and quarantine/restore run "
+                                         "once after approval, when resubmitted with the approval ID (v4.3).")),
             SubsystemReport(key="tools", name="Read-only tool runtime",
                             state="operational" if settings.tools_enabled else "disabled"),
             SubsystemReport(key="chat_tools", name="Chat tool use",
@@ -170,9 +173,10 @@ class StatusService:
             SubsystemReport(key="improvement", name="Controlled improvement (v3.9)", state="limited",
                             storage=_storage(getattr(state, "improvement_service", None)),
                             limitations=("Proposals and snapshots are kept in memory and lost on restart (v4.9).",
-                                         "Approval is self-approval (v4.3).")),
+                                         "Apply and restore wait for an approved request (v4.3).")),
             SubsystemReport(key="autonomous", name="Autonomous coordinator (v4.0)", state="limited",
-                            limitations=("Keyword intent routing.", "Writes without approval when dry_run is false (v4.3).")),
+                            limitations=("Keyword intent routing.",
+                                         "Commands with write steps wait for an approved request (v4.3).")),
         ]
         intelligence = getattr(state, "intelligence", None)
         if intelligence is not None:
